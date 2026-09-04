@@ -39,6 +39,12 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
   à la main.
 - Les montants du bandeau « live wins » sont produits par les vraies fonctions de paiement.
 
+## Historique
+
+`docs/HISTORIQUE.md` retrace les décisions prises, les pistes abandonnées et les bugs déjà
+rencontrés avec leur cause réelle. À lire avant de relancer un chantier (notamment le lobby
+mobile, tenté trois fois et abandonné) ou avant de rouvrir une décision d'équilibrage.
+
 ## Ce qui n'est pas réel
 
 Population en ligne, files d'attente, gains affichés, adversaires : **tout est simulé**. Le jour

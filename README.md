@@ -43,6 +43,8 @@ test.js                 harnais Node
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage
+docs/HISTORIQUE.md      journal de développement : décisions, pistes abandonnées, bugs
+docs/DEMANDES.md        les demandes d'origine, dans l'ordre
 docs/DEPLOY.md          mise en ligne
 docs/ICONS-PROMPTS.md   prompts de génération d'icônes
 ```
