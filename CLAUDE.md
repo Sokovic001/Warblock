@@ -19,7 +19,7 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `node test.js` après chaque modification.** 117 tests, aucune dépendance.
+- **Lancer `node test.js` après chaque modification.** 121 tests, aucune dépendance.
 - **Vérifier la syntaxe des blocs `<script>`** après une édition automatisée : une regex qui
   extrait les blocs puis `node --check` attrape les erreurs avant d'ouvrir le navigateur.
 - **Ne jamais mettre un commentaire `//` en fin d'une ligne existante** lors d'une édition par

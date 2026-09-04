@@ -1,6 +1,6 @@
 # WARBLOCK
 
-Battle royale en vue de dessus, avec mises. Deux jeux, dix brawlers, dix-sept mille lignes
+Battle royale en vue de dessus, avec mises. Deux jeux, dix brawlers, deux mille huit cents lignes
 dans **un seul fichier HTML**. Aucune dépendance à installer, aucun serveur : on ouvre
 `index.html` et on joue.
 
@@ -24,7 +24,7 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 117 tests, sans dépendance
+npm test        # 121 tests, sans dépendance
 ```
 
 Les règles du jeu vivent dans un bloc pur (`WBCore`) à l'intérieur de `index.html`, sans DOM ni

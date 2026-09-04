@@ -1,8 +1,8 @@
 # WARBLOCK — Showdown avec mises
 
-Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tu la ramasses en le tuant, le dernier debout empoche 20 × la mise.
+Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tu la ramasses en le tuant, le pot vaut 20 × la mise et le dernier debout en empoche **16 ×**, la maison prélevant 20 %.
 
-Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 39 tests sur les règles pures.
+Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 121 tests sur les règles pures.
 
 ## Lancer
 
@@ -26,14 +26,14 @@ Ouvre `index.html` dans Chrome. Choisis un brawler, une table, clique pour parti
 | **SHELL** | Brawler | 140 | 5 plombs en éventail, portée 7,5 | 9 plombs perforants + recul |
 | **BRICK** | Tank | 200 | 3 coups courts, portée 4,6 | onde de choc 80 dmg, rayon 3,2, projection |
 | **HEX** | Sniper | 85 | 1 balle, 30 → 84 dmg selon la distance, portée 15 | tir perforant 130 |
-| **PYRO** | Flamethrower | 130 | cône de 5 flammes, portée 5,5 | flaque de feu 4 s, 45 dmg/s, rayon 3 |
+| **PYRO** | Flamethrower | 145 | cône de 5 flammes, portée 5,5 | flaque de feu 4 s, 45 dmg/s, rayon 3 |
 | **MEDIC** | Support | 120 | vague large perforante, portée 8 | soin instantané 70 % PV |
 | **VOLT** | Demolition | 100 | bombe lobée **par-dessus les murs**, 60 dmg en zone (vise la distance du curseur) | grosse bombe 150 dmg, rayon 2,6 |
 | **GHOST** | Assassin | 95 | 4 lames, portée 6 — le plus rapide | invisibilité 5 s (attaquer la casse) |
 | **RUSH** | Melee | 170 | 2 coups lourds, portée 3 | dash de 7 blocs, 90 dmg à tout ce qu'il traverse |
-| **WARD** | Engineer | 110 | 1 gros carreau 58 dmg, portée 9 | tourelle 140 PV, 15 s, tire toute seule |
+| **WARD** | Engineer | 130 | 1 gros carreau 58 dmg, portée 8,5 | tourelle 140 PV, 15 s, tire toute seule |
 
-3 munitions rechargées une par une. Le super se charge en infligeant des dégâts (≈ 3–4 attaques complètes) — Espace, clic droit ou le gros bouton orange. Hors combat 3,5 s → régénération 6 % PV/s. Les bots choisissent un brawler au hasard et utilisent leur super selon sa nature (MEDIC se soigne quand il est bas, GHOST disparaît pour fuir ou engager, WARD pose sa tourelle dès qu'il voit quelqu'un…).
+3 munitions rechargées une par une. Le super se charge en infligeant des dégâts (≈ 3–4 attaques complètes) — Espace, clic droit ou le gros bouton orange. Hors combat 3 s → régénération 7,5 % PV/s. Les bots choisissent un brawler au hasard et utilisent leur super selon sa nature (MEDIC se soigne quand il est bas, GHOST disparaît pour fuir ou engager, WARD pose sa tourelle dès qu'il voit quelqu'un…).
 
 ## Vitesse de déplacement
 
@@ -54,7 +54,7 @@ La vitesse n'est plus écrite à la main : elle est **dérivée des PV et de la 
 
 Écart de 2,45 contre 1,4 avant : la différence se sent. Les décalages d'agilité sont volontaires et limités — GHOST +0,95 (un assassin doit pouvoir rattraper un sniper), HEX −0,55, RUSH +0,35 (assez pour engager, jamais assez pour fuir), BOLT et WARD −0,10.
 
-Cinq tests verrouillent la relation : la vitesse doit toujours égaler la formule, la corrélation PV/vitesse doit rester négative, l'écart doit dépasser 2, l'assassin doit être plus rapide que le sniper, et **aucun brawler ne doit dominer un autre à la fois en PV, portée et vitesse**. Ce dernier test a révélé deux vrais déséquilibres au passage (BOLT dominait WARD, SHELL dominait PYRO) : PYRO passe à 145 PV et WARD à 130 PV / portée 8,5, chacun payant en lenteur. La vitesse s'affiche sur les cartes du lobby (`SPD`).
+Huit tests verrouillent la relation : aucune vitesse écrite à la main ne doit subsister dans le littéral, la table dérivée est épinglée valeur par valeur, la corrélation PV/vitesse doit rester négative, plus de portée à PV égaux doit aller plus vite, les deux lourds de mêlée doivent fermer la marche, à fragilité égale le courte-portée doit être le plus rapide, l'écart doit dépasser 2, et **aucun brawler ne doit dominer un autre à la fois en PV, portée et vitesse**. Ce dernier test a révélé deux vrais déséquilibres au passage (BOLT dominait WARD, SHELL dominait PYRO) : PYRO passe à 145 PV et WARD à 130 PV / portée 8,5, chacun payant en lenteur. La vitesse s'affiche sur les cartes du lobby (`SPD`).
 
 ## Silhouettes
 
@@ -79,15 +79,15 @@ Chaque carte du lobby affiche le **modèle 3D réel** du brawler (couleur, chape
 
 ## La map
 
-**152 × 152 blocs** — deux fois plus grande par côté (quatre fois la surface) que la version précédente, pour que 50 joueurs aient de la place. Toujours générée à chaque partie, toujours connexe (vérifié par flood-fill : > 97 % des cases atteignables depuis le centre), avec la couronne de spawn, une croix centrale et deux routes circulaires taillées à la main pour qu'aucune poche ne soit murée.
+**152 × 152 blocs** — deux fois plus grande par côté (quatre fois la surface) que la version précédente, pour que 50 joueurs aient de la place. Toujours générée à chaque partie, et **entièrement** connexe : zéro case praticable coupée du centre, sur les 2000 graines balayées. La couronne de spawn, la croix centrale et les deux routes circulaires taillées à la main n'y suffisaient pas — au-delà de la couronne, la bande extérieure n'avait aucune voie propre, et la croix la découpait en quadrants. La graine 267 tombait ainsi à 95,26 %, avec le coin nord-ouest entier scellé, soit 877 cases. Une passe de réparation ferme désormais la question à la fin de `generateMap()` : elle libère les props qui emmurent, puis relie par le tunnel le plus court les poches fermées par les murs.
 
 ### Lire le terrain d'un coup d'œil
 
 Murs et buissons sont construits avec des **formes différentes**, pas seulement des couleurs :
 
 - **Murs (infranchissables)** — barres de 2 blocs minimum, corps sombre surmonté d'un chapeau clair légèrement débordant et cerné de noir, avec une tuile d'ombre au sol.
-- **Props (couverture basse)** — une caisse sur deux, un tonneau sur deux. Ils bloquent déplacements et tirs comme un mur, et ne sont posés que sur une case dont les quatre voisines sont dégagées (connexité vérifiée à 99,9 %).
-- **Buissons (cachette)** — touffes de feuilles à bouts arrondis sur un tapis sombre, 7 % de la map en massifs de 6 cases en médiane.
+- **Props (couverture basse)** — une caisse sur deux, un tonneau sur deux. Ils bloquent déplacements et tirs comme un mur, et ne sont posés que sur une case dont les quatre voisines sont dégagées. Cette garde empêche deux props de se toucher, mais elle ne suffit pas à garder la map ouverte : quatre props posés sur les diagonales d'une même case l'emmurent quand même — tous légaux puisque jamais orthogonalement adjacents — et un seul prop peut boucher un couloir d'une case de large. C'est la passe de réparation qui tient l'invariant, pas la garde de placement.
+- **Buissons (cachette)** — touffes de feuilles à bouts arrondis sur un tapis sombre, environ 10 % de la map (8,7 à 11,4 % selon la graine) en massifs de 6 cases en médiane.
 - **Sol** — grandes plages de couleur avec taches organiques au bruit, bordure sombre encadrant l'arène.
 
 ### Une seule scène : la ferme
@@ -148,7 +148,7 @@ Cliquer une table n'envoie plus directement sur la map : on passe d'abord par un
 
 En haut du lobby, un bandeau « LIVE WINS » façon casino fait défiler les paiements récents : pastille de couleur du brawler, pseudo, **mode complet — MAXWIN SOLO / DUO / TRIO ou RESURGENCE SOLO / DUO**, table, nombre de kills, et le montant en or. Le bandeau **défile en continu** vers la gauche avec un fondu au bord droit, une nouvelle entrée apparaissant toutes les 1,4 à 3,6 secondes ; les cartes Resurgence sont rouges, les Maxwin bleues. Il s'amorce dès le chargement du script et tient sa propre horloge, indépendamment de l'ordre de rendu du lobby, et se réalimente automatiquement dès que la bande n'est plus pleine.
 
-Les pseudos sont inventés, **mais aucun montant ne l'est** : chaque gain est recalculé par les fonctions de paiement du jeu lui-même. Un gain Maxwin est exactement `teamPayout().split` pour ce mode et cette table ; un gain Resurgence est `cashoutPayout()` sur un bucket égal à sa propre mise plus celles de ses victimes. Cinq tests le vérifient sur des centaines d'événements, dont un qui garantit qu'aucun gain affiché ne peut dépasser le pot total de sa table.
+Les pseudos sont inventés, **mais aucun montant ne l'est** : chaque gain est recalculé par les fonctions de paiement du jeu lui-même. Un gain Maxwin est exactement `teamPayout().split` pour ce mode et cette table ; un gain Resurgence est `cashoutPayout()` sur un bucket égal à sa propre mise plus celles de ses victimes. Six tests le vérifient sur des centaines d'événements, dont un qui garantit que la fréquence des tables reste décroissante, de $0,50 vers $10.
 
 La fréquence des tables suit la même répartition que les files d'attente — on voit beaucoup de gains à $0,50 et rarement à $10.
 
@@ -156,7 +156,7 @@ La fréquence des tables suit la même répartition que les files d'attente — 
 
 Le lobby affiche une population en ligne, une répartition par jeu et une file d'attente par table. **Rien de tout ça n'est réel** : il n'y a pas encore de matchmaking, tous les adversaires sont des bots. Le compteur est piloté par `onlineTotal()` pour bouger de façon crédible plutôt qu'au hasard :
 
-- courbe jour/nuit en cosinus, pic à 21 h locale, creux vers 9 h (≈ 6 800 contre ≈ 21 800 sur cette base) ;
+- courbe jour/nuit en cosinus, pic à 21 h locale, creux vers 9 h (base 14 200 ± 55 %, soit ≈ 6 400 contre ≈ 22 000) ;
 - bonus week-end de 18 % ;
 - dérive déterministe à la minute : la même minute donne toujours le même nombre, donc l'affichage ne clignote pas entre deux rafraîchissements ;
 - plancher à 120 joueurs — la nuit est calme, jamais morte.
@@ -179,7 +179,7 @@ Deux variantes, **50 joueurs sur la map dans les deux cas** :
 - **DUO** — 25 équipes de 2. **Respawn tant que ton partenaire est en vie** (le nom du mode, littéralement), pas de tir allié, mais **chacun encaisse son propre bucket** : si ton partenaire banque et part, tu continues seul et tu ne respawnes plus.
 
 Règles communes aux deux :
-- **50 joueurs**, gaz qui se referme presque deux fois plus vite (match ≈ 1 min 20) et 70 caisses au lieu de 44.
+- **50 joueurs**, gaz qui se referme presque deux fois plus vite (match ≈ 1 min 20) et 150 caisses au lieu de 90.
 - **Transfert instantané** : tuer quelqu'un verse *immédiatement* tout son bucket dans le tien — sa mise plus tout ce qu'il avait lui-même récupéré. Rien ne tombe par terre, personne ne peut te le voler entre-temps.
 - **Cash out quand tu veux** : bouton vert au centre (touche `C` au clavier, tap sur mobile). Tu quittes la partie avec exactement le contenu de ton bucket, crédité au wallet.
 - **Verrou de 10 s** : le bouton se bloque et passe au gris avec un compte à rebours dès que tu prends **un dégât** (tir, gaz, explosion) **ou** que tu viens de **tuer quelqu'un**. Impossible de frapper puis de fuir dans la seconde.
@@ -195,7 +195,7 @@ L'économie est conservative : la somme des buckets encaissés et des buckets en
 - **MAXWIN** — sur le pot avant partage. Table $5 en Trio : pot $150 → maison $30 → gagnants $120 → **$40 chacun**.
 - **RESURGENCE** — sur le bucket à chaque cash out, quel qu'il soit. Bucket $2 (une mise à $0,50 plus trois kills) → maison $0,40 → **tu reçois $1,60**.
 
-Les montants affichés en jeu sont toujours le **net** : le bouton de cash out annonce ce que tu touches réellement, jamais le brut. L'écran de fin détaille la ligne « House cut (20%) ». Toute la chaîne de paiement travaille **au centime** (`cents()`), pour que les mises sous le dollar ne soient pas arrondies au passage. Les tables sont calibrées pour que le partage après commission tombe juste en Duo et en Trio — aucun arrondi ne mange un centime (vérifié par test sur les 4 tables × 4 modes).
+Les montants affichés en jeu sont toujours le **net** : le bouton de cash out annonce ce que tu touches réellement, jamais le brut. L'écran de fin détaille la ligne « House cut (20%) ». Toute la chaîne de paiement travaille **au centime** (`cents()`), pour que les mises sous le dollar ne soient pas arrondies au passage. Les tables sont calibrées pour que le partage après commission tombe juste en Duo et en Trio — aucun arrondi ne mange un centime (vérifié par test sur les 4 tables × 5 modes).
 
 ## Vies
 
@@ -213,7 +213,7 @@ Détails :
 ## Modes MAXWIN
 
 - **SOLO** — 20 joueurs, chacun pour soi. Le dernier debout prend tout le pot.
-- **DUO** — 10 équipes de 2 (toi + 1 coéquipier IA). **Respawn en 8 s tant que ton partenaire est en vie** (tu observes en attendant) ; ta mise et tes cubes tombent au sol à chaque mort, récupérables par n'importe qui. Les vainqueurs se partagent le pot à parts égales.
+- **DUO** — 10 équipes de 2 (toi + 1 coéquipier IA). **Respawn en 5 s tant que ton partenaire est en vie** (tu observes en attendant) ; ta mise et tes cubes tombent au sol à chaque mort, récupérables par n'importe qui. Les vainqueurs se partagent le pot à parts égales.
 - **TRIO** — 10 équipes de 3, donc 30 mises dans le pot. Même règles ; ta part = pot ÷ 3.
 
 Pas de tir allié (balles, supers, flaques, tourelles, dash — rien ne touche ton équipe). Les coéquipiers IA restent groupés avec toi et défendent. Barres de vie alliées en cyan, ennemies en rouge. Le compteur en haut affiche les **équipes restantes** en Duo/Trio.
@@ -224,8 +224,8 @@ Pas de tir allié (balles, supers, flaques, tourelles, dash — rien ne touche t
 - **Régénération** : hors combat depuis 3 s, 7,5 % des PV max par seconde — un BOLT tombé à 30 PV revient au plein en 12,7 s. Les gains s'affichent en vert au-dessus de la tête, par paliers, pour qu'on voie que ça monte.
 - **Buissons** : invisible dedans sauf à moins de 2,5 blocs (ou ligne de vue directe). Les murs bloquent les tirs et les déplacements.
 - **Kill** : la victime lâche un **sac d'or** (toute sa mise + ce qu'elle avait ramassé) et **tous ses cubes**. Ramassage automatique en marchant dessus — n'importe qui peut voler.
-- **Gaz** : 4 phases (25 s d'attente → 30 s de fermeture…), dégâts en % des PV max (4 → 16 %/s). Match < 2 min 30 après la protection de 8 s.
-- **Tables** : $0,50 STREET · $1 PRO · $5 ELITE · $10 SHARK. Le matchmaking ne mélange jamais les mises. La qualité de visée des bots monte avec la table (erreur angulaire max 23° → 8°), avec 0,55 s de réaction et une cadence 1,35× plus lente que la tienne.
+- **Gaz** : 4 phases (25 s d'attente → 34 s de fermeture, puis 18+26, 12+18, 8+13 — 154 s en tout), dégâts en % des PV max (4 → 16 %/s). Match < 2 min 30 après la protection de 8 s.
+- **Tables** : $0,50 STREET · $1 PRO · $5 ELITE · $10 SHARK. Le matchmaking ne mélange jamais les mises. La qualité de visée des bots monte avec la table (erreur angulaire max 13,2° à STREET → 4,3° à SHARK, soit un cône de 26,5° puis 8,7°), avec 0,55 s de réaction et une cadence 1,35× plus lente que la tienne.
 
 ## Réglages
 

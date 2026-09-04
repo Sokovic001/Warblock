@@ -2843,6 +2843,11 @@ function loop(now){
     hudFast(); G.hudT-=dt; if(G.hudT<=0){ G.hudT=0.08; hud(); }
   }
   for(let i=G.fx.length-1;i>=0;i--){ const f=G.fx[i]; f.life-=dt; f.mesh.material.opacity=Math.max(0,f.life/f.max)*0.7; f.mesh.scale.setScalar(1+(1-f.life/f.max)*0.4); if(f.life<=0){ world.remove(f.mesh); G.fx.splice(i,1); } }
+  // Frame-rate watchdog, measured on every frame including the countdown and the pause screen.
+  // Its call site had been lost in an edit, which left the whole adaptive-quality subsystem dead:
+  // the pixel ratio never stepped down on a slow device, AUTO could never climb back after a
+  // manual pick, and the pause panel kept printing the initial 60 FPS.
+  adaptRes(dt);
   renderer.render(scene,camera);
   rafId=(G.running||$('game').style.display==='block')?requestAnimationFrame(loop):0;
 }
