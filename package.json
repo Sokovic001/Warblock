@@ -9,8 +9,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "jsdom": "^30.0.1"
   }
 }
