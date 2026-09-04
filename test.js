@@ -497,6 +497,18 @@ test('a box breaks in at most two full attacks for every brawler', () => { for (
 test('bots drop their cubes on death (loot is transferable, like stakes)', () => assert.strictEqual(C.BOT.dropCubesOnKill, true));
 
 console.log('Map');
+// Counts walkable cells the player can never stand on because nothing links them to the centre.
+// Zero is the only acceptable answer: a percentage bar tolerated a sealed room and hid the bug.
+const unreachable = seed => {
+  const m = C.generateMap(seed), N = C.MAP, seen = new Uint8Array(N*N), start = (N>>1)*N+(N>>1);
+  const q = [start]; seen[start] = 1;
+  for (let qi=0; qi<q.length; qi++){ const cur=q[qi], x=(cur/N)|0, z=cur%N;
+    for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx, nz=z+dz;
+      if (nx<0||nz<0||nx>=N||nz>=N) continue;
+      const i=nx*N+nz; if (seen[i]||C.BLOCKING(m[i])) continue; seen[i]=1; q.push(i); } }
+  let lost = 0; for (let i=0;i<m.length;i++) if (!C.BLOCKING(m[i]) && !seen[i]) lost++;
+  return lost;
+};
 test('map is MAP×MAP with only floor / wall / bush / prop cells, deterministic per seed', () => { const a = C.generateMap(11), b = C.generateMap(11); assert.strictEqual(a.length, C.MAP*C.MAP); assert.deepStrictEqual(Array.from(a), Array.from(b)); for (const c of a) assert.ok(c===0||c===1||c===2||c===3); });
 test('walls and props block, bushes never do', () => { assert.ok(C.BLOCKING(1)); assert.ok(C.BLOCKING(3)); assert.ok(!C.BLOCKING(0)); assert.ok(!C.BLOCKING(2)); });
 test('props are sparse cover, never a maze', () => { for (const seed of [3,9,44]){ const m = C.generateMap(seed); let p=0; for (const c of m) if (c===3) p++; assert.ok(p/m.length > 0.002 && p/m.length < 0.04, `seed ${seed}: ${(p/m.length*100).toFixed(1)}%`); } });
@@ -516,11 +528,17 @@ test('no two props touch: every prop keeps open floor on all four sides', () => 
 test('border is walled', () => { const m = C.generateMap(3), N = C.MAP; for (let i=0;i<N;i++){ assert.strictEqual(m[i], 1); assert.strictEqual(m[i*N], 1); assert.strictEqual(m[(N-1)*N+i], 1); assert.strictEqual(m[i*N+N-1], 1); } });
 test('spawn ring and centre are walkable', () => { const m = C.generateMap(5), N = C.MAP, cx=N/2, cz=N/2; for (let i=0;i<20;i++){ const a=i/20*Math.PI*2; const x=Math.floor(cx+Math.cos(a)*N*0.42), z=Math.floor(cz+Math.sin(a)*N*0.42); assert.notStrictEqual(m[x*N+z], 1, `spawn ${i}`); } assert.strictEqual(m[Math.floor(cx)*N+Math.floor(cz)], 0); });
 test('map mixes cover: 8–30% walls, 5–30% bushes', () => { for (const seed of [1,2,3,4,5]){ const m = C.generateMap(seed); let w=0,b=0; for (const c of m){ if(c===1) w++; if(c===2) b++; } const n=m.length; assert.ok(w/n>0.08 && w/n<0.30, `walls ${(w/n).toFixed(2)} seed ${seed}`); assert.ok(b/n>0.05 && b/n<0.30, `bushes ${(b/n).toFixed(2)} seed ${seed}`); } });
-test('every floor cell is reachable from the centre (no sealed pockets larger than noise)', () => {
-  const m = C.generateMap(9), N = C.MAP; const seen = new Uint8Array(N*N); const q=[[N/2|0,N/2|0]]; seen[q[0][0]*N+q[0][1]]=1; let reach=0, floor=0;
-  // walked through props as if they were floor, which is exactly the case this test is named for
-  while(q.length){ const [x,z]=q.pop(); reach++; for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx,nz=z+dz; if(nx<0||nz<0||nx>=N||nz>=N) continue; const i=nx*N+nz; if(!seen[i]&&!C.BLOCKING(m[i])){ seen[i]=1; q.push([nx,nz]); } } }
-  for (const c of m) if (!C.BLOCKING(c)) floor++; assert.ok(reach/floor > 0.97, `${(reach/floor*100).toFixed(1)}% reachable`);
+test('no cell is ever walled off, swept across seeds', () => {
+  // The old version read seed 9 alone — 99.97%, comfortably over its 97% bar — while the real
+  // seed is drawn at random every match. These four failed that bar outright: 186 at 96.72%,
+  // 267 at 95.26% with a single sealed pocket of 877 cells, 1316 at 95.38%, 1354 at 96.87%.
+  for (const seed of [186, 267, 1316, 1354]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
+  for (let seed=0; seed<120; seed++) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
+});
+test('a prop adds cover but never seals a cell off', () => {
+  // Both were legal under the placement guard on its own: seed 2 caged (115,24) behind four
+  // props sitting on its diagonals, seed 57 plugged a one-cell corridor at (87,26).
+  for (const seed of [2, 57]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
 });
 
 console.log('Biomes');
@@ -556,11 +574,7 @@ test('biomes form large contiguous regions, not noise speckle', () => {
 });
 test('the map is twice the old size and still fully connected', () => {
   assert.strictEqual(C.MAP, 152);
-  const m = C.generateMap(9), N = C.MAP, seen = new Uint8Array(N*N), q = [[N>>1,N>>1]];
-  seen[(N>>1)*N+(N>>1)] = 1; let reach = 0, floor = 0;
-  while(q.length){ const [x,z]=q.pop(); reach++; for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx,nz=z+dz; if(nx<0||nz<0||nx>=N||nz>=N) continue; const i=nx*N+nz; if(!seen[i]&&!C.BLOCKING(m[i])){ seen[i]=1; q.push([nx,nz]); } } }
-  for (const c of m) if (!C.BLOCKING(c)) floor++;
-  assert.ok(reach/floor > 0.97, `${(reach/floor*100).toFixed(1)}% reachable`);
+  for (const seed of [9, 42, 777, 2024]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
 });
 
 console.log('Pacing');

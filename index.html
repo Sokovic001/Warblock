@@ -935,14 +935,54 @@ const WBCore = (function(){
       const x=Math.round(cx+Math.cos(a)*rr), z=Math.round(cz+Math.sin(a)*rr);
       if(x>0&&z>0&&x<MAP-1&&z<MAP-1) cells[x*MAP+z]=0;
     }
-    // scattered waist-high props. Only ever dropped on a cell with open ground all around it, so a
-    // prop can add cover but can never wall a corridor off.
+    // scattered waist-high props, only ever dropped on a cell with open ground all around it.
+    // That guard stops two props from touching, but on its own it does NOT keep the map open:
+    // four props on the diagonals of one cell still cage it, and one prop still plugs a
+    // one-cell gap. The repair pass below is what actually holds the invariant.
     for(let x=2;x<MAP-2;x++) for(let z=2;z<MAP-2;z++){
       const i=x*MAP+z; if(cells[i]!==0) continue;
       if(rng()>=BIOMES[biomes[i]].prop) continue;
       let open=0;
       for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]) if(cells[(x+dx)*MAP+(z+dz)]===0) open++;
       if(open===4) cells[i]=3;
+    }
+    // Nothing may end up walled off from the centre. A prop that seals a pocket is cleared
+    // first, being the cheapest and least visible repair; a pocket the walls themselves sealed
+    // is linked back by the shortest tunnel instead, so the scar stays a few cells long rather
+    // than a lane running to the middle of the map. Typical cost: ~10 cells on a 152×152 grid.
+    const NB=[[1,0],[-1,0],[0,1],[0,-1]];
+    const reachable=()=>{
+      const seen=new Uint8Array(cells.length), start=(MAP>>1)*MAP+(MAP>>1), q=[start];
+      seen[start]=1;
+      for(let qi=0;qi<q.length;qi++){ const cur=q[qi], x=(cur/MAP)|0, z=cur%MAP;
+        for(const [dx,dz] of NB){ const nx=x+dx, nz=z+dz;
+          if(nx<0||nz<0||nx>=MAP||nz>=MAP) continue;
+          const i=nx*MAP+nz; if(seen[i]||BLOCKING(cells[i])) continue;
+          seen[i]=1; q.push(i); } }
+      return seen;
+    };
+    for(let pass=0;pass<200;pass++){
+      const seen=reachable();
+      let orphan=-1;
+      for(let i=0;i<cells.length;i++) if(!BLOCKING(cells[i])&&!seen[i]){ orphan=i; break; }
+      if(orphan<0) break;
+      const ox=(orphan/MAP)|0, oz=orphan%MAP;
+      let freed=false;
+      for(const [dx,dz] of NB){ const nx=ox+dx, nz=oz+dz;
+        if(nx<1||nz<1||nx>=MAP-1||nz>=MAP-1) continue;
+        if(cells[nx*MAP+nz]===3){ cells[nx*MAP+nz]=0; freed=true; } }
+      if(freed) continue;
+      const prev=new Int32Array(cells.length).fill(-1), vis=new Uint8Array(cells.length);
+      const q=[orphan]; vis[orphan]=1; let hit=-1;
+      for(let qi=0;qi<q.length&&hit<0;qi++){ const cur=q[qi], x=(cur/MAP)|0, z=cur%MAP;
+        for(const [dx,dz] of NB){ const nx=x+dx, nz=z+dz;
+          if(nx<1||nz<1||nx>=MAP-1||nz>=MAP-1) continue;
+          const i=nx*MAP+nz; if(vis[i]) continue;
+          vis[i]=1; prev[i]=cur;
+          if(seen[i]){ hit=i; break; }
+          q.push(i); } }
+      if(hit<0) break;
+      for(let p=prev[hit]; p>=0&&p!==orphan; p=prev[p]) if(BLOCKING(cells[p])) cells[p]=0;
     }
     return cells;
   }

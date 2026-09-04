@@ -34,7 +34,10 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 
 - Le pot se partage sans reste en Duo et en Trio, sur les quatre tables.
 - Aucun brawler n'en domine un autre à la fois en PV, portée et vitesse.
-- La carte reste connexe à plus de 97 % : aucun mur ni objet ne peut murer une zone.
+- La carte est **entièrement** connexe : aucune case praticable n'est coupée du centre, sur
+  aucune graine. Le seuil de 97 % qui figurait ici tolérait une pièce scellée de 23×23, et
+  n'était de toute façon testé que sur la graine 9. Une passe de réparation, à la fin de
+  `generateMap()`, libère les props qui emmurent puis tunnelle les poches fermées par les murs.
 - La vitesse d'un brawler est toujours celle que donne `derivedSpeed()`, jamais une valeur écrite
   à la main.
 - Les montants du bandeau « live wins » sont produits par les vraies fonctions de paiement.
