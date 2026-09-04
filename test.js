@@ -13,6 +13,14 @@ console.log('Economy');
 test('four tables: $0.50 / $1 / $5 / $10', () => assert.deepStrictEqual(C.TIERS.map(t=>t.stake), [0.5,1,5,10]));
 test('the house keeps 20% of every payout', () => { assert.strictEqual(C.RAKE, 0.20); for (const t of C.TIERS){ const p = C.payout(t.stake, C.PLAYERS, C.RAKE); assert.strictEqual(p.pot, t.stake*20); assert.strictEqual(p.rake, C.cents(p.pot*0.2)); assert.strictEqual(p.winner, p.pot - p.rake); } });
 test('rake comes off the winner, not the pot', () => { const p = C.payout(100, 20, 0.05); assert.deepStrictEqual(p, {pot:2000, rake:100, winner:1900}); });
+test('payout still charges the house even when the caller forgets the rake', () => {
+  // It used to fall back to 0% on a missing argument and hand over the gross pot. Every call
+  // site happened to pass C.RAKE, so nothing showed — the next one to forget would not be so
+  // lucky. An explicit 0 is still honoured, that is a caller saying what it means.
+  assert.deepStrictEqual(C.payout(10, 20), C.payout(10, 20, C.RAKE));
+  assert.strictEqual(C.payout(10, 20).rake, C.cents(200 * C.RAKE));
+  assert.strictEqual(C.payout(10, 20, 0).rake, 0);
+});
 test('cents() keeps sub-dollar precision — rounding to the dollar would erase the rake', () => {
   // Every assertion below is a whole dollar away from what Math.round(v) returns, which is the
   // trap CLAUDE.md warns about: at $0.50 an integer rounding wipes the 20% out entirely.
