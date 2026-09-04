@@ -1,0 +1,16 @@
+{
+  "name": "warblock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Top-down battle royale with stakes. Single-file HTML5 game, demo credits only.",
+  "scripts": {
+    "test": "node test.js",
+    "start": "python3 -m http.server 8080"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "jsdom": "^30.0.1"
+  }
+}
