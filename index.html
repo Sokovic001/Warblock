@@ -1670,7 +1670,26 @@ function buildWorld(seed){
   const gasFloor=new THREE.Mesh(new THREE.RingGeometry(1,3,72),new THREE.MeshBasicMaterial({color:0x69d43e,transparent:true,opacity:0.34,side:THREE.DoubleSide,depthWrite:false})); gasFloor.rotation.x=-Math.PI/2; gasFloor.position.y=0.05; world.add(gasFloor);
   const gasMat=new THREE.MeshBasicMaterial({color:0x8bf05a,transparent:true,opacity:0.4,depthWrite:false});
   const gasParts=[]; for(let i=0;i<C.QUALITY.presets.ultra.gas;i++){ const mesh=new THREE.Mesh(boxGeo,gasMat); const sc=0.7+rng()*1.3; mesh.scale.set(sc,sc*0.7,sc); world.add(mesh); gasParts.push({mesh,a:rng()*Math.PI*2,off:1+rng()*16,ph:rng()*9,sp:(rng()-0.5)*0.11}); }
-  return {cells,biomes,rng,zoneMesh,gasFloor,gasParts,bushMeshes};
+  // Someone standing in a bush more than 2.5 blocks away is drawn at zero opacity — the rule the
+  // game is built on. Without a tell that reads as "something is in there", it just looks like
+  // the enemy evaporated mid-duel. Brawl Stars answers this by rustling the leaves, so we do too.
+  //
+  // One InstancedMesh holds every bush on the map, so nudging the group would shake the whole
+  // arena, and rewriting per-instance matrices would re-upload thousands of entries every frame.
+  // A small pool of markers parked on the occupied cells costs nothing and reads the same.
+  const rustlers=[];
+  for(let i=0;i<10;i++){
+    const g=new THREE.Group();
+    for(let k=0;k<3;k++){
+      const leaf=new THREE.Mesh(leafGeo,new THREE.MeshLambertMaterial({color:PAL[0].bush}));
+      const a2=k/3*Math.PI*2;
+      leaf.position.set(Math.cos(a2)*0.26,0.34,Math.sin(a2)*0.26);
+      leaf.scale.set(0.62,0.72,0.62);
+      g.add(leaf);
+    }
+    g.visible=false; world.add(g); rustlers.push(g);
+  }
+  return {cells,biomes,rng,zoneMesh,gasFloor,gasParts,bushMeshes,rustlers};
 }
 
 // ---------- meshes ----------
@@ -2893,6 +2912,33 @@ function loop(now){
       for(const q of bx.mesh.userData.marks) q.material.opacity=b;
       bx.mesh.position.y=Math.sin(G.time*2.1+bx.ph)*0.04; }
     for(const bm of G.bushMeshes){ const t=G.time*1.1+bm.userData.sway; bm.position.x=Math.sin(t)*0.045; bm.position.z=Math.cos(t*0.8)*0.035; }
+    // Leaves shake wherever a living brawler is standing in cover, yourself included — the tell
+    // has to be honest both ways or it becomes a one-sided radar. It marks the cell, never who
+    // is in it: you learn that something is in there, not what, nor how many.
+    if(G.rustlers){
+      let r=0;
+      const px=G.player.x, pz=G.player.z;
+      // nearest first: a rustle you cannot see on screen would waste a marker on a 50-player map
+      const inCover=G.ents.filter(e=>e.alive&&inBush(e)&&Math.hypot(e.x-px,e.z-pz)<26)
+                          .sort((a,b)=>Math.hypot(a.x-px,a.z-pz)-Math.hypot(b.x-px,b.z-pz));
+      const marked=new Set();
+      for(const e of inCover){
+        if(r>=G.rustlers.length) break;
+        // one shake per cell: two brawlers sharing cover must not read as twice the threat
+        const key=Math.floor(e.x)+','+Math.floor(e.z);
+        if(marked.has(key)) continue;
+        marked.add(key);
+        const speed=Math.hypot(e.vx||0,e.vz||0);
+        const g=G.rustlers[r++];
+        g.visible=true;
+        g.position.set(Math.floor(e.x)+0.5, 0, Math.floor(e.z)+0.5);
+        // a brawler holding still barely disturbs the leaves; one pushing through sets them going
+        const amp=0.05+Math.min(1,speed/6)*0.16, w=G.time*(7+speed*1.1)+e.id*5;
+        g.rotation.z=Math.sin(w)*amp; g.rotation.x=Math.cos(w*0.83)*amp*0.7;
+        g.position.y=Math.abs(Math.sin(w))*0.04;
+      }
+      for(;r<G.rustlers.length;r++) G.rustlers[r].visible=false;
+    }
     for(const pk of G.pickups){
       if(pk.kind==='heart'){ const b=1+Math.sin(G.time*5+pk.ph)*0.10; pk.mesh.scale.set(0.85*b,0.85*b,1); pk.mesh.position.y=0.75+Math.sin(G.time*3+pk.ph)*0.10; if(pk.shadow) pk.shadow.scale.setScalar(0.75/b); }
       else { pk.mesh.rotation.y+=dt*2; pk.mesh.position.y=0.5+Math.sin(G.time*3+pk.ph)*0.08; }
