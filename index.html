@@ -2171,12 +2171,18 @@ function botUpdate(b,dt){
   // Wall avoidance. The old version tried one perpendicular and, when that was blocked too,
   // committed to its opposite without ever checking it — so a bot that walked into a concave
   // corner pushed at the stone forever. Nothing is taken now unless it is actually free.
-  const wanted=Math.hypot(mx,mz)>0.01;
+  // An escape already under way overrides whatever the bot wants this frame. Correcting for a
+  // single frame achieved nothing: moveEntity ramps velocity by about a fifth per frame, so the
+  // bot drifted back into the wall long before it had the speed to get clear of it.
+  if(b.escapeT>0){ b.escapeT-=dt; mx=b.escX; mz=b.escZ; }
+  const wanted=Math.hypot(mx,mz)>0.01, wx=mx, wz=mz;
+  // Blocked ahead: slide along the wall. When neither side is open, keep the blocked vector
+  // instead of zeroing it — tryMove() applies the axes separately, so a direction that fails as
+  // a pair still slides on one of them. Stopping dead here is what pinned bots to the stone.
   if(wanted&&!free(b.x+mx*0.9,b.z+mz*0.9)){
     const s=(b.id>0.5?1:-1), tx=-mz*s, tz=mx*s;
     if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; }
-    else if(free(b.x-tx*0.9,b.z-tz*0.9)){ mx=-tx; mz=-tz; }
-    else { mx=0; mz=0; }
+    else { mx=-tx; mz=-tz; }
   }
   // Progress watchdog. Sliding sideways is not enough on its own: pickGoal() hands back the
   // nearest crate by distance, so a bot wedged against the wall in front of one was given the
@@ -2185,12 +2191,18 @@ function botUpdate(b,dt){
   const moved=Math.hypot(b.x-(b.px??b.x),b.z-(b.pz??b.z));
   b.px=b.x; b.pz=b.z;
   if(wanted&&moved<b.speed*dt*0.2) b.stuckT=(b.stuckT||0)+dt; else b.stuckT=0;
-  if(b.stuckT>0.5){
+  // Careful with the guard: b.escapeT is undefined on the first pass and `undefined <= 0` is
+  // false, so testing it that way would block the very first escape a bot ever needs.
+  if(b.stuckT>0.4&&!(b.escapeT>0)){
     b.stuckT=0;
-    if(b.goal){ (b.badGoals||(b.badGoals=new Set())).add(b.goal.box||b.goal.pick||b.goal); }
-    b.goal=null; b.goalT=0;
-    for(let k=0;k<8;k++){ const a=Math.random()*Math.PI*2, ex=Math.cos(a), ez=Math.sin(a);
-      if(free(b.x+ex*1.2,b.z+ez*1.2)){ mx=ex; mz=ez; break; } }
+    if(b.goal){ (b.badGoals||(b.badGoals=new Set())).add(b.goal.box||b.goal.pick||b.goal); b.goal=null; b.goalT=0; }
+    // sweep sixteen headings, take the most open one that still points roughly where it wanted
+    let best=null,bs=-1e9;
+    for(let k=0;k<16;k++){ const a=k/16*Math.PI*2, ex=Math.cos(a), ez=Math.sin(a);
+      if(!free(b.x+ex*1.3,b.z+ez*1.3)) continue;
+      const sc=(ex*wx+ez*wz)+(free(b.x+ex*2.6,b.z+ez*2.6)?1.5:0);
+      if(sc>bs){ bs=sc; best=[ex,ez]; } }
+    if(best){ b.escX=best[0]; b.escZ=best[1]; b.escapeT=0.8; mx=best[0]; mz=best[1]; }
   }
   moveEntity(b,mx,mz,dt);
 }
