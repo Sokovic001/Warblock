@@ -9,6 +9,9 @@
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Baloo+2:wght@600;700;800&display=swap" rel="stylesheet">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -35,7 +38,7 @@
   body.res #lobby h1 span{color:var(--yellow)}
   body.res .bcard{background:linear-gradient(180deg,#6d1f28,#3d0f18)} body.res .mcard{background:linear-gradient(180deg,#6d1f28,#3d0f18)}
   body.res .mcard.sel{background:linear-gradient(180deg,#ff8a1f,#c2261c)}
-  body.res #end{background:rgba(70,12,20,.93)} body.res #pause{background:rgba(70,12,20,.82)}
+  body.res #pause{background:rgba(70,12,20,.82)}
   body.res .eyebrow{color:#ffc9bf} body.res .rules{color:#ffd8d1}
   /* #lobby is a flex column: without this its children get squashed when the page overflows,
      which silently shrinks the ticker and the cards no matter what height they are given */
@@ -425,32 +428,130 @@
   .touch #waiting .wbox{max-width:520px} .touch #waiting h2{font-size:22px} .touch #wPod{width:110px;height:110px} .touch #waiting .wring{width:104px;height:104px} .touch #waiting .wcount b{font-size:32px}
   @media (max-height:560px){ #waiting .wmain{padding:10px 14px 4px} #waiting .wfeed{height:34px} #wPod{width:110px;height:110px} #waiting .wring{width:104px;height:104px} #waiting .wcount b{font-size:32px} #waiting h2{font-size:22px} }
   /* ---------- END ---------- */
-  #end{position:fixed;inset:0;display:none;background:rgba(15,30,70,.92);text-align:center;padding:14px;overflow:auto}
-  #end.on{display:flex}
-  #end .box{max-width:420px;width:100%;margin:auto;border:3px solid #000;border-radius:18px;background:var(--panel);padding:0;box-shadow:0 6px 0 #000,0 0 60px #0008;overflow:hidden}
-  #endHead{position:relative;padding:10px 14px 12px;border-bottom:4px solid #000;background:repeating-linear-gradient(-45deg,rgba(0,0,0,.14) 0 16px,transparent 16px 32px),linear-gradient(180deg,var(--h1,#f0463c),var(--h2,#8d1626))}
-  #endHead .eyebrow{color:#fff;opacity:.9}
-  #end h2{font-size:34px;line-height:1;margin-top:4px;color:#fff;text-shadow:3px 3px 0 #000,-3px 3px 0 #000,3px -3px 0 #000,-3px -3px 0 #000,0 6px 0 #000}
-  #endRibbon{position:absolute;left:50%;bottom:-11px;transform:translateX(-50%);background:#000;color:#fff;font-size:9px;letter-spacing:.14em;padding:2px 12px;border-radius:999px;border:2px solid #000;white-space:nowrap;max-width:92%;overflow:hidden;text-overflow:ellipsis}
-  #end .lines{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:18px 12px 2px}
-  #end .lines div{background:#00000042;border:2px solid #000;border-radius:10px;padding:5px 9px;text-align:left}
-  #end .lines div span:first-child{display:block;font-size:8px;letter-spacing:.14em;text-transform:uppercase;color:#b9c8ee;font-family:Arial,sans-serif;font-weight:700}
-  #end .lines div span:last-child{font-size:15px;color:#fff;text-shadow:1px 1px 0 #000}
-  #end .lines .total{grid-column:1/-1;text-align:center;background:linear-gradient(180deg,#ffe066,#ffb31f);box-shadow:inset 0 -6px 0 #0002}
-  #end .lines .total span:first-child{color:#7a3b00}
-  #end .lines .total span:last-child{font-size:20px;color:#000;text-shadow:1px 1px 0 #fff8}
-  #endWallet{padding:6px 12px 0;font-size:10px;color:#b9c8ee;font-family:Arial,sans-serif;font-weight:700} #endWallet b{color:var(--cash);text-shadow:1px 1px 0 #000}
-  #end .btns{display:flex;gap:6px;padding:8px 12px 12px}
-  #end button{flex:1;background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000;border:2px solid #000;border-radius:12px;padding:9px 6px;font-size:12px;letter-spacing:.02em;box-shadow:0 4px 0 #7a3b00} #end button.ghost{flex:0 0 auto;padding:9px 14px;background:#fff2;color:#fff;box-shadow:0 4px 0 #000}
-  #end button:disabled{filter:grayscale(1);opacity:.6}
-  .touch #end{padding:8px} .touch #end .box{max-width:340px} .touch #end h2{font-size:24px} .touch #endHead{padding:7px 10px 9px}
-  .touch #end .lines{gap:5px;padding:15px 10px 0} .touch #end .lines div{padding:4px 8px;border-radius:8px} .touch #end .lines div span:first-child{font-size:7px} .touch #end .lines div span:last-child{font-size:12px} .touch #end .lines .total span:last-child{font-size:16px}
-  .touch #end .btns{padding:6px 10px 10px} .touch #end button{padding:7px 5px;font-size:10px;border-radius:9px} .touch #endWallet{font-size:9px;padding-top:4px}
+  /* ===== ecran de fin, d'apres la maquette validee =====
+     Tout est scope sous #end : la maquette utilise .box, .bar, .sub et .ghost, quatre noms que
+     le jeu emploie deja ailleurs — .bar porte notamment les barres de vie du HUD. Sans ce
+     prefixe, importer la feuille telle quelle cassait l'affichage en jeu. */
+  #end{position:fixed;inset:0;display:none;background:#070B18;padding:12px;overflow:auto;
+    --navy:#111E45;--navy2:#0A1029;--tile:#1B2A5C;--tile2:#111C41;
+    --gold:#FFC93C;--gold2:#E08A0A;--goldDark:#8A4B00;--cream:#F7E9C6;--cream2:#E2C793}
+  #end.on{display:flex;align-items:center;justify-content:center}
+  #end .scene{position:relative;width:min(1180px,100%);min-height:min(68vh,620px);
+    border-radius:20px;overflow:hidden;border:4px solid #000;
+    background:radial-gradient(130% 100% at 50% 22%,var(--bandDark) 0%,var(--navy) 46%,var(--navy2) 100%);
+    box-shadow:0 16px 0 rgba(0,0,0,.45)}
+  #end .bloom{position:absolute;left:50%;top:42%;width:56%;aspect-ratio:1.15/1;translate:-50% -50%;
+    background:radial-gradient(ellipse,var(--bloom) 0%,transparent 66%)}
+  #end .bloom2{position:absolute;left:50%;top:42%;width:30%;aspect-ratio:1/1;translate:-50% -50%;
+    background:radial-gradient(circle,var(--bloom) 0%,transparent 62%);opacity:.85}
+  #end .vignette{position:absolute;inset:0;background:radial-gradient(120% 90% at 50% 45%,transparent 45%,rgba(0,0,0,.55) 100%)}
+  #end .stage{position:relative;display:grid;grid-template-columns:1fr minmax(240px,34%) 1fr;
+    grid-template-rows:auto auto auto;gap:0 clamp(8px,2vw,26px);
+    padding:clamp(10px,2.2vh,22px) clamp(14px,3vw,40px) clamp(12px,2.4vh,26px);
+    align-items:start;justify-items:center}
+  #end .banner{grid-column:1/-1;grid-row:1;position:relative;width:min(60%,660px);margin-bottom:clamp(6px,1.6vh,16px)}
+  #end .banner .tail{position:absolute;top:22%;width:13%;height:66%;background:var(--bandDark);border:4px solid #000;z-index:1}
+  #end .banner .tail.l{left:-10%;clip-path:polygon(0 0,100% 0,100% 100%,0 100%,30% 50%)}
+  #end .banner .tail.r{right:-10%;clip-path:polygon(0 0,100% 0,70% 50%,100% 100%,0 100%)}
+  #end .banner .body{position:relative;z-index:2;background:linear-gradient(180deg,var(--band),var(--bandDark));
+    border:5px solid #000;border-radius:16px;padding:6px 30px 12px;text-align:center;box-shadow:0 8px 0 rgba(0,0,0,.5)}
+  #end .banner h1{font-family:'Luckiest Guy',cursive;font-weight:400;letter-spacing:.02em;
+    font-size:clamp(28px,5vw,60px);line-height:1.08;color:var(--cream);
+    -webkit-text-stroke:7px #000;paint-order:stroke fill;text-shadow:0 5px 0 rgba(0,0,0,.5)}
+  #end .banner .sub{position:absolute;left:50%;translate:-50% 0;bottom:-15px;z-index:3;
+    background:#0B0F1F;border:4px solid #000;border-radius:999px;padding:2px 18px;
+    font-size:clamp(9px,1.1vw,13px);letter-spacing:.14em;color:var(--cream2);white-space:nowrap}
+  #end .col{grid-row:2;display:flex;flex-direction:column;gap:clamp(14px,3vh,26px);width:min(100%,300px)}
+  #end .col.l{grid-column:1;justify-self:start}
+  #end .col.r{grid-column:3;justify-self:end}
+  #end .slab{position:relative}
+  #end .slab .cap{display:block;text-align:center;margin-bottom:3px;font-size:clamp(9px,1.05vw,13px);
+    letter-spacing:.1em;color:var(--gold);-webkit-text-stroke:4px #000;paint-order:stroke fill}
+  #end .slab .box{position:relative;background:linear-gradient(180deg,var(--cream),var(--cream2));
+    border:5px solid #000;border-radius:16px;padding:7px 11px;box-shadow:0 6px 0 rgba(0,0,0,.5);
+    display:flex;align-items:center;justify-content:center;min-height:clamp(42px,4.6vw,58px);max-width:none;margin:0}
+  #end .icon{position:absolute;left:11px;top:50%;translate:0 -50%;width:clamp(26px,2.7vw,36px);
+    aspect-ratio:1;border:3px solid #000;border-radius:9px;display:grid;place-items:center;font-size:clamp(13px,1.5vw,19px)}
+  #end .icon.gold{background:linear-gradient(180deg,#FFD75E,#E08A0A)}
+  #end .icon.sky{background:linear-gradient(180deg,#7FE3FF,#2FA6D8)}
+  #end .icon.red{background:linear-gradient(180deg,#FF7A6B,#C42B2B)}
+  #end .val{text-align:center;font-size:clamp(17px,2.2vw,29px);line-height:1;color:#2A1B05;padding:0 clamp(30px,3.4vw,44px)}
+  #end .val.sm{font-size:clamp(13px,1.55vw,20px)}
+  #end .ebar{width:100%;height:clamp(20px,2.2vw,28px);background:#2A3050;border:3px solid #000;
+    border-radius:999px;position:relative;overflow:hidden}
+  #end .ebar i{position:absolute;inset:0;width:var(--w,50%);background:linear-gradient(180deg,#8FE6FF,#33A9DC);border-right:3px solid #000}
+  #end .ebar b{position:absolute;inset:0;display:grid;place-items:center;font-size:clamp(10px,1.2vw,14px);
+    color:#fff;-webkit-text-stroke:3px #000;paint-order:stroke fill}
+  #end .mid{grid-column:2;grid-row:2;display:flex;flex-direction:column;align-items:center;
+    justify-content:flex-start;gap:clamp(6px,1.4vh,14px);width:100%}
+  #end .figure{position:relative;display:flex;flex-direction:column;align-items:center}
+  #end .figure svg{width:clamp(110px,13vw,178px);height:auto;display:block;
+    filter:drop-shadow(0 8px 0 rgba(0,0,0,.35));position:relative;z-index:2}
+  #end .podium{width:clamp(130px,16vw,210px);height:clamp(26px,4vh,42px);margin-top:-14px;position:relative;z-index:1;
+    border-radius:50%;background:radial-gradient(ellipse at 50% 40%,var(--discA) 0%,transparent 70%);
+    box-shadow:inset 0 -6px 14px rgba(0,0,0,.35)}
+  #end .podium::after{content:'';position:absolute;left:50%;top:44%;translate:-50% -50%;
+    width:62%;height:42%;border-radius:50%;background:rgba(0,0,0,.42);filter:blur(5px)}
+  #end .tiles{display:flex;gap:clamp(6px,1vw,12px);margin-top:clamp(4px,1.2vh,12px)}
+  #end .tile{background:linear-gradient(180deg,var(--tile),var(--tile2));border:5px solid #000;border-radius:14px;
+    padding:4px clamp(9px,1.4vw,20px);text-align:center;box-shadow:0 6px 0 rgba(0,0,0,.5);min-width:clamp(66px,8vw,104px)}
+  #end .tile small{display:block;font-size:clamp(8px,.95vw,11px);letter-spacing:.12em;color:#A9BCEA}
+  #end .tile b{font-size:clamp(17px,2.3vw,30px);line-height:1.1;-webkit-text-stroke:4px #000;paint-order:stroke fill}
+  #end .foot{grid-column:1/-1;grid-row:3;display:flex;flex-direction:column;align-items:center;
+    gap:clamp(8px,1.6vh,14px);width:100%;margin-top:clamp(10px,2vh,20px)}
+  #end .money{width:min(46%,480px);text-align:center}
+  #end .money .plate{background:linear-gradient(180deg,var(--moneyA),var(--moneyB));border:5px solid #000;
+    border-radius:16px;padding:3px 20px 7px;box-shadow:0 7px 0 var(--moneyShadow);
+    display:flex;flex-direction:column;align-items:center}
+  #end .money small{display:block;width:100%;text-align:center;font-size:clamp(8px,.95vw,11px);
+    letter-spacing:.16em;color:var(--moneyLabel)}
+  #end .money b{display:block;width:100%;text-align:center;font-size:clamp(22px,3.2vw,42px);line-height:1.1;
+    color:#fff;-webkit-text-stroke:5px #000;paint-order:stroke fill;font-variant-numeric:tabular-nums}
+  #end .money b .sign{font-size:.72em;margin-right:.04em;vertical-align:.06em}
+  #end .money .rake{margin-top:4px;font-size:clamp(9px,1.05vw,13px);color:#93A4D4}
+  #end .actions{display:flex;gap:12px;align-items:center}
+  #end .btn{font:inherit;font-weight:800;cursor:pointer;border:5px solid #000;border-radius:14px;
+    padding:6px clamp(14px,2vw,28px);font-size:clamp(12px,1.5vw,19px);letter-spacing:.03em;color:#fff;flex:0 0 auto}
+  #end .btn.primary{background:linear-gradient(180deg,#FFE27A,var(--gold) 45%,var(--gold2));color:#3A1D00;
+    box-shadow:0 8px 0 var(--goldDark),0 0 34px rgba(255,201,60,.45);
+    font-size:clamp(15px,2vw,26px);padding:9px clamp(22px,3.4vw,52px);border-radius:16px;
+    animation:endBreathe 2.4s ease-in-out .9s infinite}
+  #end .btn.primary:hover{translate:0 -3px}
+  #end .btn.primary:disabled{filter:grayscale(1);opacity:.6;animation:none}
+  @keyframes endBreathe{0%,100%{scale:1}50%{scale:1.035}}
+  #end .btn.eghost{background:linear-gradient(180deg,#2C3A6E,#1A2246);box-shadow:0 6px 0 #0A0F24;
+    -webkit-text-stroke:4px #000;paint-order:stroke fill}
+  /* l'entree en cascade n'anime QUE opacity et translate : animer transform ecraserait le
+     centrage des elements positionnes par translate, piege signale par la maquette */
+  #end .anim{opacity:0;translate:0 18px}
+  #end .scene.play .anim{animation:endRise .42s cubic-bezier(.2,1.5,.4,1) forwards}
+  @keyframes endRise{to{opacity:1;translate:0 0}}
+  #end .scene.play .banner{animation-delay:.05s}
+  #end .scene.play .figure{animation-delay:.22s} #end .scene.play .podium{animation-delay:.18s}
+  #end .scene.play .col.l .slab:nth-child(1),#end .scene.play .col.r .slab:nth-child(1){animation-delay:.34s}
+  #end .scene.play .col.l .slab:nth-child(2),#end .scene.play .col.r .slab:nth-child(2){animation-delay:.40s}
+  #end .scene.play .col.l .slab:nth-child(3),#end .scene.play .col.r .slab:nth-child(3){animation-delay:.46s}
+  #end .scene.play .tile:nth-child(1){animation-delay:.54s}
+  #end .scene.play .tile:nth-child(2){animation-delay:.60s}
+  #end .scene.play .tile:nth-child(3){animation-delay:.66s}
+  #end .scene.play .money{animation-delay:.78s}
+  #end .scene.play .actions{animation-delay:.92s}
+  @media (prefers-reduced-motion:reduce){
+    #end .anim{opacity:1;translate:none}
+    #end .scene.play .anim{animation:none}
+    #end .btn.primary{animation:none}
+  }
+  @media (max-width:760px){
+    #end .scene{aspect-ratio:auto;min-height:0;height:auto}
+    #end .stage{grid-template-columns:1fr;grid-template-rows:auto auto auto auto;gap:14px}
+    #end .col{grid-column:1;width:100%;max-width:420px;flex-direction:row;flex-wrap:wrap}
+    #end .col .slab{flex:1 1 45%} #end .col.l{grid-row:3} #end .mid{grid-row:2} #end .col.r{grid-row:4}
+    #end .foot{grid-row:5;padding-bottom:8px}
+  }
   /* short landscape screens: 4 stat columns, everything tighter */
   @media (max-height:560px){
-    #end .box{max-width:560px} #end .lines{grid-template-columns:repeat(4,1fr)} #end h2{font-size:22px} #endHead{padding:6px 10px 9px}
-    #end .lines{padding:14px 10px 0;gap:5px} #end .lines .total span:last-child{font-size:15px} #end .lines div span:last-child{font-size:12px} #end .lines div span:first-child{font-size:7px}
-    #end .btns{padding:6px 10px 10px} #end button{padding:7px 5px;font-size:10px} #endWallet{font-size:9px;padding-top:4px} #endRibbon{font-size:8px}
+    #end{padding:6px} #end .stage{padding:8px 12px 10px} #end .col{gap:8px}
+    #end .banner{margin-bottom:4px} #end .tiles{margin-top:4px} #end .foot{margin-top:6px;gap:6px}
   }
   /* ---------- TOUCH ---------- */
   .stick{position:absolute;width:124px;height:124px;margin:-62px 0 0 -62px;border:3px solid #000;border-radius:50%;background:rgba(20,30,70,.45);display:none;pointer-events:none}
@@ -470,7 +571,7 @@
   .touch #superwrap{width:104px;height:104px} .touch #superIn{width:76px;height:76px;font-size:11px}
   .touch .lbl{font-size:9px} .touch .lbl .bar{width:52px;height:9px} .touch .lbl.you .bar{width:66px;height:11px} .touch .lbl .am{width:66px} .touch .lbl .bar b{font-size:8px;line-height:8px}
   .touch .dmg{font-size:14px}
-  .touch #end h2{font-size:38px} .touch #lobby h1{font-size:40px}
+  .touch #lobby h1{font-size:40px}
   @media (max-width:640px){
     #pouch .sub{display:none} #match .zone{letter-spacing:0}
   }
@@ -596,11 +697,50 @@
   </div>
 </section>
 
-<section id="end"><div class="box">
-  <div id="endHead"><div class="eyebrow" id="endEyebrow"></div><h2 id="endTitle"></h2><div id="endRibbon"></div></div>
-  <div class="lines" id="endLines"></div>
-  <div id="endWallet"></div>
-  <div class="btns"><button id="again">PLAY AGAIN</button><button id="toLobby" class="ghost">LOBBY</button></div>
+<section id="end"><div class="scene" id="endScene">
+  <div class="bloom"></div><div class="bloom2"></div><div class="vignette"></div>
+  <div class="stage">
+    <div class="banner anim">
+      <span class="tail l"></span><span class="tail r"></span>
+      <div class="body"><h1 id="endTitle"></h1></div>
+      <div class="sub" id="endRibbon"></div>
+    </div>
+    <div class="col l">
+      <div class="slab anim"><span class="cap">RANK</span>
+        <div class="box"><span class="icon gold">&#127942;</span><span class="val" id="endRank"></span></div></div>
+      <div class="slab anim"><span class="cap">SURVIVED</span>
+        <div class="box"><span class="icon sky">&#9201;</span><span class="val sm" id="endTime"></span></div></div>
+      <div class="slab anim"><span class="cap">TABLE</span>
+        <div class="box"><span class="icon gold">$</span><span class="val sm" id="endTable"></span></div></div>
+    </div>
+    <div class="mid">
+      <div class="figure anim" id="endHero"></div>
+      <div class="podium anim"></div>
+      <div class="tiles">
+        <div class="tile anim"><small>KILLS</small><b id="endKills"></b></div>
+        <div class="tile anim"><small>DAMAGE</small><b id="endDmg"></b></div>
+        <div class="tile anim"><small>LOOTED</small><b id="endLooted"></b></div>
+      </div>
+    </div>
+    <div class="col r">
+      <div class="slab anim"><span class="cap" id="endPouchCap"></span>
+        <div class="box"><span class="icon red">&#128176;</span><span class="val" id="endPouch"></span></div></div>
+      <div class="slab anim"><span class="cap">POWER CUBES</span>
+        <div class="box"><span class="ebar" id="endCubeBar"><i></i><b id="endCubeTxt"></b></span></div></div>
+      <div class="slab anim"><span class="cap">WALLET</span>
+        <div class="box"><span class="icon gold">$</span><span class="val sm" id="endWallet"></span></div></div>
+    </div>
+    <div class="foot">
+      <div class="money anim">
+        <div class="plate"><small id="endMoneyLabel"></small><b id="endMoneyValue"></b></div>
+        <div class="rake" id="endRake"></div>
+      </div>
+      <div class="actions anim">
+        <button class="btn eghost" id="toLobby">LOBBY</button>
+        <button class="btn primary" id="again">REPLAY</button>
+      </div>
+    </div>
+  </div>
 </div></section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -2026,6 +2166,9 @@ function damage(t,dmg,src){
   if(t.invuln>0) return;                       // just came back: a moment to move before taking fire
   if(src&&src!==t&&src.team===t.team) return;
   dmg=Math.round(dmg*(src?C.dmgMult(src.cubes):1));
+  // End-screen stat. Counted after the cube bonus and capped at what the target still has, so
+  // overkill on the last shot does not inflate the number.
+  if(src&&src.isPlayer) G.dmgDealt+=Math.max(0,Math.min(dmg,t.hp));
   t.hp-=dmg; t.lastDamageT=G.time; t.lastHitBy=src; t.flash=0.12; if(G.modeCfg&&G.modeCfg.cashout) t.cashLock=C.CASHOUT.lock;
   if(src&&src.alive) src.super=Math.min(src.brawler.super.cost,src.super+dmg);
   floatText(t,'-'+dmg,t.isPlayer?'you':'');
@@ -2069,7 +2212,7 @@ function collect(e,pk){
     e.hp+=got;
     if(e.isPlayer){ snd('cube',0.12); floatText(e,'♥ +'+got,'heal'); }
   }
-  else { e.pouch+=pk.amount; if(e.isPlayer){ snd('cash',0.12); feed(`+${money(pk.amount)} from ${pk.owner}`,true); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); } }
+  else { e.pouch+=pk.amount; if(e.isPlayer){ G.looted+=pk.amount; snd('cash',0.12); feed(`+${money(pk.amount)} from ${pk.owner}`,true); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); } }
 }
 function botCashOut(b){
   b.alive=false; b.mesh.visible=false; b.cashedOut=true; b.pouch=0; b.respawnT=0;
@@ -2098,6 +2241,9 @@ function kill(victim,killer,cause){
     if(killer.isPlayer&&victim.pouch>0){ snd('cash',0.14); feed(`+${money(victim.pouch)} ${G.modeCfg.cashout?'banked':'taken'} from ${victim.name}`,true); floatText(killer,'+'+money(victim.pouch),'heal'); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
   } else if(victim.pouch>0) spawnPickup('cash',victim.x,victim.z,victim.pouch,victim.name);
   if(C.BOT.dropCubesOnKill) for(let i=0;i<victim.cubes;i++) spawnPickup('cube',victim.x,victim.z,1,null);
+  // kill() wipes the pouch, so the end screen would always read zero for a dead player. Keep
+  // what they were carrying at the moment they went down.
+  if(victim.isPlayer) G.lostPouch=victim.pouch;
   victim.pouch=0; victim.cubes=0;
   if(killer) killer.kills++;
   const who=killer?killer.name:(cause==='abandoned'?'Abandon':'The gas');
@@ -2416,6 +2562,7 @@ function playerUpdate(dt){
     $('cashLbl').textContent=ready?'CASH OUT · NET OF 20%':'LOCKED '+Math.ceil(p.cashLock)+'s';
     $('cashAmt').textContent=money(co.net); }
   if(!p.alive) return;
+  G.survivedT=G.time;
   const aiming=(T.aim&&T.aim.moved)||(T.superT&&T.superT.moved);
   if(aiming){ const st=(T.superT&&T.superT.moved)?T.superT:T.aim; const a=aimFromStick(st); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ p.ax=dx/d; p.az=dz/d; } G.aimDist=d; } }
@@ -2766,7 +2913,8 @@ function startMatch(stake){
   const tier=C.tierFor(stake);
   const seed=(Date.now()^(Math.random()*1e9))>>>0;
   const mode=C.MODES[selMode];
-  G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],camT:new THREE.Vector3() };
+  G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],camT:new THREE.Vector3(),
+       dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
   $('cashout').className=mode.cashout?'on':'';
@@ -2822,58 +2970,169 @@ function startMatch(stake){
   lobbyStop(); musicStart();
   last=performance.now(); if(rafId) cancelAnimationFrame(rafId); rafId=requestAnimationFrame(loop);
 }
-function team_or_players(){ return G.modeCfg.teamSize>1 ? aliveTeams().size : playersLeft(); }
+// ---------- end screen ----------
+// Hats are pure decoration, so the mapping stays here rather than in WBCore. The colours come
+// straight from C.BRAWLERS: the mockup and the game already agreed on all ten of them.
+const END_HAT={bolt:'cap',shell:'bandana',brick:'mask',hex:'wide',pyro:'flame',medic:'cross',
+  volt:'helmet',ghost:'hood',rush:'spikes',ward:'hardhat'};
+// Two layers, because the hood has to pass both behind and in front of the head. Drawn in one
+// pass it covered GHOST's face entirely.
+function endHatSVG(kind,c,ink){
+  const d=shade(c,-0.30), dd=shade(c,-0.52);
+  const B={back:'',front:''};
+  switch(kind){
+    case 'cap':     B.front=`<rect x="22" y="22" width="76" height="22" rx="7" fill="${c}" stroke="${ink}" stroke-width="6"/>
+                             <rect x="18" y="34" width="26" height="12" rx="5" fill="${d}" stroke="${ink}" stroke-width="5"/>`; break;
+    case 'bandana': B.front=`<rect x="22" y="24" width="76" height="18" rx="6" fill="${c}" stroke="${ink}" stroke-width="6"/>
+                             <path d="M96 30 l18 -8 v22 z" fill="${d}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>`; break;
+    case 'mask':    B.front=`<rect x="24" y="20" width="72" height="30" rx="9" fill="${d}" stroke="${ink}" stroke-width="6"/>`; break;
+    case 'wide':    B.front=`<ellipse cx="60" cy="36" rx="52" ry="11" fill="${d}" stroke="${ink}" stroke-width="6"/>
+                             <rect x="38" y="10" width="44" height="26" rx="8" fill="${c}" stroke="${ink}" stroke-width="6"/>`; break;
+    case 'flame':   B.front=`<path d="M60 -2 l16 34 h-32 z" fill="#FF8A1F" stroke="${ink}" stroke-width="6" stroke-linejoin="round"/>
+                             <path d="M60 10 l8 20 h-16 z" fill="#FFE066"/>`; break;
+    case 'cross':   B.front=`<rect x="22" y="22" width="76" height="20" rx="7" fill="#FFFFFF" stroke="${ink}" stroke-width="6"/>
+                             <rect x="52" y="8" width="16" height="26" rx="3" fill="#E5484D" stroke="${ink}" stroke-width="5"/>
+                             <rect x="44" y="16" width="32" height="10" rx="3" fill="#E5484D" stroke="${ink}" stroke-width="5"/>`; break;
+    case 'helmet':  B.front=`<path d="M20 42 a40 34 0 0 1 80 0 z" fill="${c}" stroke="${ink}" stroke-width="6"/>
+                             <rect x="88" y="4" width="7" height="26" rx="3" fill="#9AA7BD" stroke="${ink}" stroke-width="4"/>
+                             <circle cx="91" cy="2" r="6" fill="#FF3D3D" stroke="${ink}" stroke-width="4"/>`; break;
+    case 'hood':
+      B.back = `<path d="M30 108 q30 -12 60 0 l12 80 q-42 12 -84 0 z" fill="${dd}" stroke="${ink}" stroke-width="6" stroke-linejoin="round"/>
+                <rect x="14" y="24" width="92" height="92" rx="26" fill="${d}" stroke="${ink}" stroke-width="6"/>`;
+      B.front= `<path d="M18 62 a42 40 0 0 1 84 0 v-16 a42 38 0 0 0 -84 0 z" fill="${d}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>
+                <path d="M20 74 q-6 26 8 40 l10 -6 q-10 -16 -6 -34 z" fill="${d}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>
+                <path d="M100 74 q6 26 -8 40 l-10 -6 q10 -16 6 -34 z" fill="${d}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>`;
+      break;
+    case 'spikes':  B.front=`<path d="M28 30 l10 -26 l10 26 z M50 26 l10 -28 l10 28 z M72 30 l10 -26 l10 26 z"
+                              fill="${c}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>`; break;
+    case 'hardhat': B.front=`<ellipse cx="60" cy="40" rx="48" ry="9" fill="#FFD23A" stroke="${ink}" stroke-width="6"/>
+                             <path d="M26 40 a34 28 0 0 1 68 0 z" fill="#FFD23A" stroke="${ink}" stroke-width="6"/>
+                             <rect x="54" y="14" width="12" height="26" fill="#E0A800" stroke="${ink}" stroke-width="4"/>`; break;
+    default:        B.front=`<rect x="22" y="22" width="76" height="22" rx="7" fill="${c}" stroke="${ink}" stroke-width="6"/>`;
+  }
+  return B;
+}
+function endBrawlerSVG(pose,b){
+  const c=b.color, cloth=shade(c,-0.42), clothD=shade(c,-0.60), skin='#F1C48F', skinD='#D6A46E', ink='#0B0F1F';
+  const hat=endHatSVG(END_HAT[b.id],c,ink);
+  // GHOST has no face: in game it is a glowing cyan slit under the hood, so it gets one here too
+  const visor = b.id==='ghost';
+  const face = visor
+    ? `<rect x="26" y="40" width="68" height="66" rx="12" fill="#101A2E" stroke="${ink}" stroke-width="6"/>`
+    : `<rect x="26" y="40" width="68" height="66" rx="12" fill="${skin}" stroke="${ink}" stroke-width="6"/>`;
+  const eyes = visor
+    ? (pose==='down'
+        ? `<path d="M42 62 l10 12 M52 62 l-10 12" stroke="#9DFFF0" stroke-width="6" stroke-linecap="round"/>
+           <path d="M68 62 l10 12 M78 62 l-10 12" stroke="#9DFFF0" stroke-width="6" stroke-linecap="round"/>`
+        : `<rect x="36" y="62" width="48" height="10" rx="5" fill="#9DFFF0"/>
+           <rect x="36" y="62" width="48" height="4" rx="2" fill="#E7FFFB"/>`)
+    : (pose==='down'
+        ? `<path d="M40 62 l12 12 M52 62 l-12 12" stroke="${ink}" stroke-width="6" stroke-linecap="round"/>
+           <path d="M68 62 l12 12 M80 62 l-12 12" stroke="${ink}" stroke-width="6" stroke-linecap="round"/>`
+        : `<rect x="38" y="60" width="44" height="11" rx="4" fill="${ink}"/>`);
+  const mouth = visor ? '' : (pose==='down'
+    ? `<path d="M50 88 q5 -7 10 0 q5 7 10 0" stroke="${ink}" stroke-width="5" fill="none" stroke-linecap="round"/>`
+    : `<path d="M50 86 q10 12 20 0" stroke="${ink}" stroke-width="5" fill="none" stroke-linecap="round"/>`);
+  const arms = pose==='down'
+    ? `<rect x="16" y="120" width="20" height="42" rx="6" fill="${skinD}" stroke="${ink}" stroke-width="5"/>
+       <rect x="84" y="120" width="20" height="42" rx="6" fill="${skinD}" stroke="${ink}" stroke-width="5"/>`
+    : `<rect x="10" y="66" width="20" height="52" rx="6" fill="${skinD}" stroke="${ink}" stroke-width="5" transform="rotate(-18 20 92)"/>
+       <rect x="90" y="66" width="20" height="52" rx="6" fill="${skinD}" stroke="${ink}" stroke-width="5" transform="rotate(18 100 92)"/>`;
+  // GHOST is slim and shows no legs: the game gives it a shadow skirt
+  const legs = visor
+    ? `<path d="M34 160 q26 10 52 0 l-6 26 q-20 6 -40 0 z" fill="${clothD}" stroke="${ink}" stroke-width="5" stroke-linejoin="round"/>`
+    : (pose==='down'
+        ? `<rect x="34" y="162" width="52" height="20" rx="6" fill="${clothD}" stroke="${ink}" stroke-width="5"/>`
+        : `<rect x="38" y="160" width="18" height="28" rx="5" fill="${clothD}" stroke="${ink}" stroke-width="5"/>
+           <rect x="64" y="160" width="18" height="28" rx="5" fill="${clothD}" stroke="${ink}" stroke-width="5"/>`);
+  const body = visor
+    ? `<rect x="36" y="112" width="48" height="52" rx="9" fill="${cloth}" stroke="${ink}" stroke-width="5"/>`
+    : `<rect x="30" y="112" width="60" height="52" rx="9" fill="${cloth}" stroke="${ink}" stroke-width="5"/>`;
+  const tilt = pose==='down' ? 'rotate(7 60 110)' : '';
+  return `<svg viewBox="0 0 120 195" xmlns="http://www.w3.org/2000/svg"><g transform="${tilt}">
+    ${hat.back}
+    ${arms}
+    ${body}
+    ${legs}
+    ${face}
+    ${eyes}${mouth}
+    ${hat.front}
+  </g></svg>`;
+}
+const END_LOOK={
+  defeat: {band:'#C8283C',bandDark:'#5E0D1A',bloom:'rgba(255,120,70,.42)',disc:'rgba(255,110,80,.30)',
+           moneyA:'#C8283C',moneyB:'#7A1020',moneyShadow:'#3F0710',moneyLabel:'#FFC9C9',pose:'down'},
+  victory:{band:'#FFC93C',bandDark:'#A85E00',bloom:'rgba(255,205,90,.46)',disc:'rgba(255,214,120,.34)',
+           moneyA:'#3FD46A',moneyB:'#12702F',moneyShadow:'#06381A',moneyLabel:'#C9FFD9',pose:'up'},
+  banked: {band:'#2FBF5C',bandDark:'#0C5423',bloom:'rgba(90,240,140,.42)',disc:'rgba(110,250,160,.30)',
+           moneyA:'#3FD46A',moneyB:'#12702F',moneyShadow:'#06381A',moneyLabel:'#C9FFD9',pose:'up'},
+};
+const endClock=t=>Math.floor(t/60)+':'+String(Math.floor(t%60)).padStart(2,'0');
 function endMatch(won,info){
   if(!G.running) return; G.running=false; G.paused=true; mouse.down=false; musicStop(); $('cashout').className=''; G.intro=0; $('intro').className='';
   if(G.aim){ G.aim.g.visible=G.aim.tip.visible=G.aim.ring.visible=G.aim.blob.visible=false; }
   $('respawn').style.display='none';
   profile.stats.matches++; profile.stats.kills+=G.player.kills;
-  const p=G.player, mode=G.modeCfg, alive=team_or_players(), lines=[];
-  const head=$('endHead');
-  if(won&&mode.cashout){ // Resurgence: you leave with what is in your bucket, minus the no-kill fee
-    const co=C.cashoutPayout(p.pouch); wallet+=co.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,co.net); snd('win',0.15);
-    head.style.setProperty('--h1','#5ce04b'); head.style.setProperty('--h2','#14532d');
-    $('endEyebrow').textContent=`${G.tier.label} table · RESURGENCE ${mode.name} · ${p.brawler.name}`;
-    $('endTitle').textContent=info.cashedOut?'CASHED OUT':(mode.teamSize>1?'LAST TEAM STANDING':'SOLE SURVIVOR');
-    $('endRibbon').textContent=info.cashedOut?'YOU WALKED AWAY WITH IT':'NOBODY LEFT TO TAKE IT';
-    lines.push(['Bucket',money(co.gross)],['Kills',p.kills],['Cubes','⬢'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
-    lines.push(['House cut (20%)','−'+money(co.fee)]);
-    lines.push(['Banked','+'+money(co.net),'total']);
-    $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
-    $('endWallet').innerHTML=`Wallet: <b>${money(wallet)}</b>`;
-    $('again').disabled=wallet<G.stake; $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`PLAY AGAIN · ${money(G.stake)}`;
-    setTimeout(()=>{ $('game').style.display='none'; $('end').classList.add('on'); endSting(won); },1200);
-    return;
-  }
-  if(!won&&mode.cashout){ snd('lose',0.15); head.style.setProperty('--h1','#f0463c'); head.style.setProperty('--h2','#8d1626');
-    $('endEyebrow').textContent=`${G.tier.label} table · RESURGENCE ${mode.name} · ${p.brawler.name}`;
-    $('endTitle').textContent='BUSTED'; $('endRibbon').textContent=('LOST TO '+info.killer).toUpperCase();
-    lines.push(['Bucket lost',money(p.pouch||0)],['Kills',p.kills],['Cubes','⬢'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
-    lines.push(['Net result','−'+money(G.stake),'total']);
-    $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
-    $('endWallet').innerHTML=`Wallet: <b>${money(wallet)}</b>`;
-    $('again').disabled=wallet<G.stake; $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`PLAY AGAIN · ${money(G.stake)}`;
-    setTimeout(()=>{ $('game').style.display='none'; $('end').classList.add('on'); endSting(won); },1200);
-    return;
-  }
+  const p=G.player, mode=G.modeCfg, cash=!!mode.cashout;
+  // Three states, exactly as in the mockup. A Resurgence win is 'banked' whether you walked out
+  // with the bucket on purpose or simply outlived everyone else.
+  const state = won ? (cash?'banked':'victory') : 'defeat';
+  const L=END_LOOK[state];
+  let title,ribbon,rank,moneyLabel,moneyValue,rakeLine,pouchCap,pouchVal;
   if(won){
-    // The prize is what you are carrying, not a flat pot. You start on your own stake and every
-    // kill hands you the victim's, so a nineteen-kill run walks out with all twenty of them and
-    // a win by hiding walks out with one. Surviving is no longer enough on its own — which is
-    // the whole point of putting stakes on the players in the first place.
     const take=C.cashoutPayout(p.pouch);
-    wallet+=take.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15); head.style.setProperty('--h1','#ffd23a'); head.style.setProperty('--h2','#ff8a1f');
-    $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent='VICTORY!'; $('endRibbon').textContent=mode.teamSize>1?'LAST TEAM STANDING':'LAST ONE STANDING';
-    lines.push(['Stake',money(G.stake)],['Taken from others',money(Math.max(0,p.pouch-G.stake))],['Kills',p.kills],['Cubes','⬢'+p.cubes]);
-    if(take.fee) lines.push(['House rake','−'+money(take.fee)]);
-    lines.push(['Carried out','+'+money(take.net),'total']); }
-  else { snd('lose',0.15); head.style.setProperty('--h1','#f0463c'); head.style.setProperty('--h2','#8d1626');
-    $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent=`#${info.rank} OF ${mode.teams}`; $('endRibbon').textContent=('ELIMINATED BY '+info.killer).toUpperCase();
-    lines.push([mode.teamSize>1?'Teams left':'Still alive',alive],['Kills',p.kills],['Cubes','⬢'+p.cubes],['Net result','−'+money(G.stake),'total']); }
-  $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
-  $('endWallet').innerHTML=`Wallet: <b>${money(wallet)}</b>`;
-  $('again').disabled=wallet<G.stake; $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`PLAY AGAIN · ${money(G.stake)}`;
-  setTimeout(()=>{ $('game').style.display='none'; $('end').classList.add('on'); endSting(won); },1200);
+    wallet+=take.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
+    title = cash ? 'BANKED!' : 'VICTORY!';
+    ribbon = cash
+      ? (info.cashedOut?'CASHED OUT EARLY':(mode.teamSize>1?'LAST TEAM STANDING':'SOLE SURVIVOR'))
+      : (mode.teamSize>1?'LAST TEAM STANDING':'LAST ONE STANDING');
+    rank = (cash&&info.cashedOut) ? '—' : '#1';
+    moneyLabel = cash ? 'BANKED' : 'CARRIED OUT';
+    moneyValue = '+'+money(take.net);
+    rakeLine = `${cash?'bucket':'pouch'} ${money(take.gross)} · ${Math.round(C.RAKE*100)}% house rake −${money(take.fee)}`;
+    pouchCap = cash ? 'BUCKET' : 'TAKEN FROM OTHERS';
+    pouchVal = money(cash ? p.pouch : Math.max(0,p.pouch-G.stake));
+  } else {
+    snd('lose',0.15);
+    const dropped=G.lostPouch||0;
+    title = cash ? 'BUSTED' : 'DEFEATED';
+    ribbon = ((cash?'LOST TO ':'ELIMINATED BY ')+(info.killer||'THE GAS')).toUpperCase();
+    rank = '#'+info.rank;
+    moneyLabel='LOST'; moneyValue='−'+money(G.stake);
+    rakeLine = dropped>0
+      ? `your ${money(dropped)} pouch went to ${info.killer||'the gas'}`
+      : 'you were carrying nothing but your own stake';
+    pouchCap = cash ? 'BUCKET LOST' : 'DROPPED';
+    pouchVal = money(dropped);
+  }
+  const sc=$('endScene'), root=$('end'), set=(n,v)=>root.style.setProperty(n,v);
+  set('--band',L.band); set('--bandDark',L.bandDark); set('--bloom',L.bloom); set('--discA',L.disc);
+  set('--moneyA',L.moneyA); set('--moneyB',L.moneyB); set('--moneyShadow',L.moneyShadow); set('--moneyLabel',L.moneyLabel);
+  sc.style.setProperty('--bandDark',L.bandDark);
+  $('endTitle').textContent=title; $('endRibbon').textContent=ribbon;
+  $('endRank').textContent=rank;
+  $('endTime').textContent=endClock(G.survivedT||G.time);
+  $('endTable').textContent=G.tier.label+' · '+p.brawler.name;
+  $('endHero').innerHTML=endBrawlerSVG(L.pose,p.brawler);
+  $('endKills').textContent=p.kills;
+  $('endDmg').textContent=Math.round(G.dmgDealt).toLocaleString('en-US');
+  $('endLooted').textContent=money(G.looted);
+  $('endPouchCap').textContent=pouchCap; $('endPouch').textContent=pouchVal;
+  $('endCubeTxt').textContent=p.cubes+' / '+C.CUBE.max;
+  $('endCubeBar').style.setProperty('--w',Math.round(clamp(p.cubes/C.CUBE.max,0,1)*100)+'%');
+  $('endWallet').textContent=money(wallet);
+  $('endMoneyLabel').textContent=moneyLabel;
+  const sign=moneyValue.match(/^([+−-])?(.*)$/);
+  $('endMoneyValue').innerHTML=(sign[1]?`<span class="sign">${sign[1]}</span>`:'')+sign[2];
+  $('endRake').textContent=rakeLine;
+  $('again').disabled=wallet<G.stake;
+  $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`REPLAY · ${money(G.stake)}`;
+  setTimeout(()=>{
+    $('game').style.display='none'; $('end').classList.add('on');
+    // the cascade only starts once the screen is actually on, otherwise it plays out of sight
+    sc.classList.remove('play'); void sc.offsetWidth; sc.classList.add('play');
+    endSting(won);
+  },1200);
 }
 
 // ---------- live wins ticker ----------
