@@ -1881,7 +1881,26 @@ const maxHp=e=>C.maxHp(e.brawler,e.cubes);
 function spawnPoints(rng,teams,teamSize){
   const pts=[]; const cx=N/2,cz=N/2;
   for(let i=0;i<teams;i++){ const a=i/teams*Math.PI*2+rng()*0.12, r=N*0.42;
-    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*0.09; let x=cx+Math.cos(a2)*r, z=cz+Math.sin(a2)*r; let t=0; while(t++<30 && isWall(x,z)){ x=cx+Math.cos(a2)*(r-t*0.5); z=cz+Math.sin(a2)*(r-t*0.5); } pts.push({x,z,team:i}); } }
+    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*0.09;
+      let x=cx+Math.cos(a2)*r, z=cz+Math.sin(a2)*r;
+      // free(), never isWall(). A brawler is 0.42 wide: its centre can sit on clear floor while
+      // a corner is buried in the wall beside it. tryMove() then refuses both axes and that
+      // brawler never moves again — and cannot even be shot, because bullets die on the wall it
+      // is clipping. Measured on the old point test: one bot per match on average, at least one
+      // in 69% of maps. Sweep the arc and then inwards until the whole body fits.
+      if(!free(x,z)){
+        let found=false;
+        for(let step=0; step<50 && !found; step++){
+          const rr=r-step*0.6; if(rr<4) break;
+          for(let k=0;k<13 && !found;k++){
+            const aa=a2+(k-6)*0.11;
+            const nx=cx+Math.cos(aa)*rr, nz=cz+Math.sin(aa)*rr;
+            if(free(nx,nz)){ x=nx; z=nz; found=true; }
+          }
+        }
+        if(!found){ x=cx; z=cz; }
+      }
+      pts.push({x,z,team:i}); } }
   return pts;
 }
 
@@ -2154,6 +2173,16 @@ function pickGoal(b){
 }
 function botUpdate(b,dt){
   if(dashUpdate(b,dt)) return;
+  // Belt and braces. If a brawler is somehow standing where its body does not fit, tryMove()
+  // refuses both axes and nothing it decides can ever move it — it just stares at the wall,
+  // unshootable, for the rest of the match. Lift it to the nearest spot that does fit.
+  if(!free(b.x,b.z)){
+    for(let ring=1;ring<=6;ring++){ let done=false;
+      for(let k=0;k<12&&!done;k++){ const a=k/12*Math.PI*2;
+        const nx=b.x+Math.cos(a)*ring*0.5, nz=b.z+Math.sin(a)*ring*0.5;
+        if(free(nx,nz)){ b.x=nx; b.z=nz; b.vx=0; b.vz=0; done=true; } }
+      if(done) break; }
+  }
   if(G.modeCfg.cashout){ b.cashLock=Math.max(0,(b.cashLock||0)-dt);
     if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&Math.random()<dt*0.25){ botCashOut(b); return; } }
   b.think-=dt; b.fireCd-=dt; b.goalT-=dt; b.aim-=dt; b.stealthT-=dt;
@@ -2164,11 +2193,21 @@ function botUpdate(b,dt){
   else if(b.target){
     const t=b.target, d=Math.hypot(t.x-b.x,t.z-b.z); const dx=(t.x-b.x)/d, dz=(t.z-b.z)/d;
     b.ax=dx; b.az=dz;
-    const low=b.hp<maxHp(b)*0.35;
-    const want=b.brawler.id==='hex'?atk.range*0.8:atk.range*0.6;
-    if(low){ mx=-dx; mz=-dz; }
+    // Each bot carries its own nerve, its own idea of a good distance and its own strafing
+    // rhythm, all derived from its id so they hold steady for the whole match. Before this every
+    // bot broke off at exactly 35% health and hugged exactly the same range, which read as one
+    // opponent copied twenty times over.
+    const nerve=0.18+(b.id*7%1)*0.26, aggr=0.45+(b.id*13%1)*0.35;
+    const low=b.hp<maxHp(b)*nerve;
+    const want=b.brawler.id==='hex'?atk.range*0.8:atk.range*aggr;
+    if(low){
+      // Break off towards the circle, not straight backwards. Reversing blindly is exactly how
+      // a wounded bot ended up flattened against whatever happened to be behind it.
+      const zx=G.zone.cx-b.x, zz=G.zone.cz-b.z, zl=Math.hypot(zx,zz)||1;
+      mx=-dx*0.75+zx/zl*0.55; mz=-dz*0.75+zz/zl*0.55;
+    }
     else if(d>want){ mx=dx; mz=dz; }
-    else { const s=Math.sin(G.time*1.3+b.id*9); mx=-dz*s; mz=dx*s; if(d<want*0.5&&b.brawler.id!=='brick'){ mx-=dx*0.7; mz-=dz*0.7; } }
+    else { const s=Math.sin(G.time*(1.0+(b.id*11%1)*0.8)+b.id*9); mx=-dz*s; mz=dx*s; if(d<want*0.5&&b.brawler.id!=='brick'){ mx-=dx*0.7; mz-=dz*0.7; } }
     if(d<atk.range*0.98&&b.aim<=0&&b.fireCd<=0&&b.ammo>=1){
       const err=(Math.random()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
       // lead a little on the player's velocity
