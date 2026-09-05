@@ -2,7 +2,7 @@
 
 Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tuer quelqu'un te la verse aussitôt, et tu repars avec **ce que tu portes** — moins les 20 % de la maison. Rafler les vingt mises rapporte 16 × la tienne ; gagner sans tuer personne ne rapporte que la tienne, amputée de la commission.
 
-Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 124 tests sur les règles pures.
+Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 125 tests sur les règles pures.
 
 ## Lancer
 

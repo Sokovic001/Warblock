@@ -999,8 +999,8 @@ const WBCore = (function(){
              super:{ kind:'heal', amount:0.7, cost:200 },
              tip:'Wide piercing wave hits everything in front. Super heals 70% of your health.' },
     volt : { id:'volt',  name:'VOLT',  role:'Demolition', color:'#D6FF3A', hat:'helmet', hp:100, agility:0, ammoReload:1.7,
-             attack:{ kind:'lob', n:1, dmg:60, range:9, speed:14, radius:0.3, aoe:1.6 },
-             super:{ kind:'lob', n:1, dmg:150, range:9, speed:13, radius:0.45, aoe:2.6, cost:220 },
+             attack:{ kind:'lob', n:1, dmg:60, spread:0, stagger:0, range:9, speed:14, radius:0.3, aoe:1.6 },
+             super:{ kind:'lob', n:1, dmg:150, spread:0, stagger:0, range:9, speed:13, radius:0.45, aoe:2.6, cost:220 },
              tip:'Lobs bombs over walls. Aim where they will be. Super is a much bigger bomb.' },
     ghost: { id:'ghost', name:'GHOST', role:'Assassin', color:'#44E0C8', hat:'hood', hp:95, agility:0.95, ammoReload:1.3,
              attack:{ n:4, dmg:15, spread:0.28, stagger:0, range:6, speed:22, radius:0.2 },
@@ -2397,7 +2397,11 @@ function botUpdate(b,dt){
       const err=(Math.random()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
       // lead a little on the player's velocity
       const lead=0.25; const lx=t.x+(t.vx||0)*lead-b.x, lz=t.z+(t.vz||0)*lead-b.z, la=Math.atan2(lx,lz)+err;
-      attack(b,Math.sin(la),Math.cos(la),d); b.fireCd=atk.stagger*atk.n+0.45*C.BOT.fireMult;
+      attack(b,Math.sin(la),Math.cos(la),d);
+      // (stagger||0) comme partout ailleurs. VOLT ne declarait pas de stagger, donc ce calcul
+      // rendait NaN — et NaN<=0 vaut faux, pour toujours : le bot tirait une fois au premier
+      // contact puis restait planté à regarder sa cible sans jamais rappuyer sur la détente.
+      b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
     const sp=b.brawler.super;
     if(b.super>=sp.cost){ const inR=d<(sp.radius||sp.dist||sp.range||atk.range)*0.9;

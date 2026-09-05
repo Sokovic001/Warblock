@@ -517,6 +517,21 @@ test('the spread is wide enough to feel (over 2 units) and stays in bounds', () 
 
 console.log('Power cubes');
 test('each cube adds +10% hp and +10% damage, capped at 10', () => { const b = C.BRAWLERS.bolt; assert.strictEqual(C.maxHp(b,0), b.hp); assert.strictEqual(C.maxHp(b,5), Math.round(b.hp*1.5)); assert.strictEqual(C.maxHp(b,25), C.maxHp(b,10)); assert.ok(Math.abs(C.dmgMult(3)-1.3)<1e-9); assert.strictEqual(C.dmgMult(99), C.dmgMult(10)); });
+test('every fired spec declares a numeric stagger, so a bot cooldown can never be NaN', () => {
+  // A bot arms its own cooldown with atk.stagger*atk.n. VOLT shipped with no stagger at all, so
+  // that came out NaN — and NaN<=0 is false for ever. A VOLT bot fired once at first contact
+  // then stood there facing you, never pulling the trigger again. The call sites that build
+  // projectiles all wrote (stagger||0); the one in the bot loop did not.
+  const specs=[];
+  for (const b of Object.values(C.BRAWLERS)){
+    specs.push([b.id+' attack', b.attack]);
+    if (b.super && b.super.n !== undefined) specs.push([b.id+' super', b.super]);
+  }
+  for (const [what, sp] of specs){
+    assert.strictEqual(typeof sp.stagger, 'number', `${what} declares no stagger`);
+    assert.ok(Number.isFinite(sp.stagger*sp.n), `${what}: stagger*n is not a finite number`);
+  }
+});
 test('a turret dies to one full ammo bar, whoever is shooting it', () => {
   // Not a balance nicety: a turret nobody can clear inside a reload owns the ground it sees for
   // its whole 15 seconds, and WARD wins the fight by placing it. Three ammo is the whole bar.
