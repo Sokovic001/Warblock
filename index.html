@@ -555,7 +555,7 @@
     <div class="wright">
       <div class="wring"><svg viewBox="0 0 120 120"><circle class="bg" cx="60" cy="60" r="52"></circle><circle class="fg" id="wArc" cx="60" cy="60" r="52"></circle></svg><div class="wcount"><b id="wSecs">25</b><small>SECONDS</small></div></div>
       <div class="wseats"><div class="wbar"><i id="wFill"></i></div><div class="wseatTxt"><b id="wSeated">1</b> / <span id="wSeats">20</span> brawlers seated</div></div>
-      <div class="wpot"><small>POT SO FAR</small><b id="wPot">$0</b></div>
+      <div class="wpot"><small>UP FOR GRABS</small><b id="wPot">$0</b></div>
     </div>
   </div>
   <div class="wfeed" id="wFeed"></div>
@@ -778,12 +778,12 @@ const WBCore = (function(){
   }
   function winAmount(modeId, stake, rng){
     const mode=MODES[modeId];
-    if(mode.cashout){                                  // banked a bucket: their own stake plus a few kills
-      const kills=1+Math.floor(rng()*7);
-      return { amount: cashoutPayout(cents(stake*(1+kills))).net, kills };
-    }
-    const p=teamPayout(stake, mode, RAKE);             // took the pot (their share of it)
-    return { amount: p.split, kills: 1+Math.floor(rng()*9) };
+    // Both games pay the same way now: what you are carrying when you walk out, less the house
+    // cut. Only the exit differs — Resurgence lets you bank mid-match, MAXWIN makes you survive
+    // to the end. The old MAXWIN branch returned the whole pot whatever the kill count, so the
+    // ticker advertised the same figure for a nineteen-kill run and for a win by hiding.
+    const kills=1+Math.floor(rng()*(mode.cashout?7:9));
+    return { amount: cashoutPayout(cents(stake*(1+kills))).net, kills };
   }
   function modeLabel(modeId){
     const m=MODES[modeId];
@@ -1058,7 +1058,7 @@ function renderLobby(){
   C.TIERS.forEach(t=>{ const p=C.teamPayout(t.stake,mode,C.RAKE); const b=document.createElement('button'); b.className='chip'; b.style.setProperty('--c',t.color); b.disabled=wallet<t.stake;
     // the two numbers that decide anything: what you put in, and what you can walk out with
     const takeHome = mode.cashout ? p.winner : (mode.teamSize>1 ? p.split : p.winner);
-    const winLabel = mode.cashout ? 'BANK UP TO' : (mode.teamSize>1 ? 'YOUR SHARE' : 'WIN');
+    const winLabel = 'UP TO';
     b.innerHTML=`<div class="ring">${t.stake<1?Math.round(t.stake*100)+'¢':'$'+t.stake}</div>`
       +`<div class="bet"><small>BET</small><b>${money(t.stake)}</b></div>`
       +`<div class="win"><small>${winLabel}</small><b>${money(takeHome)}</b></div>`
@@ -1070,7 +1070,7 @@ function renderLobby(){
   const pb=$('playBtn'), ptier=C.tierFor(selStake), ppay=C.teamPayout(selStake,mode,C.RAKE);
   pb.disabled=wallet<selStake;
   pb.innerHTML=wallet<selStake ? 'NOT ENOUGH CREDITS'
-    : `<b>ENTER ${ptier.label} TABLE</b><small>${money(selStake)} buy-in · ${mode.cashout?'bank up to '+money(ppay.winner):'pot '+money(ppay.winner)}</small>`;
+    : `<b>ENTER ${ptier.label} TABLE</b><small>${money(selStake)} buy-in · ${'up to '+money(ppay.winner)}</small>`;
   $('playSub').textContent=`${B[selBrawler].name} · ${mode.cashout?'RESURGENCE ':'MAXWIN '}${mode.name} · ${money(selStake)} table`;
   renderProfile();
   refreshOnline(true); // fill every counter now that all the cards exist, so nothing flashes empty
@@ -2586,7 +2586,7 @@ function hud(){
   $('alive').textContent=alive;
   $('aliveLbl').textContent=team?'TEAMS':'ALIVE';
   $('leftAmt').textContent = (!team && remaining>standing) ? remaining+' LEFT' : '';
-  $('potAmt2').textContent=G.modeCfg.cashout?'':'POT '+money(C.teamPayout(G.stake,G.modeCfg,C.RAKE).winner);
+  $('potAmt2').textContent=G.modeCfg.cashout?'':'UP TO '+money(C.teamPayout(G.stake,G.modeCfg,C.RAKE).winner);
   const sp=p.super/p.brawler.super.cost; $('superRing').style.setProperty('--p',(sp*100)+'%'); $('superRing').className=sp>=1?'ready':''; $('superIn').textContent=sp>=1?'SUPER!':Math.floor(sp*100)+'%';
   const z=G.zone, zt=$('zoneTxt');
   if(G.time<C.GRACE){ zt.textContent='SPAWN PROTECTION '+Math.ceil(C.GRACE-G.time)+'s'; zt.className='zone hot'; }
@@ -2750,7 +2750,7 @@ function endMatch(won,info){
   if(G.aim){ G.aim.g.visible=G.aim.tip.visible=G.aim.ring.visible=G.aim.blob.visible=false; }
   $('respawn').style.display='none';
   profile.stats.matches++; profile.stats.kills+=G.player.kills;
-  const p=G.player, mode=G.modeCfg, pay=C.teamPayout(G.stake,mode,C.RAKE), alive=team_or_players(), lines=[];
+  const p=G.player, mode=G.modeCfg, alive=team_or_players(), lines=[];
   const head=$('endHead');
   if(won&&mode.cashout){ // Resurgence: you leave with what is in your bucket, minus the no-kill fee
     const co=C.cashoutPayout(p.pouch); wallet+=co.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,co.net); snd('win',0.15);
@@ -2778,9 +2778,17 @@ function endMatch(won,info){
     setTimeout(()=>{ $('game').style.display='none'; $('end').classList.add('on'); endSting(won); },1200);
     return;
   }
-  if(won){ wallet+=pay.split; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,pay.split); snd('win',0.15); head.style.setProperty('--h1','#ffd23a'); head.style.setProperty('--h2','#ff8a1f');
+  if(won){
+    // The prize is what you are carrying, not a flat pot. You start on your own stake and every
+    // kill hands you the victim's, so a nineteen-kill run walks out with all twenty of them and
+    // a win by hiding walks out with one. Surviving is no longer enough on its own — which is
+    // the whole point of putting stakes on the players in the first place.
+    const take=C.cashoutPayout(p.pouch);
+    wallet+=take.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15); head.style.setProperty('--h1','#ffd23a'); head.style.setProperty('--h2','#ff8a1f');
     $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent='VICTORY!'; $('endRibbon').textContent=mode.teamSize>1?'LAST TEAM STANDING':'LAST ONE STANDING';
-    lines.push(['Stake',money(G.stake)],['Looted',money(Math.max(0,p.pouch-G.stake))],['Kills',p.kills],['Cubes','⬢'+p.cubes]); if(pay.rake) lines.push(['House rake','−'+money(pay.rake)]); lines.push([mode.teamSize>1?'Your split of '+money(pay.winner):'Pot won','+'+money(pay.split),'total']); }
+    lines.push(['Stake',money(G.stake)],['Taken from others',money(Math.max(0,p.pouch-G.stake))],['Kills',p.kills],['Cubes','⬢'+p.cubes]);
+    if(take.fee) lines.push(['House rake','−'+money(take.fee)]);
+    lines.push(['Carried out','+'+money(take.net),'total']); }
   else { snd('lose',0.15); head.style.setProperty('--h1','#f0463c'); head.style.setProperty('--h2','#8d1626');
     $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent=`#${info.rank} OF ${mode.teams}`; $('endRibbon').textContent=('ELIMINATED BY '+info.killer).toUpperCase();
     lines.push([mode.teamSize>1?'Teams left':'Still alive',alive],['Kills',p.kills],['Cubes','⬢'+p.cubes],['Net result','−'+money(G.stake),'total']); }

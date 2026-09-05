@@ -1,8 +1,8 @@
 # WARBLOCK — Showdown avec mises
 
-Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tu la ramasses en le tuant, le pot vaut 20 × la mise et le dernier debout en empoche **16 ×**, la maison prélevant 20 %.
+Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tuer quelqu'un te la verse aussitôt, et tu repars avec **ce que tu portes** — moins les 20 % de la maison. Rafler les vingt mises rapporte 16 × la tienne ; gagner sans tuer personne ne rapporte que la tienne, amputée de la commission.
 
-Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 123 tests sur les règles pures.
+Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 124 tests sur les règles pures.
 
 ## Lancer
 
@@ -192,10 +192,30 @@ L'économie est conservative : la somme des buckets encaissés et des buckets en
 
 **La maison prélève 20 % de tout paiement, dans les deux jeux** (`RAKE` dans le core) :
 
-- **MAXWIN** — sur le pot avant partage. Table $5 en Trio : pot $150 → maison $30 → gagnants $120 → **$40 chacun**.
+- **MAXWIN** — sur la poche du survivant, au moment où il sort. Table $5, dix mises ramassées : poche $50 → maison $10 → **$40 pour toi**.
 - **RESURGENCE** — sur le bucket à chaque cash out, quel qu'il soit. Bucket $2 (une mise à $0,50 plus trois kills) → maison $0,40 → **tu reçois $1,60**.
 
 Les montants affichés en jeu sont toujours le **net** : le bouton de cash out annonce ce que tu touches réellement, jamais le brut. L'écran de fin détaille la ligne « House cut (20%) ». Toute la chaîne de paiement travaille **au centime** (`cents()`), pour que les mises sous le dollar ne soient pas arrondies au passage. Les tables sont calibrées pour que le partage après commission tombe juste en Duo et en Trio — aucun arrondi ne mange un centime (vérifié par test sur les 4 tables × 5 modes).
+
+### Le pot n'est plus un forfait
+
+Le gain du vainqueur était une formule — mise × 20, moins la commission — indépendante de ses
+kills. Un joueur qui se cachait jusqu'au bout touchait exactement autant qu'un autre qui avait
+éliminé dix-neuf adversaires, ce qui vidait de son sens le fait de poser des mises sur les
+joueurs. Le prix est désormais **la poche**, et rien d'autre.
+
+| Fin de partie, table $5 | Poche | Gain |
+|---|---|---|
+| Dix-neuf kills, toutes les mises ramassées | $100 | **$80** |
+| Quelques kills | $45 | **$36** |
+| Zéro kill, gagné au gaz | $5 | **$4** |
+
+Le plafond ne bouge pas : rafler les vingt mises paie au centime près ce que l'ancien pot
+forfaitaire payait. C'est ce qui permet aux tables du lobby d'annoncer honnêtement « up to ».
+
+Une poche ne peut pas s'évaporer dans le gaz : la mort par zone crédite le dernier joueur à
+avoir infligé des dégâts, s'il est encore en vie. Seul un joueur que personne n'a jamais touché
+laisse son sac au sol — et il reste ramassable.
 
 ## Vies
 

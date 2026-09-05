@@ -40,6 +40,23 @@ test('the house still takes its 20% on a sub-dollar cash out', () => {
 test('tierFor resolves stakes and rejects unknown ones', () => { assert.strictEqual(C.tierFor(10).label, 'SHARK'); assert.strictEqual(C.tierFor(0.5).label, 'STREET'); assert.strictEqual(C.tierFor(7), null); });
 test('bot aim quality rises with the table, and every table still misses a lot', () => { for (let i=1;i<C.TIERS.length;i++) assert.ok(C.TIERS[i].acc > C.TIERS[i-1].acc); for (const t of C.TIERS) assert.ok(C.botAimError(t.acc) > 0.05); });
 
+test('the prize is what you carry out: a clean sweep pays exactly what the flat pot used to', () => {
+  // MAXWIN no longer hands the survivor a fixed pot. You leave with your own stake plus every
+  // stake you took, less the house cut — so killing is the only way the number grows, and
+  // winning by hiding pays your buy-in back minus the rake. The ceiling is unchanged: collect
+  // all of them and you land on the old figure to the cent, which is what keeps the advertised
+  // "up to" honest.
+  for (const t of C.TIERS){
+    const seats = C.MODES.solo.teams * C.MODES.solo.teamSize;
+    const sweep = C.cashoutPayout(C.cents(t.stake * seats));
+    const flat  = C.teamPayout(t.stake, C.MODES.solo, C.RAKE);
+    assert.strictEqual(sweep.net, flat.winner, `$${t.stake}: sweep ${sweep.net} vs old pot ${flat.winner}`);
+    const hid = C.cashoutPayout(t.stake);
+    assert.strictEqual(hid.net, C.cents(t.stake * (1 - C.RAKE)), `$${t.stake} with no kills`);
+    assert.ok(hid.net < sweep.net, 'hiding must never pay as well as hunting');
+  }
+});
+
 console.log('Modes');
 test('three modes: solo 20×1, duo 10×2, trio 10×3', () => {
   const M = C.MODES; assert.deepStrictEqual([M.solo.teams,M.solo.teamSize],[20,1]); assert.deepStrictEqual([M.duo.teams,M.duo.teamSize],[10,2]); assert.deepStrictEqual([M.trio.teams,M.trio.teamSize],[10,3]);
@@ -181,11 +198,10 @@ test('every advertised win is an amount the payout maths can actually produce', 
   const rng = C.makeRng(3);
   for (let i=0;i<400;i++){ const e = C.makeWinEvent(rng);
     assert.ok(C.MODES[e.modeId], 'unknown mode'); assert.ok(C.tierFor(e.stake), 'unknown table');
-    if (e.cashout){ // a banked bucket: own stake + the stakes taken from `kills` victims, less the cut
-      assert.strictEqual(e.amount, C.cashoutPayout(e.stake*(1+e.kills)).net, JSON.stringify(e));
-    } else {         // a share of the pot for that mode and table
-      assert.strictEqual(e.amount, C.teamPayout(e.stake, C.MODES[e.modeId], C.RAKE).split, JSON.stringify(e));
-    }
+    // Both games pay the same way: own stake plus the stakes taken from `kills` victims, less
+    // the house cut. MAXWIN used to advertise the flat pot whatever the kills, which meant the
+    // ticker showed the same figure for a nineteen-kill run and for a win by hiding.
+    assert.strictEqual(e.amount, C.cashoutPayout(e.stake*(1+e.kills)).net, JSON.stringify(e));
   }
 });
 test('no advertised win can exceed the whole table', () => {
