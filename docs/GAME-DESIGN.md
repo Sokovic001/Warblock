@@ -2,7 +2,7 @@
 
 Réécriture du concept sur la boucle de **Brawl Stars Showdown** : vue de dessus 3/4, visée à la souris, brawlers avec attaque + super, munitions qui se rechargent, buissons, murs, caisses → cubes de pouvoir, gaz qui se referme. Plus l'économie : chaque joueur porte sa mise, tu la ramasses en le tuant, le pot vaut 20 × la mise et le dernier debout en empoche **16 ×**, la maison prélevant 20 %.
 
-Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 121 tests sur les règles pures.
+Un seul fichier HTML (Three.js r128 via CDN). `node test.js` → 123 tests sur les règles pures.
 
 ## Lancer
 
