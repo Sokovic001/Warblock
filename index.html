@@ -2404,7 +2404,16 @@ function botUpdate(b,dt){
       b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
     const sp=b.brawler.super;
-    if(b.super>=sp.cost){ const inR=d<(sp.radius||sp.dist||sp.range||atk.range)*0.9;
+    if(b.super>=sp.cost){
+      // A super's reach depends on its shape: a burst or a lob flies `range`, a thrown zone
+      // lands anywhere inside `range`, a slam goes off around you within `radius`, a dash covers
+      // `dist`. The old chain read radius first whatever the kind — and on a projectile, radius
+      // is how big the bomb is drawn, not how far it travels. VOLT's super was gated at 0.41
+      // blocks instead of 8.1, so a VOLT bot effectively never threw it; PYRO waited until 2.7
+      // when it can place its pool out to 5.4.
+      const reach=(sp.kind==='burst'||sp.kind==='lob'||sp.kind==='zone')?(sp.range||atk.range)
+                 :(sp.radius||sp.dist||sp.range||atk.range);
+      const inR=d<reach*0.9;
       if(sp.kind==='heal'){ if(low) useSuper(b); }
       else if(sp.kind==='stealth'){ if(low||d<atk.range) useSuper(b); }
       else if(sp.kind==='turret'){ useSuper(b); }
