@@ -501,6 +501,14 @@ test('the spread is wide enough to feel (over 2 units) and stays in bounds', () 
 
 console.log('Power cubes');
 test('each cube adds +10% hp and +10% damage, capped at 10', () => { const b = C.BRAWLERS.bolt; assert.strictEqual(C.maxHp(b,0), b.hp); assert.strictEqual(C.maxHp(b,5), Math.round(b.hp*1.5)); assert.strictEqual(C.maxHp(b,25), C.maxHp(b,10)); assert.ok(Math.abs(C.dmgMult(3)-1.3)<1e-9); assert.strictEqual(C.dmgMult(99), C.dmgMult(10)); });
+test('a turret dies to one full ammo bar, whoever is shooting it', () => {
+  // Not a balance nicety: a turret nobody can clear inside a reload owns the ground it sees for
+  // its whole 15 seconds, and WARD wins the fight by placing it. Three ammo is the whole bar.
+  const t = C.BRAWLERS.ward.super;
+  assert.strictEqual(t.kind, 'turret');
+  for (const b of Object.values(C.BRAWLERS))
+    assert.ok(Math.ceil(t.hp/eff(b)) <= 3, `${b.id} needs ${Math.ceil(t.hp/eff(b))} full attacks for ${t.hp} hp`);
+});
 test('a box breaks in at most two full attacks for every brawler', () => { for (const b of Object.values(C.BRAWLERS)) assert.ok(eff(b)*2 >= C.BOX_HP, b.id); });
 test('bots drop their cubes on death (loot is transferable, like stakes)', () => assert.strictEqual(C.BOT.dropCubesOnKill, true));
 

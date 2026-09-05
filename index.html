@@ -1948,7 +1948,21 @@ function useSuper(e,aimDist){
   }
   if(e.isPlayer) snd('super',0.14); return true;
 }
-function hurtTurret(tu,dmg){ tu.hp-=dmg; if(tu.hp<=0){ world.remove(tu.mesh); discard(tu.mesh); const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1); } }
+// A turret has always taken fire — projectiles and blasts both reach it. What it never did was
+// say so: 140 hp came off in complete silence and the thing simply vanished, which reads as
+// invulnerable right up to the moment it is not. Damage now punches the mesh, prints a number
+// and moves a health bar, so you can tell that shooting it is worth your ammo.
+function hurtTurret(tu,dmg){
+  if(tu.hp<=0) return;
+  tu.hp-=dmg; tu.flash=0.14;
+  floatText(tu,'-'+Math.round(dmg),'');
+  if(tu.hp<=0){
+    world.remove(tu.mesh); discard(tu.mesh);
+    if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; }
+    const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1);
+    snd('box',0.12);
+  }
+}
 function dashUpdate(e,dt){
   if(e.dashT<=0) return false; e.dashT-=dt;
   const step=22*dt; if(free(e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
@@ -1960,7 +1974,8 @@ function zonesUpdate(dt){
     if(z.tick<=0){ z.tick=0.25; for(const t of G.ents){ if(t===z.owner||!t.alive||t.team===z.owner.team) continue; if(Math.hypot(t.x-z.x,t.z-z.z)<z.r) damage(t,z.dps*0.25,z.owner); } }
     if(z.life<=0){ world.remove(z.mesh); discard(z.mesh); G.zones.splice(i,1); } }
   for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
-    if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); G.turrets.splice(i,1); continue; }
+    if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; } G.turrets.splice(i,1); continue; }
+    if(tu.flash>0){ tu.flash-=dt; tu.mesh.scale.setScalar(1+tu.flash*1.1); } else if(tu.mesh.scale.x!==1) tu.mesh.scale.setScalar(1);
     let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(tu.x,tu.z,t.x,t.z)&&!(inBush(t)&&d>2.5)){ bd=d; best=t; } }
     if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.mesh.rotation.y=Math.atan2(dx,dz)+Math.PI; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
   }
@@ -2540,6 +2555,17 @@ function hudFast(){
     bar.lastChild.textContent=Math.ceil(Math.max(0,e.hp));
     if(e.isPlayer){ const am=e.lbl.children[4].children; for(let i=0;i<3;i++) am[i].className=i<e.ammo?'on':(i===e.ammo?(e.ammoT/e.brawler.ammoReload>0.5?'on':''):''); }
     const s2=toScreen(e.x,2.9,e.z); e.lbl.style.top=s2.sy+'px';
+  }
+  // Same treatment for turrets. They were the only thing on the map you could shoot without any
+  // idea whether it was working — green bar for your own, red for one that is shooting at you.
+  for(const tu of G.turrets){
+    if(!tu.lbl){ tu.lbl=document.createElement('div'); tu.lbl.className='lbl'+(tu.owner.team===p.team?' you':''); tu.lbl.innerHTML='<div class="bar"><i></i><b></b></div>'; L.appendChild(tu.lbl); }
+    const st=toScreen(tu.x,2.1,tu.z);
+    if(!st.ok||st.sx<-80||st.sx>innerWidth+80||st.sy<-40||st.sy>innerHeight+40){ tu.lbl.style.display='none'; continue; }
+    tu.lbl.style.display='block'; tu.lbl.style.left=st.sx+'px'; tu.lbl.style.top=st.sy+'px';
+    const tb=tu.lbl.firstChild;
+    tb.firstChild.style.width=(clamp(tu.hp/tu.maxHp,0,1)*100)+'%';
+    tb.lastChild.textContent=Math.ceil(Math.max(0,tu.hp));
   }
 }
 function hud(){
