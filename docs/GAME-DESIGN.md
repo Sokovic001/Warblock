@@ -180,7 +180,7 @@ Deux variantes, **50 joueurs sur la map dans les deux cas** :
 
 Règles communes aux deux :
 - **50 joueurs**, gaz qui se referme presque deux fois plus vite (match ≈ 1 min 20) et 150 caisses au lieu de 90.
-- **Transfert instantané** : tuer quelqu'un verse *immédiatement* tout son bucket dans le tien — sa mise plus tout ce qu'il avait lui-même récupéré. Rien ne tombe par terre, personne ne peut te le voler entre-temps.
+- **Transfert instantané** : tuer quelqu'un verse *immédiatement* tout son bucket dans le tien — sa mise plus tout ce qu'il avait lui-même récupéré. Rien ne tombe par terre, personne ne peut te le voler entre-temps. La règle vaut aussi en MAXWIN depuis ; ce qui distingue Resurgence, c'est de pouvoir encaisser ce bucket en cours de partie.
 - **Cash out quand tu veux** : bouton vert au centre (touche `C` au clavier, tap sur mobile). Tu quittes la partie avec exactement le contenu de ton bucket, crédité au wallet.
 - **Verrou de 10 s** : le bouton se bloque et passe au gris avec un compte à rebours dès que tu prends **un dégât** (tir, gaz, explosion) **ou** que tu viens de **tuer quelqu'un**. Impossible de frapper puis de fuir dans la seconde.
 - Mourir = tout perdre, bucket compris. Les bots encaissent aussi quand ils sont assez riches, ce qui vide la table progressivement.
@@ -223,7 +223,8 @@ Pas de tir allié (balles, supers, flaques, tourelles, dash — rien ne touche t
 - **Caisses** (90 par map, 90 PV) : casser → **65 % un cube de pouvoir ⬢**, **35 % un cœur ♥**. Le cube donne +10 % PV max et +10 % dégâts (max 10) ; le cœur rend **40 % des PV max instantanément**, soit environ 5 secondes de régénération économisées. Un cœur laissé au sol si on est déjà au maximum.
 - **Régénération** : hors combat depuis 3 s, 7,5 % des PV max par seconde — un BOLT tombé à 30 PV revient au plein en 12,7 s. Les gains s'affichent en vert au-dessus de la tête, par paliers, pour qu'on voie que ça monte.
 - **Buissons** : invisible dedans sauf à moins de 2,5 blocs (ou ligne de vue directe). Les murs bloquent les tirs et les déplacements.
-- **Kill** : la victime lâche un **sac d'or** (toute sa mise + ce qu'elle avait ramassé) et **tous ses cubes**. Ramassage automatique en marchant dessus — n'importe qui peut voler.
+- **Kill** : la poche de la victime — sa mise plus tout ce qu'elle avait ramassé — passe **immédiatement** dans la tienne, dans les deux jeux. Rien à aller chercher, personne ne te la vole entre-temps. Ses **cubes**, eux, tombent au sol et restent volables par n'importe qui.
+- **Mort sans tueur** : gaz, abandon. Là, la poche tombe bien en **sac d'or** à l'endroit exact de la mort, y compris dans la zone — à toi de juger si le détour vaut les dégâts.
 - **Gaz** : 4 phases (25 s d'attente → 34 s de fermeture, puis 18+26, 12+18, 8+13 — 154 s en tout), dégâts en % des PV max (4 → 16 %/s). Match < 2 min 30 après la protection de 8 s.
 - **Tables** : $0,50 STREET · $1 PRO · $5 ELITE · $10 SHARK. Le matchmaking ne mélange jamais les mises. La qualité de visée des bots monte avec la table (erreur angulaire max 13,2° à STREET → 4,3° à SHARK, soit un cône de 26,5° puis 8,7°), avec 0,55 s de réaction et une cadence 1,35× plus lente que la tienne.
 

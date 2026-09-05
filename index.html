@@ -2068,10 +2068,15 @@ function kill(victim,killer,cause){
   if(!victim.alive) return;
   victim.alive=false; victim.mesh.visible=false; victim.stealthT=0; victim.dashT=0; victim.invuln=0;
   // whatever you carried always drops, on every death — that is what keeps the money moving
-  const instant=G.modeCfg.cashout&&killer&&killer.alive;
+  // The pouch now goes straight to whoever put them down, in both games. Dropping it as a bag in
+  // MAXWIN meant walking back through the fight you had just won to collect it, and often
+  // somebody else reached it first. A death with nobody to credit — the gas, an abandon — still
+  // drops on the ground, otherwise that money would simply leave the match.
+  const instant=killer&&killer.alive;
   if(instant){
-    killer.pouch=C.bucketAfterKill(killer.pouch,victim.pouch); killer.cashLock=C.CASHOUT.lock;
-    if(killer.isPlayer&&victim.pouch>0){ snd('cash',0.14); feed(`+${money(victim.pouch)} banked from ${victim.name}`,true); floatText(killer,'+'+money(victim.pouch),'heal'); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
+    killer.pouch=C.bucketAfterKill(killer.pouch,victim.pouch);
+    if(G.modeCfg.cashout) killer.cashLock=C.CASHOUT.lock;
+    if(killer.isPlayer&&victim.pouch>0){ snd('cash',0.14); feed(`+${money(victim.pouch)} ${G.modeCfg.cashout?'banked':'taken'} from ${victim.name}`,true); floatText(killer,'+'+money(victim.pouch),'heal'); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
   } else if(victim.pouch>0) spawnPickup('cash',victim.x,victim.z,victim.pouch,victim.name);
   if(C.BOT.dropCubesOnKill) for(let i=0;i<victim.cubes;i++) spawnPickup('cube',victim.x,victim.z,1,null);
   victim.pouch=0; victim.cubes=0;
