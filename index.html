@@ -2112,13 +2112,22 @@ function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)
 function floatText(e,txt,cls){ const s=toScreen(e.x,2.3,e.z); if(!s.ok) return; const d=document.createElement('div'); d.className='dmg '+(cls||''); d.textContent=txt; d.style.left=(s.sx+(Math.random()-0.5)*30)+'px'; d.style.top=s.sy+'px'; $('labels').appendChild(d); setTimeout(()=>d.remove(),800); }
 
 // ---------- bots ----------
-function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } } return best; }
+function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } }
+  // Nothing in sight, but somebody is shooting: turn and face them. Sight stops at 14 blocks
+  // while HEX reaches 15 and BOLT 11, so a bot could be shot from outside its own awareness and
+  // just stand there — which is what made them read as asleep until you walked up to them.
+  if(!best&&b.lastHitBy&&b.lastHitBy.alive&&b.lastHitBy.team!==b.team&&G.time-b.lastDamageT<4) best=b.lastHitBy;
+  return best; }
 function inZone(x,z,m){ return Math.hypot(x-G.zone.cx,z-G.zone.cz)<G.zone.r-(m||0); }
 function pickGoal(b){
+  // Anything this bot already wedged itself against is off the list. Without that, the nearest
+  // crate is nearest every time it asks, so a bot walled off from one was handed the same
+  // unreachable goal every eight seconds and spent the whole match facing a rock.
+  const bad=b.badGoals;
   let best=null,bd=22;
-  for(const pk of G.pickups){ const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
+  for(const pk of G.pickups){ if(bad&&bad.has(pk)) continue; const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
   if(best) return best; bd=34;
-  for(const bx of G.boxes){ if(bx.hp<=0) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
+  for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
   if(best) return best;
   if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(Math.random()-0.5)*4,z:mate.z+(Math.random()-0.5)*4}; }
   const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
@@ -2159,8 +2168,30 @@ function botUpdate(b,dt){
     else if(d>0.5){ mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; }
     if(Math.hypot(mx,mz)>0.01&&!b.goal.box){ b.ax=mx; b.az=mz; }
   }
-  // simple wall avoidance: if blocked ahead, slide sideways
-  if(Math.hypot(mx,mz)>0.01&&!free(b.x+mx*0.9,b.z+mz*0.9)){ const s=(b.id>0.5?1:-1); const tx=-mz*s,tz=mx*s; if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; } else { mx=-tx; mz=-tz; } }
+  // Wall avoidance. The old version tried one perpendicular and, when that was blocked too,
+  // committed to its opposite without ever checking it — so a bot that walked into a concave
+  // corner pushed at the stone forever. Nothing is taken now unless it is actually free.
+  const wanted=Math.hypot(mx,mz)>0.01;
+  if(wanted&&!free(b.x+mx*0.9,b.z+mz*0.9)){
+    const s=(b.id>0.5?1:-1), tx=-mz*s, tz=mx*s;
+    if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; }
+    else if(free(b.x-tx*0.9,b.z-tz*0.9)){ mx=-tx; mz=-tz; }
+    else { mx=0; mz=0; }
+  }
+  // Progress watchdog. Sliding sideways is not enough on its own: pickGoal() hands back the
+  // nearest crate by distance, so a bot wedged against the wall in front of one was given the
+  // same unreachable goal every eight seconds and never left. If it has been asking to move and
+  // covering no ground, drop that goal and strike out in any direction that is open.
+  const moved=Math.hypot(b.x-(b.px??b.x),b.z-(b.pz??b.z));
+  b.px=b.x; b.pz=b.z;
+  if(wanted&&moved<b.speed*dt*0.2) b.stuckT=(b.stuckT||0)+dt; else b.stuckT=0;
+  if(b.stuckT>0.5){
+    b.stuckT=0;
+    if(b.goal){ (b.badGoals||(b.badGoals=new Set())).add(b.goal.box||b.goal.pick||b.goal); }
+    b.goal=null; b.goalT=0;
+    for(let k=0;k<8;k++){ const a=Math.random()*Math.PI*2, ex=Math.cos(a), ez=Math.sin(a);
+      if(free(b.x+ex*1.2,b.z+ez*1.2)){ mx=ex; mz=ez; break; } }
+  }
   moveEntity(b,mx,mz,dt);
 }
 
