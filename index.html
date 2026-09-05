@@ -2151,6 +2151,23 @@ function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)
 function floatText(e,txt,cls){ const s=toScreen(e.x,2.3,e.z); if(!s.ok) return; const d=document.createElement('div'); d.className='dmg '+(cls||''); d.textContent=txt; d.style.left=(s.sx+(Math.random()-0.5)*30)+'px'; d.style.top=s.sy+'px'; $('labels').appendChild(d); setTimeout(()=>d.remove(),800); }
 
 // ---------- bots ----------
+// Somewhere to break off to: a bush to sit in, or any spot that puts stone between the two of
+// you. Scored on being hidden, being cover rather than open ground, and being away from the
+// threat — while staying close enough that the walk there is not itself a death sentence.
+function findCover(b,t){
+  let best=null,bs=-1e9;
+  for(let k=0;k<24;k++){ const a=k/24*Math.PI*2;
+    for(const rad of [4,7,10]){
+      const nx=b.x+Math.cos(a)*rad, nz=b.z+Math.sin(a)*rad;
+      if(nx<2||nz<2||nx>N-2||nz>N-2) continue;
+      if(!free(nx,nz)||!inZone(nx,nz,2.5)) continue;
+      const hidden=!losClear(nx,nz,t.x,t.z), bush=cellAt(nx,nz)===2;
+      if(!hidden&&!bush) continue;
+      const sc=(hidden?3:0)+(bush?2.2:0)+Math.hypot(nx-t.x,nz-t.z)*0.07-rad*0.06;
+      if(sc>bs){ bs=sc; best={x:nx,z:nz}; }
+    } }
+  return best;
+}
 function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } }
   // Nothing in sight, but somebody is shooting: turn and face them. Sight stops at 14 blocks
   // while HEX reaches 15 and BOLT 11, so a bot could be shot from outside its own awareness and
@@ -2189,7 +2206,22 @@ function botUpdate(b,dt){
   if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+Math.random()*0.6); b.target=nt;
     if(!b.target&&(!b.goal||b.goalT<=0||Math.hypot(b.goal.x-b.x,b.goal.z-b.z)<0.8||(b.goal.box&&b.goal.box.hp<=0)||(b.goal.pick&&!G.pickups.includes(b.goal.pick)))){ b.goal=pickGoal(b); b.goalT=8; } }
   let mx=0,mz=0; const atk=b.brawler.attack;
-  if(!inZone(b.x,b.z,1.5)){ mx=G.zone.cx-b.x; mz=G.zone.cz-b.z; }
+  // Two ways of being hurt, split by temperament. A bot that has broken off is heading for its
+  // cover and sitting in it until the health comes back — it holds fire on purpose, because a
+  // player who keeps shooting from a bush has not really disengaged. It comes back out the
+  // moment it is patched up, its patience runs out, or somebody walks in on it.
+  const seeksCover=(b.id*17%1)<0.55, returnAt=0.6+(b.id*19%1)*0.25;
+  if(b.cover){
+    b.coverT-=dt;
+    const near=b.target&&Math.hypot(b.target.x-b.x,b.target.z-b.z)<b.brawler.attack.range*0.6;
+    if(b.hp>=maxHp(b)*returnAt||b.coverT<=0||near||!inZone(b.x,b.z,1.5)) b.cover=null;
+  }
+  if(!inZone(b.x,b.z,1.5)){ mx=G.zone.cx-b.x; mz=G.zone.cz-b.z; b.cover=null; }
+  else if(b.cover){
+    const dc=Math.hypot(b.cover.x-b.x,b.cover.z-b.z);
+    if(dc>0.8){ mx=(b.cover.x-b.x)/dc; mz=(b.cover.z-b.z)/dc; }
+    if(b.target){ const t=b.target, d=Math.hypot(t.x-b.x,t.z-b.z)||1; b.ax=(t.x-b.x)/d; b.az=(t.z-b.z)/d; }
+  }
   else if(b.target){
     const t=b.target, d=Math.hypot(t.x-b.x,t.z-b.z); const dx=(t.x-b.x)/d, dz=(t.z-b.z)/d;
     b.ax=dx; b.az=dz;
@@ -2200,11 +2232,18 @@ function botUpdate(b,dt){
     const nerve=0.18+(b.id*7%1)*0.26, aggr=0.45+(b.id*13%1)*0.35;
     const low=b.hp<maxHp(b)*nerve;
     const want=b.brawler.id==='hex'?atk.range*0.8:atk.range*aggr;
-    if(low){
-      // Break off towards the circle, not straight backwards. Reversing blindly is exactly how
-      // a wounded bot ended up flattened against whatever happened to be behind it.
+    if(low&&seeksCover){
+      // The cautious half leaves the fight properly: find something to get behind, heal up,
+      // come back. Falling back a few steps while still trading shots heals nobody.
+      const c=findCover(b,t); if(c){ b.cover=c; b.coverT=14; }
       const zx=G.zone.cx-b.x, zz=G.zone.cz-b.z, zl=Math.hypot(zx,zz)||1;
       mx=-dx*0.75+zx/zl*0.55; mz=-dz*0.75+zz/zl*0.55;
+    }
+    else if(low){
+      // The reckless half keeps the fight, and gets harder to hit rather than backing off:
+      // wider, faster circling and no retreat. Some players do exactly this, and win with it.
+      const s=Math.sin(G.time*(1.9+(b.id*11%1)*0.9)+b.id*9);
+      mx=-dz*s-dx*0.22; mz=dx*s-dz*0.22;
     }
     else if(d>want){ mx=dx; mz=dz; }
     else { const s=Math.sin(G.time*(1.0+(b.id*11%1)*0.8)+b.id*9); mx=-dz*s; mz=dx*s; if(d<want*0.5&&b.brawler.id!=='brick'){ mx-=dx*0.7; mz-=dz*0.7; } }
