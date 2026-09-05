@@ -11,8 +11,32 @@ function test(name, fn){ try { fn(); passed++; console.log('  ✓', name); } cat
 
 console.log('Economy');
 test('four tables: $0.50 / $1 / $5 / $10', () => assert.deepStrictEqual(C.TIERS.map(t=>t.stake), [0.5,1,5,10]));
-test('the house keeps 20% of every payout', () => { assert.strictEqual(C.RAKE, 0.20); for (const t of C.TIERS){ const p = C.payout(t.stake, C.PLAYERS, C.RAKE); assert.strictEqual(p.pot, t.stake*20); assert.strictEqual(p.rake, Math.round(p.pot*0.2)); assert.strictEqual(p.winner, p.pot - p.rake); } });
+test('the house keeps 20% of every payout', () => { assert.strictEqual(C.RAKE, 0.20); for (const t of C.TIERS){ const p = C.payout(t.stake, C.PLAYERS, C.RAKE); assert.strictEqual(p.pot, t.stake*20); assert.strictEqual(p.rake, C.cents(p.pot*0.2)); assert.strictEqual(p.winner, p.pot - p.rake); } });
 test('rake comes off the winner, not the pot', () => { const p = C.payout(100, 20, 0.05); assert.deepStrictEqual(p, {pot:2000, rake:100, winner:1900}); });
+test('payout still charges the house even when the caller forgets the rake', () => {
+  // It used to fall back to 0% on a missing argument and hand over the gross pot. Every call
+  // site happened to pass C.RAKE, so nothing showed — the next one to forget would not be so
+  // lucky. An explicit 0 is still honoured, that is a caller saying what it means.
+  assert.deepStrictEqual(C.payout(10, 20), C.payout(10, 20, C.RAKE));
+  assert.strictEqual(C.payout(10, 20).rake, C.cents(200 * C.RAKE));
+  assert.strictEqual(C.payout(10, 20, 0).rake, 0);
+});
+test('cents() keeps sub-dollar precision — rounding to the dollar would erase the rake', () => {
+  // Every assertion below is a whole dollar away from what Math.round(v) returns, which is the
+  // trap CLAUDE.md warns about: at $0.50 an integer rounding wipes the 20% out entirely.
+  assert.strictEqual(C.cents(0.5), 0.5);
+  assert.strictEqual(C.cents(0.4), 0.4);
+  assert.strictEqual(C.cents(0.1), 0.1);
+  assert.strictEqual(C.cents(0.005), 0.01);
+  assert.strictEqual(C.cents(7.005), 7.01);
+});
+test('the house still takes its 20% on a sub-dollar cash out', () => {
+  assert.deepStrictEqual(C.cashoutPayout(0.5), {gross:0.5, fee:0.1, net:0.4});
+  assert.deepStrictEqual(C.cashoutPayout(1.5), {gross:1.5, fee:0.3, net:1.2});
+  for (const g of [0.05, 0.15, 0.5, 1.5, 7.35]){ const p = C.cashoutPayout(g);
+    assert.ok(p.fee > 0, `$${g} cashed out without paying any rake`);
+    assert.strictEqual(C.cents(p.fee + p.net), C.cents(p.gross), `$${g} loses money in the split`); }
+});
 test('tierFor resolves stakes and rejects unknown ones', () => { assert.strictEqual(C.tierFor(10).label, 'SHARK'); assert.strictEqual(C.tierFor(0.5).label, 'STREET'); assert.strictEqual(C.tierFor(7), null); });
 test('bot aim quality rises with the table, and every table still misses a lot', () => { for (let i=1;i<C.TIERS.length;i++) assert.ok(C.TIERS[i].acc > C.TIERS[i-1].acc); for (const t of C.TIERS) assert.ok(C.botAimError(t.acc) > 0.05); });
 
@@ -23,7 +47,7 @@ test('three modes: solo 20×1, duo 10×2, trio 10×3', () => {
 test('team pot = players × stake, and the after-rake winnings still split evenly', () => {
   for (const m of Object.values(C.MODES)) for (const t of C.TIERS){ const p = C.teamPayout(t.stake, m, C.RAKE);
     assert.strictEqual(p.pot, t.stake*m.teams*m.teamSize);
-    assert.strictEqual(p.rake, Math.round(p.pot*C.RAKE), `${m.id} ${t.stake}`);
+    assert.strictEqual(p.rake, C.cents(p.pot*C.RAKE), `${m.id} ${t.stake}`);
     assert.strictEqual(p.split*m.teamSize, p.winner, `${m.id} ${t.stake} leaves a remainder`); }
 });
 test('solo split equals the whole after-rake pot', () => { const p = C.teamPayout(100, C.MODES.solo, C.RAKE); assert.strictEqual(p.split, p.winner); assert.strictEqual(p.winner, 1600); });
@@ -182,10 +206,16 @@ test('the ticker shows both games and all four tables over time', () => {
   for (let i=0;i<300;i++){ const e = C.makeWinEvent(rng); games.add(e.cashout?'res':'max'); tables.add(e.stake); }
   assert.strictEqual(games.size, 2); assert.strictEqual(tables.size, 4);
 });
-test('cheap tables appear far more often than the $1000 one', () => {
-  const rng = C.makeRng(9); let cheap = 0, rich = 0;
-  for (let i=0;i<2000;i++){ const e = C.makeWinEvent(rng); if (e.stake===5) cheap++; if (e.stake===1000) rich++; }
-  assert.ok(cheap > rich*4, `${cheap} vs ${rich}`);
+test('the ticker leans on the cheap tables, in the order the tables are priced', () => {
+  // The old version counted e.stake===1000 — a table that does not exist, so `rich` was always
+  // zero and the assertion collapsed to `cheap > 0`. Inverting TIER_SHARE left it green.
+  const rng = C.makeRng(9), n = {};
+  for (const t of C.TIERS) n[t.stake] = 0;
+  for (let i=0;i<2000;i++) n[C.makeWinEvent(rng).stake]++;
+  const stakes = C.TIERS.map(t=>t.stake);
+  for (let i=1;i<stakes.length;i++)
+    assert.ok(n[stakes[i-1]] > n[stakes[i]], `$${stakes[i-1]} (${n[stakes[i-1]]}) should out-appear $${stakes[i]} (${n[stakes[i]]})`);
+  assert.ok(n[0.5] > n[10]*4, `$0.50 ${n[0.5]} vs $10 ${n[10]}`);
 });
 test('pickWeighted respects its weights and always returns a real key', () => {
   const rng = C.makeRng(2), counts = {a:0,b:0};
@@ -415,7 +445,21 @@ test('hex damage ramps from close to far and caps at range', () => { const a = C
 
 console.log('Speed');
 test('speed is derived from health and reach, never hand-written', () => {
-  for (const b of Object.values(C.BRAWLERS)) assert.strictEqual(b.speed, C.derivedSpeed(b.hp, b.attack.range, b.agility), b.id);
+  // Comparing b.speed back to derivedSpeed(...) can never fail: the loop in the CORE block has
+  // already written exactly that value onto every brawler, so the assertion only restates it.
+  // Re-run the core with that loop removed and inspect the literal itself, which is the one
+  // place a hand-written speed can survive.
+  const LOOP = 'for(const b of Object.values(BRAWLERS)) b.speed = derivedSpeed(b.hp, b.attack.range, b.agility);';
+  assert.ok(core.includes(LOOP), 'the speed-derivation loop moved — update this test');
+  const bare = { exports: {} }; new Function('module', 'exports', core.replace(LOOP, ''))(bare, bare.exports);
+  for (const b of Object.values(bare.exports.BRAWLERS)) assert.strictEqual(b.speed, undefined, `${b.id} ships a hand-written speed`);
+});
+test('the derived speed table is pinned, so retuning SPEED cannot pass unnoticed', () => {
+  // Without this, changing a SPEED constant silently moves every brawler and rewrites the
+  // table published in docs/GAME-DESIGN.md while the suite stays green.
+  const expected = { bolt:7.3, shell:6.7, brick:5.65, hex:7.5, pyro:6.45, medic:7, volt:7.35, ghost:8.1, rush:6.25, ward:6.8 };
+  assert.deepStrictEqual(Object.keys(C.BRAWLERS).sort(), Object.keys(expected).sort());
+  for (const [id, s] of Object.entries(expected)) assert.strictEqual(C.BRAWLERS[id].speed, s, id);
 });
 test('bulkier brawlers are slower: speed correlates negatively with health', () => {
   const bs = Object.values(C.BRAWLERS);
@@ -461,23 +505,48 @@ test('a box breaks in at most two full attacks for every brawler', () => { for (
 test('bots drop their cubes on death (loot is transferable, like stakes)', () => assert.strictEqual(C.BOT.dropCubesOnKill, true));
 
 console.log('Map');
+// Counts walkable cells the player can never stand on because nothing links them to the centre.
+// Zero is the only acceptable answer: a percentage bar tolerated a sealed room and hid the bug.
+const unreachable = seed => {
+  const m = C.generateMap(seed), N = C.MAP, seen = new Uint8Array(N*N), start = (N>>1)*N+(N>>1);
+  const q = [start]; seen[start] = 1;
+  for (let qi=0; qi<q.length; qi++){ const cur=q[qi], x=(cur/N)|0, z=cur%N;
+    for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx, nz=z+dz;
+      if (nx<0||nz<0||nx>=N||nz>=N) continue;
+      const i=nx*N+nz; if (seen[i]||C.BLOCKING(m[i])) continue; seen[i]=1; q.push(i); } }
+  let lost = 0; for (let i=0;i<m.length;i++) if (!C.BLOCKING(m[i]) && !seen[i]) lost++;
+  return lost;
+};
 test('map is MAP×MAP with only floor / wall / bush / prop cells, deterministic per seed', () => { const a = C.generateMap(11), b = C.generateMap(11); assert.strictEqual(a.length, C.MAP*C.MAP); assert.deepStrictEqual(Array.from(a), Array.from(b)); for (const c of a) assert.ok(c===0||c===1||c===2||c===3); });
 test('walls and props block, bushes never do', () => { assert.ok(C.BLOCKING(1)); assert.ok(C.BLOCKING(3)); assert.ok(!C.BLOCKING(0)); assert.ok(!C.BLOCKING(2)); });
 test('props are sparse cover, never a maze', () => { for (const seed of [3,9,44]){ const m = C.generateMap(seed); let p=0; for (const c of m) if (c===3) p++; assert.ok(p/m.length > 0.002 && p/m.length < 0.04, `seed ${seed}: ${(p/m.length*100).toFixed(1)}%`); } });
-test('every prop is dropped in the open, so none can seal a corridor', () => {
-  const m = C.generateMap(21), N = C.MAP;
-  for (let x=1;x<N-1;x++) for (let z=1;z<N-1;z++){ if (m[x*N+z]!==3) continue;
-    // the four orthogonal neighbours were all open ground before the prop was placed
-    let blocked = 0; for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]) if (m[(x+dx)*N+(z+dz)]===1||m[(x+dx)*N+(z+dz)]===2) blocked++;
-    assert.strictEqual(blocked, 0, `prop at ${x},${z} was placed against cover`); }
+test('no two props touch: every prop keeps open floor on all four sides', () => {
+  // The old version read a single seed and counted a neighbour as blocking when it was a wall
+  // or a bush — but bushes do not block and props (type 3) do, so it tested the wrong set and
+  // could not see two props meeting. Careful: this restates the placement guard, it does NOT
+  // prove a prop cannot seal a corridor. Four props on the diagonals of one cell still cage
+  // it, and a single prop can still plug a one-cell gap; both happen on real seeds.
+  for (const seed of [3, 9, 21, 44, 57, 186, 267]){
+    const m = C.generateMap(seed), N = C.MAP;
+    for (let x=1;x<N-1;x++) for (let z=1;z<N-1;z++){ if (m[x*N+z]!==3) continue;
+      for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]])
+        assert.strictEqual(m[(x+dx)*N+(z+dz)], 0, `prop at ${x},${z} on seed ${seed} sits against cover`); }
+  }
 });
 test('border is walled', () => { const m = C.generateMap(3), N = C.MAP; for (let i=0;i<N;i++){ assert.strictEqual(m[i], 1); assert.strictEqual(m[i*N], 1); assert.strictEqual(m[(N-1)*N+i], 1); assert.strictEqual(m[i*N+N-1], 1); } });
 test('spawn ring and centre are walkable', () => { const m = C.generateMap(5), N = C.MAP, cx=N/2, cz=N/2; for (let i=0;i<20;i++){ const a=i/20*Math.PI*2; const x=Math.floor(cx+Math.cos(a)*N*0.42), z=Math.floor(cz+Math.sin(a)*N*0.42); assert.notStrictEqual(m[x*N+z], 1, `spawn ${i}`); } assert.strictEqual(m[Math.floor(cx)*N+Math.floor(cz)], 0); });
 test('map mixes cover: 8–30% walls, 5–30% bushes', () => { for (const seed of [1,2,3,4,5]){ const m = C.generateMap(seed); let w=0,b=0; for (const c of m){ if(c===1) w++; if(c===2) b++; } const n=m.length; assert.ok(w/n>0.08 && w/n<0.30, `walls ${(w/n).toFixed(2)} seed ${seed}`); assert.ok(b/n>0.05 && b/n<0.30, `bushes ${(b/n).toFixed(2)} seed ${seed}`); } });
-test('every floor cell is reachable from the centre (no sealed pockets larger than noise)', () => {
-  const m = C.generateMap(9), N = C.MAP; const seen = new Uint8Array(N*N); const q=[[N/2|0,N/2|0]]; seen[q[0][0]*N+q[0][1]]=1; let reach=0, floor=0;
-  while(q.length){ const [x,z]=q.pop(); reach++; for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx,nz=z+dz; if(nx<0||nz<0||nx>=N||nz>=N) continue; const i=nx*N+nz; if(!seen[i]&&m[i]!==1){ seen[i]=1; q.push([nx,nz]); } } }
-  for (const c of m) if (c!==1) floor++; assert.ok(reach/floor > 0.97, `${(reach/floor*100).toFixed(1)}% reachable`);
+test('no cell is ever walled off, swept across seeds', () => {
+  // The old version read seed 9 alone — 99.97%, comfortably over its 97% bar — while the real
+  // seed is drawn at random every match. These four failed that bar outright: 186 at 96.72%,
+  // 267 at 95.26% with a single sealed pocket of 877 cells, 1316 at 95.38%, 1354 at 96.87%.
+  for (const seed of [186, 267, 1316, 1354]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
+  for (let seed=0; seed<120; seed++) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
+});
+test('a prop adds cover but never seals a cell off', () => {
+  // Both were legal under the placement guard on its own: seed 2 caged (115,24) behind four
+  // props sitting on its diagonals, seed 57 plugged a one-cell corridor at (87,26).
+  for (const seed of [2, 57]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
 });
 
 console.log('Biomes');
@@ -513,11 +582,7 @@ test('biomes form large contiguous regions, not noise speckle', () => {
 });
 test('the map is twice the old size and still fully connected', () => {
   assert.strictEqual(C.MAP, 152);
-  const m = C.generateMap(9), N = C.MAP, seen = new Uint8Array(N*N), q = [[N>>1,N>>1]];
-  seen[(N>>1)*N+(N>>1)] = 1; let reach = 0, floor = 0;
-  while(q.length){ const [x,z]=q.pop(); reach++; for (const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]){ const nx=x+dx,nz=z+dz; if(nx<0||nz<0||nx>=N||nz>=N) continue; const i=nx*N+nz; if(!seen[i]&&!C.BLOCKING(m[i])){ seen[i]=1; q.push([nx,nz]); } } }
-  for (const c of m) if (!C.BLOCKING(c)) floor++;
-  assert.ok(reach/floor > 0.97, `${(reach/floor*100).toFixed(1)}% reachable`);
+  for (const seed of [9, 42, 777, 2024]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
 });
 
 console.log('Pacing');

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>WARBLOCK — Showdown with stakes</title>
 <meta name="description" content="Top-down battle royale with stakes. 10 brawlers, two games, demo credits only.">
-<meta name="theme-color" content="#2F8BE8">
+<meta name="theme-color" content="#D83701">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
@@ -526,7 +526,7 @@
     <div class="rsec blue"><h3>MAXWIN</h3>
       <p>Survive to the last. The whole pot goes to the final survivor — or is split evenly between the last team in Duo and Trio.</p>
       <p>Loot from a kill drops on the ground as a gold crate: walk over it to collect. Anyone can steal it first.</p>
-      <p><b>Duo / Trio:</b> no friendly fire, and you respawn 8s after dying as long as a teammate is still alive.</p>
+      <p><b>Duo / Trio:</b> no friendly fire. Everyone respawns 5s after dying, in every mode, until their lives run out.</p>
     </div>
     <div class="rsec red"><h3>RESURGENCE</h3>
       <p>50 brawlers, gas closing twice as fast, 150 boxes. Kills pay <b>straight into your bucket</b> — nothing drops on the ground.</p>
@@ -540,7 +540,7 @@
       <p><b>Power cubes.</b> Break boxes for cubes: each gives +10% max health and +10% damage, up to 10. Killers inherit them.</p>
       <p><b>Speed is earned.</b> A brawler is only fast if it is fragile or fights from range: Brick (200 hp, reach 4.6) walks at 5.65 while Ghost (95 hp) runs at 8.10. Tanks trade mobility for the right to stand still and win a brawl.</p>
       <p><b>Bushes</b> hide you until someone gets close. <b>Walls</b> block shots — except Volt, who lobs bombs over them.</p>
-      <p><b>The gas</b> shrinks the map and damages a percentage of your health per second. A green arrow points you back to safety.</p>
+      <p><b>The gas</b> shrinks the map and damages a percentage of your health per second. The screen edge flashes green while it burns you, and the safe circle is drawn on the minimap.</p>
     </div>
     <div class="rsec"><h3>Controls</h3>
       <p class="ctl"><kbd>WASD</kbd> move · mouse to aim · <kbd>LMB</kbd> attack · <kbd>RMB</kbd> or <kbd>Space</kbd> super · <kbd>Q</kbd> auto-aim shot · <kbd>C</kbd> cash out · <kbd>Esc</kbd> pause</p>
@@ -935,8 +935,10 @@ const WBCore = (function(){
       const x=Math.round(cx+Math.cos(a)*rr), z=Math.round(cz+Math.sin(a)*rr);
       if(x>0&&z>0&&x<MAP-1&&z<MAP-1) cells[x*MAP+z]=0;
     }
-    // scattered waist-high props. Only ever dropped on a cell with open ground all around it, so a
-    // prop can add cover but can never wall a corridor off.
+    // scattered waist-high props, only ever dropped on a cell with open ground all around it.
+    // That guard stops two props from touching, but on its own it does NOT keep the map open:
+    // four props on the diagonals of one cell still cage it, and one prop still plugs a
+    // one-cell gap. The repair pass below is what actually holds the invariant.
     for(let x=2;x<MAP-2;x++) for(let z=2;z<MAP-2;z++){
       const i=x*MAP+z; if(cells[i]!==0) continue;
       if(rng()>=BIOMES[biomes[i]].prop) continue;
@@ -944,10 +946,48 @@ const WBCore = (function(){
       for(const [dx,dz] of [[1,0],[-1,0],[0,1],[0,-1]]) if(cells[(x+dx)*MAP+(z+dz)]===0) open++;
       if(open===4) cells[i]=3;
     }
+    // Nothing may end up walled off from the centre. A prop that seals a pocket is cleared
+    // first, being the cheapest and least visible repair; a pocket the walls themselves sealed
+    // is linked back by the shortest tunnel instead, so the scar stays a few cells long rather
+    // than a lane running to the middle of the map. Typical cost: ~10 cells on a 152×152 grid.
+    const NB=[[1,0],[-1,0],[0,1],[0,-1]];
+    const reachable=()=>{
+      const seen=new Uint8Array(cells.length), start=(MAP>>1)*MAP+(MAP>>1), q=[start];
+      seen[start]=1;
+      for(let qi=0;qi<q.length;qi++){ const cur=q[qi], x=(cur/MAP)|0, z=cur%MAP;
+        for(const [dx,dz] of NB){ const nx=x+dx, nz=z+dz;
+          if(nx<0||nz<0||nx>=MAP||nz>=MAP) continue;
+          const i=nx*MAP+nz; if(seen[i]||BLOCKING(cells[i])) continue;
+          seen[i]=1; q.push(i); } }
+      return seen;
+    };
+    for(let pass=0;pass<200;pass++){
+      const seen=reachable();
+      let orphan=-1;
+      for(let i=0;i<cells.length;i++) if(!BLOCKING(cells[i])&&!seen[i]){ orphan=i; break; }
+      if(orphan<0) break;
+      const ox=(orphan/MAP)|0, oz=orphan%MAP;
+      let freed=false;
+      for(const [dx,dz] of NB){ const nx=ox+dx, nz=oz+dz;
+        if(nx<1||nz<1||nx>=MAP-1||nz>=MAP-1) continue;
+        if(cells[nx*MAP+nz]===3){ cells[nx*MAP+nz]=0; freed=true; } }
+      if(freed) continue;
+      const prev=new Int32Array(cells.length).fill(-1), vis=new Uint8Array(cells.length);
+      const q=[orphan]; vis[orphan]=1; let hit=-1;
+      for(let qi=0;qi<q.length&&hit<0;qi++){ const cur=q[qi], x=(cur/MAP)|0, z=cur%MAP;
+        for(const [dx,dz] of NB){ const nx=x+dx, nz=z+dz;
+          if(nx<1||nz<1||nx>=MAP-1||nz>=MAP-1) continue;
+          const i=nx*MAP+nz; if(vis[i]) continue;
+          vis[i]=1; prev[i]=cur;
+          if(seen[i]){ hit=i; break; }
+          q.push(i); } }
+      if(hit<0) break;
+      for(let p=prev[hit]; p>=0&&p!==orphan; p=prev[p]) if(BLOCKING(cells[p])) cells[p]=0;
+    }
     return cells;
   }
   const cents = v => Math.round(v*100)/100;          // money is only ever exact to the cent
-  function payout(stake,players,rake){ const pot=cents(stake*players), cut=cents(pot*(rake||0)); return {pot,rake:cut,winner:cents(pot-cut)}; }
+  function payout(stake,players,rake){ const pot=cents(stake*players), cut=cents(pot*(rake===undefined?RAKE:rake)); return {pot,rake:cut,winner:cents(pot-cut)}; }
   function teamPayout(stake,mode,rake){ const tp=mode.teamSize*mode.teams; const p=payout(stake,tp,rake); return {...p, players:tp, split:cents(p.winner/mode.teamSize)}; }
   function tierFor(stake){ return TIERS.find(t=>t.stake===stake)||null; }
   function maxHp(brawler,cubes){ return Math.round(brawler.hp*(1+CUBE.hpBonus*Math.min(cubes,CUBE.max))); }
@@ -1361,8 +1401,8 @@ function lobbyStop(){
 function armLobbyMusic(){
   if(LOB.armed) return; LOB.armed=true;
   const go=()=>{ if($('lobby').style.display!=='none' && !G) lobbyStart(); };
-  addEventListener('pointerdown',go,{once:false});
-  addEventListener('keydown',go,{once:false});
+  addEventListener('pointerdown',go,{once:true});
+  addEventListener('keydown',go,{once:true});
 }
 
 // ---------- waiting room: a drone that tightens as the seats fill ----------
@@ -1490,7 +1530,7 @@ const cellAt=(x,z)=>{ const xi=Math.floor(x),zi=Math.floor(z); if(xi<0||zi<0||xi
 const isWall=(x,z)=>C.BLOCKING(cellAt(x,z));   // props block movement and bullets, bushes never do
 const inBush=e=>cellAt(e.x,e.z)===2;
 function buildWorld(seed){
-  while(world.children.length) world.remove(world.children[0]);
+  while(world.children.length){ const gone=world.children[0]; world.remove(gone); discard(gone); }
   const cells=C.generateMap(seed), biomes=C.generateBiomes(seed), rng=C.makeRng(seed^0x51ed270b);
   const blocks=[], floorTiles=[], props=[], caps=[], shadows=[];
   // Per-biome palette. Walls and bushes are deliberately built from different SHAPES, not just
@@ -1807,6 +1847,27 @@ function makeCrate(){
 const projGeo=new THREE.SphereGeometry(1,8,6);
 const projMatP=new THREE.MeshBasicMaterial({color:0xfff1b0}), projMatB=new THREE.MeshBasicMaterial({color:0xff6a5a}), projMatS=new THREE.MeshBasicMaterial({color:0xff7a1a});
 
+// Taking a mesh off the scene graph does not free anything: Three.js holds the GPU buffers until
+// dispose() is called, and nothing here ever called it. Six matches back to back through PLAY
+// AGAIN abandoned roughly a thousand GL objects — every arena, twenty brawler bodies, ninety
+// crates — until the tab hit its context budget and the canvas went black mid-match.
+//
+// These are built once and reused for the life of the page. Disposing any of them would leave
+// the NEXT match rendering blank, so discard() must always skip them. gasMat, by contrast, is
+// rebuilt by every buildWorld() and must go, even though the particles wearing it use the shared
+// boxGeo — which is exactly why this needs a list rather than a blanket walk.
+const SHARED=new Set([boxGeo, shadowGeo, shadowMat, cubeMat, bagMat, boxMat, outlineMat, turretMat,
+  fireMat, heartMat, crateBodyGeo, crateFrameMat, crateQMat, plankGeo, projGeo, projMatP, projMatB, projMatS]);
+function discard(obj){
+  if(!obj) return;
+  const done=new Set();
+  obj.traverse(o=>{
+    if(o.geometry&&!SHARED.has(o.geometry)&&!done.has(o.geometry)){ done.add(o.geometry); o.geometry.dispose(); }
+    const mats=Array.isArray(o.material)?o.material:(o.material?[o.material]:[]);
+    for(const mt of mats) if(!SHARED.has(mt)&&!done.has(mt)){ done.add(mt); mt.dispose(); }
+  });
+}
+
 // ---------- entities ----------
 function makeEntity(name,x,z,stake,isPlayer,brawler,acc,team){
   const e={ name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
@@ -1887,7 +1948,7 @@ function useSuper(e,aimDist){
   }
   if(e.isPlayer) snd('super',0.14); return true;
 }
-function hurtTurret(tu,dmg){ tu.hp-=dmg; if(tu.hp<=0){ world.remove(tu.mesh); const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1); } }
+function hurtTurret(tu,dmg){ tu.hp-=dmg; if(tu.hp<=0){ world.remove(tu.mesh); discard(tu.mesh); const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1); } }
 function dashUpdate(e,dt){
   if(e.dashT<=0) return false; e.dashT-=dt;
   const step=22*dt; if(free(e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
@@ -1897,9 +1958,9 @@ function dashUpdate(e,dt){
 function zonesUpdate(dt){
   for(let i=G.zones.length-1;i>=0;i--){ const z=G.zones[i]; z.life-=dt; z.tick-=dt; z.mesh.material.opacity=0.3+Math.sin(G.time*14)*0.12;
     if(z.tick<=0){ z.tick=0.25; for(const t of G.ents){ if(t===z.owner||!t.alive||t.team===z.owner.team) continue; if(Math.hypot(t.x-z.x,t.z-z.z)<z.r) damage(t,z.dps*0.25,z.owner); } }
-    if(z.life<=0){ world.remove(z.mesh); G.zones.splice(i,1); } }
+    if(z.life<=0){ world.remove(z.mesh); discard(z.mesh); G.zones.splice(i,1); } }
   for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
-    if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); G.turrets.splice(i,1); continue; }
+    if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); G.turrets.splice(i,1); continue; }
     let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(tu.x,tu.z,t.x,t.z)&&!(inBush(t)&&d>2.5)){ bd=d; best=t; } }
     if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.mesh.rotation.y=Math.atan2(dx,dz)+Math.PI; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
   }
@@ -1921,7 +1982,7 @@ function projUpdate(dt){
         if(p.pierce) p.hit.add(e); else { dead=true; break; } } }
       if(!dead) for(const bx of G.boxes){ if(bx.hp<=0||p.hit.has(bx)) continue; if(Math.hypot(bx.x-p.x,bx.z-p.z)<0.75){ hurtBox(bx,p.dmg,p.owner); if(p.pierce) p.hit.add(bx); else { dead=true; break; } } }
     }
-    if(dead){ world.remove(p.mesh); G.projs.splice(i,1); }
+    if(dead){ world.remove(p.mesh); discard(p.mesh); G.projs.splice(i,1); }
   }
 }
 
@@ -1937,7 +1998,7 @@ function damage(t,dmg,src){
   if(t.isPlayer){ G.player.damageFlash=1; snd('hurt',0.12); } else if(src&&src.isPlayer) snd('hit',0.06);
   if(t.hp<=0) kill(t,src,'shot');
 }
-function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); spawnPickup(Math.random()<C.HEART.boxChance?'heart':'cube',bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
+function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(Math.random()<C.HEART.boxChance?'heart':'cube',bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
 function spawnPickup(kind,x,z,amount,owner){
   const mesh =
       kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
@@ -1954,8 +2015,8 @@ function spawnPickup(kind,x,z,amount,owner){
 function removePickup(pk){
   const i=G.pickups.indexOf(pk); if(i<0) return false;
   G.pickups.splice(i,1);
-  world.remove(pk.mesh);
-  if(pk.shadow) world.remove(pk.shadow);
+  world.remove(pk.mesh); discard(pk.mesh);
+  if(pk.shadow){ world.remove(pk.shadow); discard(pk.shadow); }
   return true;
 }
 function collect(e,pk){
@@ -2051,13 +2112,22 @@ function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)
 function floatText(e,txt,cls){ const s=toScreen(e.x,2.3,e.z); if(!s.ok) return; const d=document.createElement('div'); d.className='dmg '+(cls||''); d.textContent=txt; d.style.left=(s.sx+(Math.random()-0.5)*30)+'px'; d.style.top=s.sy+'px'; $('labels').appendChild(d); setTimeout(()=>d.remove(),800); }
 
 // ---------- bots ----------
-function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } } return best; }
+function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } }
+  // Nothing in sight, but somebody is shooting: turn and face them. Sight stops at 14 blocks
+  // while HEX reaches 15 and BOLT 11, so a bot could be shot from outside its own awareness and
+  // just stand there — which is what made them read as asleep until you walked up to them.
+  if(!best&&b.lastHitBy&&b.lastHitBy.alive&&b.lastHitBy.team!==b.team&&G.time-b.lastDamageT<4) best=b.lastHitBy;
+  return best; }
 function inZone(x,z,m){ return Math.hypot(x-G.zone.cx,z-G.zone.cz)<G.zone.r-(m||0); }
 function pickGoal(b){
+  // Anything this bot already wedged itself against is off the list. Without that, the nearest
+  // crate is nearest every time it asks, so a bot walled off from one was handed the same
+  // unreachable goal every eight seconds and spent the whole match facing a rock.
+  const bad=b.badGoals;
   let best=null,bd=22;
-  for(const pk of G.pickups){ const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
+  for(const pk of G.pickups){ if(bad&&bad.has(pk)) continue; const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
   if(best) return best; bd=34;
-  for(const bx of G.boxes){ if(bx.hp<=0) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
+  for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
   if(best) return best;
   if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(Math.random()-0.5)*4,z:mate.z+(Math.random()-0.5)*4}; }
   const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
@@ -2098,8 +2168,42 @@ function botUpdate(b,dt){
     else if(d>0.5){ mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; }
     if(Math.hypot(mx,mz)>0.01&&!b.goal.box){ b.ax=mx; b.az=mz; }
   }
-  // simple wall avoidance: if blocked ahead, slide sideways
-  if(Math.hypot(mx,mz)>0.01&&!free(b.x+mx*0.9,b.z+mz*0.9)){ const s=(b.id>0.5?1:-1); const tx=-mz*s,tz=mx*s; if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; } else { mx=-tx; mz=-tz; } }
+  // Wall avoidance. The old version tried one perpendicular and, when that was blocked too,
+  // committed to its opposite without ever checking it — so a bot that walked into a concave
+  // corner pushed at the stone forever. Nothing is taken now unless it is actually free.
+  // An escape already under way overrides whatever the bot wants this frame. Correcting for a
+  // single frame achieved nothing: moveEntity ramps velocity by about a fifth per frame, so the
+  // bot drifted back into the wall long before it had the speed to get clear of it.
+  if(b.escapeT>0){ b.escapeT-=dt; mx=b.escX; mz=b.escZ; }
+  const wanted=Math.hypot(mx,mz)>0.01, wx=mx, wz=mz;
+  // Blocked ahead: slide along the wall. When neither side is open, keep the blocked vector
+  // instead of zeroing it — tryMove() applies the axes separately, so a direction that fails as
+  // a pair still slides on one of them. Stopping dead here is what pinned bots to the stone.
+  if(wanted&&!free(b.x+mx*0.9,b.z+mz*0.9)){
+    const s=(b.id>0.5?1:-1), tx=-mz*s, tz=mx*s;
+    if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; }
+    else { mx=-tx; mz=-tz; }
+  }
+  // Progress watchdog. Sliding sideways is not enough on its own: pickGoal() hands back the
+  // nearest crate by distance, so a bot wedged against the wall in front of one was given the
+  // same unreachable goal every eight seconds and never left. If it has been asking to move and
+  // covering no ground, drop that goal and strike out in any direction that is open.
+  const moved=Math.hypot(b.x-(b.px??b.x),b.z-(b.pz??b.z));
+  b.px=b.x; b.pz=b.z;
+  if(wanted&&moved<b.speed*dt*0.2) b.stuckT=(b.stuckT||0)+dt; else b.stuckT=0;
+  // Careful with the guard: b.escapeT is undefined on the first pass and `undefined <= 0` is
+  // false, so testing it that way would block the very first escape a bot ever needs.
+  if(b.stuckT>0.4&&!(b.escapeT>0)){
+    b.stuckT=0;
+    if(b.goal){ (b.badGoals||(b.badGoals=new Set())).add(b.goal.box||b.goal.pick||b.goal); b.goal=null; b.goalT=0; }
+    // sweep sixteen headings, take the most open one that still points roughly where it wanted
+    let best=null,bs=-1e9;
+    for(let k=0;k<16;k++){ const a=k/16*Math.PI*2, ex=Math.cos(a), ez=Math.sin(a);
+      if(!free(b.x+ex*1.3,b.z+ez*1.3)) continue;
+      const sc=(ex*wx+ez*wz)+(free(b.x+ex*2.6,b.z+ez*2.6)?1.5:0);
+      if(sc>bs){ bs=sc; best=[ex,ez]; } }
+    if(best){ b.escX=best[0]; b.escZ=best[1]; b.escapeT=0.8; mx=best[0]; mz=best[1]; }
+  }
   moveEntity(b,mx,mz,dt);
 }
 
@@ -2201,7 +2305,19 @@ function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; f
 
 // ---------- player ----------
 function playerUpdate(dt){
-  const p=G.player; if(!p.alive) return;
+  const p=G.player;
+  // These two tick before every early return below. Left after the `!p.alive` guard they froze
+  // for the whole respawn: take a hit, die a second later, and you came back still locked for
+  // nine seconds while the HUD had been reading the same "LOCKED 9s" the entire time. Showing
+  // the button unlocked while dead is harmless, doCashOut() refuses on !p.alive anyway.
+  emoteCd=Math.max(0,emoteCd-dt);
+  if(G.modeCfg.cashout){ p.cashLock=Math.max(0,(p.cashLock||0)-dt);
+    const btn=$('cashout'), ready=C.cashoutReady(p.cashLock);
+    btn.className='on'+(ready?'':' locked');
+    const co=C.cashoutPayout(p.pouch);
+    $('cashLbl').textContent=ready?'CASH OUT · NET OF 20%':'LOCKED '+Math.ceil(p.cashLock)+'s';
+    $('cashAmt').textContent=money(co.net); }
+  if(!p.alive) return;
   const aiming=(T.aim&&T.aim.moved)||(T.superT&&T.superT.moved);
   if(aiming){ const st=(T.superT&&T.superT.moved)?T.superT:T.aim; const a=aimFromStick(st); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ p.ax=dx/d; p.az=dz/d; } G.aimDist=d; } }
@@ -2212,14 +2328,7 @@ function playerUpdate(dt){
   moveEntity(p,mx,mz,dt);
   if(mouse.down){ mouse.held+=dt; if(mouse.held>HOLD_REPEAT) attack(p,p.ax,p.az,G.aimDist); }
   // aim guide
-  if(G.modeCfg.cashout){ p.cashLock=Math.max(0,(p.cashLock||0)-dt);
-    const btn=$('cashout'), ready=C.cashoutReady(p.cashLock);
-    btn.className='on'+(ready?'':' locked');
-    const co=C.cashoutPayout(p.pouch);
-    $('cashLbl').textContent=ready?'CASH OUT · NET OF 20%':'LOCKED '+Math.ceil(p.cashLock)+'s';
-    $('cashAmt').textContent=money(co.net); }
   p.fireCd=Math.max(0,(p.fireCd||0)-dt);
-  emoteCd=Math.max(0,emoteCd-dt);
   p.damageFlash=Math.max(0,(p.damageFlash||0)-dt*2);
   camFollow(p,dt);
 }
@@ -2618,7 +2727,7 @@ function endMatch(won,info){
     $('endEyebrow').textContent=`${G.tier.label} table · RESURGENCE ${mode.name} · ${p.brawler.name}`;
     $('endTitle').textContent=info.cashedOut?'CASHED OUT':(mode.teamSize>1?'LAST TEAM STANDING':'SOLE SURVIVOR');
     $('endRibbon').textContent=info.cashedOut?'YOU WALKED AWAY WITH IT':'NOBODY LEFT TO TAKE IT';
-    lines.push(['Bucket',money(co.gross)],['Kills',p.kills],['Cubes','◆'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
+    lines.push(['Bucket',money(co.gross)],['Kills',p.kills],['Cubes','⬢'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
     lines.push(['House cut (20%)','−'+money(co.fee)]);
     lines.push(['Banked','+'+money(co.net),'total']);
     $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
@@ -2630,7 +2739,7 @@ function endMatch(won,info){
   if(!won&&mode.cashout){ snd('lose',0.15); head.style.setProperty('--h1','#f0463c'); head.style.setProperty('--h2','#8d1626');
     $('endEyebrow').textContent=`${G.tier.label} table · RESURGENCE ${mode.name} · ${p.brawler.name}`;
     $('endTitle').textContent='BUSTED'; $('endRibbon').textContent=('LOST TO '+info.killer).toUpperCase();
-    lines.push(['Bucket lost',money(p.pouch||0)],['Kills',p.kills],['Cubes','◆'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
+    lines.push(['Bucket lost',money(p.pouch||0)],['Kills',p.kills],['Cubes','⬢'+p.cubes],[mode.teamSize>1?'Teams left':'Players left',aliveTeams().size]);
     lines.push(['Net result','−'+money(G.stake),'total']);
     $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
     $('endWallet').innerHTML=`Wallet: <b>${money(wallet)}</b>`;
@@ -2640,10 +2749,10 @@ function endMatch(won,info){
   }
   if(won){ wallet+=pay.split; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,pay.split); snd('win',0.15); head.style.setProperty('--h1','#ffd23a'); head.style.setProperty('--h2','#ff8a1f');
     $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent='VICTORY!'; $('endRibbon').textContent=mode.teamSize>1?'LAST TEAM STANDING':'LAST ONE STANDING';
-    lines.push(['Stake',money(G.stake)],['Looted',money(Math.max(0,p.pouch-G.stake))],['Kills',p.kills],['Cubes','◆'+p.cubes]); if(pay.rake) lines.push(['House rake','−'+money(pay.rake)]); lines.push([mode.teamSize>1?'Your split of '+money(pay.winner):'Pot won','+'+money(pay.split),'total']); }
+    lines.push(['Stake',money(G.stake)],['Looted',money(Math.max(0,p.pouch-G.stake))],['Kills',p.kills],['Cubes','⬢'+p.cubes]); if(pay.rake) lines.push(['House rake','−'+money(pay.rake)]); lines.push([mode.teamSize>1?'Your split of '+money(pay.winner):'Pot won','+'+money(pay.split),'total']); }
   else { snd('lose',0.15); head.style.setProperty('--h1','#f0463c'); head.style.setProperty('--h2','#8d1626');
     $('endEyebrow').textContent=`${G.tier.label} table · ${mode.name} · ${p.brawler.name}`; $('endTitle').textContent=`#${info.rank} OF ${mode.teams}`; $('endRibbon').textContent=('ELIMINATED BY '+info.killer).toUpperCase();
-    lines.push([mode.teamSize>1?'Teams left':'Still alive',alive],['Kills',p.kills],['Cubes','◆'+p.cubes],['Net result','−'+money(G.stake),'total']); }
+    lines.push([mode.teamSize>1?'Teams left':'Still alive',alive],['Kills',p.kills],['Cubes','⬢'+p.cubes],['Net result','−'+money(G.stake),'total']); }
   $('endLines').innerHTML=lines.map(l=>`<div class="${l[2]||''}"><span>${l[0]}</span><span>${l[1]}</span></div>`).join('');
   $('endWallet').innerHTML=`Wallet: <b>${money(wallet)}</b>`;
   $('again').disabled=wallet<G.stake; $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`PLAY AGAIN · ${money(G.stake)}`;
@@ -2802,7 +2911,12 @@ function loop(now){
     }
     hudFast(); G.hudT-=dt; if(G.hudT<=0){ G.hudT=0.08; hud(); }
   }
-  for(let i=G.fx.length-1;i>=0;i--){ const f=G.fx[i]; f.life-=dt; f.mesh.material.opacity=Math.max(0,f.life/f.max)*0.7; f.mesh.scale.setScalar(1+(1-f.life/f.max)*0.4); if(f.life<=0){ world.remove(f.mesh); G.fx.splice(i,1); } }
+  for(let i=G.fx.length-1;i>=0;i--){ const f=G.fx[i]; f.life-=dt; f.mesh.material.opacity=Math.max(0,f.life/f.max)*0.7; f.mesh.scale.setScalar(1+(1-f.life/f.max)*0.4); if(f.life<=0){ world.remove(f.mesh); discard(f.mesh); G.fx.splice(i,1); } }
+  // Frame-rate watchdog, measured on every frame including the countdown and the pause screen.
+  // Its call site had been lost in an edit, which left the whole adaptive-quality subsystem dead:
+  // the pixel ratio never stepped down on a slow device, AUTO could never climb back after a
+  // manual pick, and the pause panel kept printing the initial 60 FPS.
+  adaptRes(dt);
   renderer.render(scene,camera);
   rafId=(G.running||$('game').style.display==='block')?requestAnimationFrame(loop):0;
 }
