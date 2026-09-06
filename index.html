@@ -362,18 +362,36 @@
   @keyframes dmg{0%{opacity:1;margin-top:0;font-size:22px}100%{opacity:0;margin-top:-46px}}
   /* One slim bar carries the money, the cubes and the kills. Three stacked panels ate the top-left
      corner of the arena, which is exactly where you need to see incoming players. */
-  #pouch{left:14px;top:12px;display:flex;align-items:center;gap:8px;border:3px solid #000;border-radius:12px;
-    background:rgba(29,35,64,.82);padding:5px 12px;box-shadow:0 3px 0 #000}
-  #pouch .amt{font-size:22px;color:var(--cash);text-shadow:2px 2px 0 #000;transition:transform .1s}
+  /* Cluster gauche aux proportions de la reference, en cqw. Les classes sont prefixees h-
+     parce que .pill, .badge et .coin existent deja ailleurs dans la feuille. */
+  #pouch{left:2.2cqw;top:3.2cqw;display:flex;align-items:center;height:5.35cqw;gap:.8cqw;
+    border:.39cqw solid #000;border-radius:2.68cqw;padding:0 1.2cqw 0 .55cqw;
+    background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
+  #pouch .hcoin{width:3.35cqw;height:3.35cqw;border-radius:50%;border:.3cqw solid #000;flex:0 0 auto;
+    background:radial-gradient(circle at 34% 30%,#FFE27A,#E08A0A);display:grid;place-items:center;
+    font-size:1.6cqw;color:#7A3B00}
+  #pouch .amt{font-size:3.9cqw;line-height:1;color:var(--cash);-webkit-text-stroke:.48cqw #000;
+    paint-order:stroke fill;text-shadow:none;transition:transform .1s}
   #pouch .amt.pop{transform:scale(1.16)}
-  #pouch .pill{display:flex;align-items:baseline;gap:3px;font-size:11px;color:#cfe3ff;text-shadow:1px 1px 0 #000}
-  #pouch .pill small{font-size:8px;letter-spacing:.1em;opacity:.75}
-  #pouch .pill b{font-size:15px;color:#fff}
-  #cubePill{color:var(--cube)} #cubePill b{color:var(--cube)}
-  #lifePill{gap:2px;font-size:14px;letter-spacing:1px}
-  #lifePill i{font-style:normal;opacity:.28}
-  #lifePill i.on{opacity:1;filter:drop-shadow(0 0 3px #ff5a6a)}
-  #pouch .tiny{font-size:9px;letter-spacing:.1em;color:#9fb4dd;font-family:Arial,sans-serif;font-weight:700}
+  #pouch .hsep{width:.3cqw;height:70%;background:#0009;border-radius:.2cqw;margin:0 .3cqw;flex:0 0 auto}
+  #pouch .hbadge{width:2.85cqw;height:2.85cqw;border-radius:.7cqw;border:.28cqw solid #000;position:relative;
+    display:grid;place-items:center;flex:0 0 auto}
+  #pouch .hbadge.cube{background:linear-gradient(180deg,#7FF3B0,#2E9E63)}
+  /* le fond rouge est ce qui fait lire "kills" sans etiquette */
+  #pouch .hbadge.kill{background:linear-gradient(180deg,#FF5C5C,#B01414)}
+  #pouch .hbadge svg{width:66%;height:66%;display:block}
+  #pouch .hbadge b{position:absolute;right:-.45cqw;bottom:-.8cqw;font-size:1.55cqw;color:#fff;
+    -webkit-text-stroke:.38cqw #000;paint-order:stroke fill}
+  /* Les trois emplacements restent visibles : un coeur perdu est grise, jamais retire, sinon on
+     ne sait plus combien de vies on avait au depart. */
+  #lifePill{left:2.2cqw;top:9.5cqw;width:13.57cqw;height:4.52cqw;border-radius:2.26cqw;
+    display:flex;align-items:center;justify-content:center;gap:.7cqw;padding:0 1cqw;
+    border:.39cqw solid #000;background:linear-gradient(180deg,#232E5E,#141C42);
+    box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
+  #lifePill i{width:3.3cqw;height:3.3cqw;display:block;flex:0 0 auto;font-style:normal}
+  #lifePill i svg{width:100%;height:100%;display:block}
+  #potAmt2{left:2.2cqw;top:14.6cqw;font-size:1.15cqw;letter-spacing:.1em;color:#9fb4dd;
+    font-family:Arial,sans-serif;font-weight:700}
   #match{left:50%;top:12px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;
     border:3px solid #000;border-radius:12px;background:rgba(29,35,64,.82);padding:5px 14px;box-shadow:0 3px 0 #000}
   #match .alive{display:flex;align-items:baseline;gap:5px}
@@ -566,7 +584,7 @@
   .touch .keys{display:none}
   html,body,#c,#hud{touch-action:none}
   /* compact HUD on any touch device (media queries miss landscape phones) */
-  .touch #pouch{padding:3px 9px;border-width:2px;left:10px;top:8px;gap:6px} .touch #pouch .amt{font-size:17px} .touch #pouch .pill b{font-size:13px} .touch #pouch .tiny{display:none}
+  .touch #pouch{padding:3px 9px;border-width:2px;left:10px;top:8px;gap:6px;height:auto;border-radius:12px} .touch #pouch .amt{font-size:17px;-webkit-text-stroke:0;text-shadow:2px 2px 0 #000} .touch #pouch .hbadge b{font-size:13px} .touch #potAmt2{display:none}
   .touch #map{width:88px;height:88px;border-width:2px} .touch #mapwrap{right:10px;top:8px}
   .touch #feed{display:none}
   .touch #match{padding:3px 10px;border-width:2px;top:8px;gap:7px} .touch #match .alive b{font-size:17px} .touch #match .alive small{font-size:7px} .touch #match .zone{font-size:9px;padding-left:7px}
@@ -685,7 +703,9 @@
     <div id="intro"><b id="introNum">3</b><small id="introSub"></small></div>
     <button id="cashout"><small id="cashLbl">CASH OUT</small><b id="cashAmt">$0</b></button>
     <div id="labels"></div>
-    <div id="pouch"><b class="amt" id="pouchAmt">$0</b><span class="pill" id="cubePill" title="Power cubes: +10% health and +10% damage each">⬢<b id="killsAmt2">0</b><small>CUBES</small></span><span class="pill" id="killPill" title="Kills">☠<b id="killsAmt">0</b><small>KILLS</small></span><span class="pill" id="lifePill"></span><span class="tiny" id="potAmt2"></span></div>
+    <div id="pouch"><span class="hcoin">$</span><b class="amt" id="pouchAmt">$0</b><span class="hsep"></span><span class="hbadge cube" id="cubePill" title="Power cubes: +10% health and +10% damage each"><b id="killsAmt2">0</b></span><span class="hbadge kill" id="killPill" title="Kills"><b id="killsAmt">0</b></span></div>
+    <div id="lifePill"></div>
+    <div class="tiny" id="potAmt2"></div>
     <div id="match"><span class="alive"><b id="alive">20</b><small id="aliveLbl">ALIVE</small></span><small id="leftAmt"></small><span class="zone" id="zoneTxt"></span></div>
     <div id="mapwrap"><canvas id="map" width="170" height="170"></canvas></div>
     <div id="feed"></div>
@@ -2815,6 +2835,32 @@ function hudFast(){
     tb.lastChild.textContent=Math.ceil(Math.max(0,tu.hp));
   }
 }
+// Icônes du HUD dessinées en SVG plutôt qu'en emoji : ⬢ et ☠ dépendaient de la police du
+// système, changeaient d'un poste à l'autre et ne s'alignaient jamais dans leur badge.
+const HUD_SKULL=`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <path d="M12 1.6c-5 0-8.6 3.3-8.6 7.8 0 2.6 1.2 4.2 2.5 5.2v2.6c0 1 .8 1.8 1.8 1.8h8.6c1 0 1.8-.8 1.8-1.8v-2.6c1.3-1 2.5-2.6 2.5-5.2 0-4.5-3.6-7.8-8.6-7.8z"
+    fill="#fff" stroke="#3A0000" stroke-width="1.6" stroke-linejoin="round"/>
+  <ellipse cx="8.4" cy="9.6" rx="2.5" ry="2.9" fill="#3A0000"/>
+  <ellipse cx="15.6" cy="9.6" rx="2.5" ry="2.9" fill="#3A0000"/>
+  <path d="M12 13.4l-1.5 2.4h3z" fill="#3A0000"/>
+  <path d="M9.2 19v-2.2M12 19v-2.2M14.8 19v-2.2" stroke="#3A0000" stroke-width="1.5" stroke-linecap="round"/>
+</svg>`;
+const HUD_CUBE=`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <path d="M12 2.4l8.4 4.8v9.6L12 21.6 3.6 16.8V7.2z" fill="#EAFFF4" stroke="#06301F" stroke-width="1.7" stroke-linejoin="round"/>
+  <path d="M12 2.4l8.4 4.8L12 12 3.6 7.2z" fill="#B6FFDC" stroke="#06301F" stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="M12 12v9.6" stroke="#06301F" stroke-width="1.5"/>
+</svg>`;
+// Chaque cœur porte son propre identifiant de dégradé : trois "hg" dans le même document et
+// url(#hg) résoudrait toujours vers le premier.
+const hudHeart=(on,i)=>`<svg viewBox="0 0 34 32" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="hg${i}" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#FF3B3B"/><stop offset="0.55" stop-color="#E01414"/><stop offset="1" stop-color="#9E0000"/></linearGradient></defs>
+  <path d="M17 30 C 4 21, 1 13, 1 9 A 8 8 0 0 1 17 6.6 A 8 8 0 0 1 33 9 C 33 13, 30 21, 17 30 Z"
+    fill="${on?`url(#hg${i})`:'#1A2346'}" stroke="#0B0F1F" stroke-width="3.4" stroke-linejoin="round"/>
+  ${on?'<path d="M9 10 q3.2 -4.2 7.2 -4.2" stroke="#FFB0B0" stroke-width="2.4" fill="none" stroke-linecap="round" opacity=".85"/>':''}
+</svg>`;
+$('killPill').insertAdjacentHTML('afterbegin',HUD_SKULL);
+$('cubePill').insertAdjacentHTML('afterbegin',HUD_CUBE);
 function hud(){
   // ALIVE counts who is standing right now, so it moves on every kill; LEFT counts who still has
   // a life and can come back. With three lives, only showing the latter looked frozen at 20.
@@ -2824,7 +2870,11 @@ function hud(){
   const alive=team?aliveTeams().size:standing;
   $('pouchAmt').textContent=money(p.pouch); $('killsAmt').textContent=p.kills; $('killsAmt2').textContent=p.cubes;
   const maxLives=C.livesFor(G.modeCfg);
-  $('lifePill').innerHTML=Array.from({length:maxLives},(_,i)=>`<i class="${i<p.lives?'on':''}">❤</i>`).join('');
+  // Redessiner trois SVG à chaque image serait du gâchis : on ne le fait que si le compte change.
+  if(G.lifeShown!==p.lives||G.lifeMax!==maxLives){
+    G.lifeShown=p.lives; G.lifeMax=maxLives;
+    $('lifePill').innerHTML=Array.from({length:maxLives},(_,i)=>`<i>${hudHeart(i<p.lives,i)}</i>`).join('');
+  }
   $('alive').textContent=alive;
   $('aliveLbl').textContent=team?'TEAMS':'ALIVE';
   $('leftAmt').textContent = (!team && remaining>standing) ? remaining+' LEFT' : '';
