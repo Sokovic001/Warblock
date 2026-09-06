@@ -257,7 +257,10 @@
   #pSave:disabled{filter:grayscale(1);opacity:.55}
   .touch .pinfo b{font-size:14px;max-width:96px} .touch .pav{width:26px;height:26px}
   /* ---------- GAME ---------- */
-  #game{position:fixed;inset:0;display:none}
+  /* container-type:size fait de #game l'unite de reference du HUD : 1cqw vaut 1 % de la largeur
+     de l'ecran de jeu. Les tailles relevees sur la reference tiennent donc a toute resolution,
+     ce qu'aucune valeur en px ne permet. Les regles .touch, en px, restent prioritaires. */
+  #game{position:fixed;inset:0;display:none;container-type:size}
   #c{width:100%;height:100%;display:block;cursor:crosshair;image-rendering:auto}
   #hud{position:absolute;inset:0;pointer-events:none;font-size:14px;overflow:hidden}
   #hud>div{position:absolute}
@@ -380,7 +383,8 @@
   #match .zone{font-size:11px;letter-spacing:.04em;color:#cfe3ff;font-family:Arial,sans-serif;font-weight:700;
     border-left:2px solid #0007;padding-left:10px}
   #match .zone.hot{color:#9be26b}
-  #mapwrap{right:14px;top:12px} #map{width:124px;height:124px;border:3px solid #000;border-radius:12px;background:rgba(29,35,64,.82);box-shadow:0 3px 0 #000}
+  #mapwrap{right:2.2cqw;top:3.2cqw}
+  #map{width:15.73cqw;height:15.73cqw;border:.55cqw solid #000;border-radius:2cqw;background:#46536E;box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
   #feed{right:14px;top:150px;width:300px;text-align:right;font-size:12px;text-shadow:1px 1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,-1px -1px 0 #000} #feed div{margin-bottom:3px} #feed .you{color:var(--cash)}
   #panel{right:18px;bottom:18px;display:flex;justify-content:flex-end;align-items:flex-end;pointer-events:none}
   #superwrap{width:108px;height:108px;position:relative;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
@@ -2836,13 +2840,13 @@ function hud(){
   const ctx=mapCtx,S=170,k=S/N;
   ctx.clearRect(0,0,S,S);
   ctx.drawImage(G.mapImg,0,0);
-  // everything outside the gas is dimmed, so the safe area reads instantly
+  // The safe circle is filled green rather than the outside being dimmed: on a slate ground the
+  // positive shape is what the eye finds first, and it is the one thing you actually run towards.
   ctx.save();
-  ctx.beginPath(); ctx.rect(0,0,S,S);
-  ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2,true);
-  ctx.fillStyle='rgba(60,140,40,.42)'; ctx.fill('evenodd');
+  ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2);
+  ctx.fillStyle='rgba(47,122,60,.55)'; ctx.fill();
   ctx.restore();
-  ctx.strokeStyle='#9be26b'; ctx.lineWidth=2.5; ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.6; ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2); ctx.stroke();
   if(z.shrinking){ ctx.setLineDash([4,4]); ctx.strokeStyle='#ffffffcc'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(z.to.cx*k,z.to.cz*k,z.to.r*k,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
   for(const pk of G.pickups) if(pk.kind==='cash'){
     ctx.fillStyle='#ffd23a'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
@@ -2850,7 +2854,7 @@ function hud(){
   }
   if(G.modeCfg.teamSize>1) for(const e of G.ents){
     if(!e.alive||e.isPlayer||e.team!==p.team) continue;
-    ctx.fillStyle='#3ae0ff'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
+    ctx.fillStyle='#FFC93C'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.arc(e.x*k,e.z*k,3.2,0,Math.PI*2); ctx.fill(); ctx.stroke();
   }
   ctx.save(); ctx.translate(p.x*k,p.z*k); ctx.rotate(-Math.atan2(p.ax,p.az));
@@ -2859,11 +2863,24 @@ function hud(){
 }
 function buildMapImage(){
   const c=document.createElement('canvas'); c.width=170; c.height=170; const ctx=c.getContext('2d'); const k=170/N;
-  const P=[['#7ac452','#3f9b46','#8a5a3a'],['#4d3f42','#7a3a2c','#241b1e'],['#e8f2ff','#9fd3e8','#7fb6e0']];
-  for(let x=0;x<N;x++) for(let z=0;z<N;z++){
-    const t=G.cells[x*N+z], C2=P[G.biomes[x*N+z]];
-    ctx.fillStyle = t===1||t===3 ? C2[2] : t===2 ? C2[1] : C2[0];
-    ctx.fillRect(x*k,z*k,k+0.7,k+0.7);
+  // Two informations, nothing else: slate ground and the walls. Drawing the floor, the bushes and
+  // the crates as well turned this into a 152x152 mosaic you could not read at a glance.
+  ctx.fillStyle='#46536E'; ctx.fillRect(0,0,170,170);
+  // Runs of adjacent wall cells are merged into one rectangle before being drawn. Cell by cell,
+  // 152 columns of rounded corners read as gravel; merged, they read as walls.
+  ctx.fillStyle='#E08C8C'; ctx.strokeStyle='#8A4A4A'; ctx.lineWidth=Math.max(0.6,k*0.35);
+  const solide=t=>t===1||t===3;
+  for(let z=0;z<N;z++){
+    let x=0;
+    while(x<N){
+      if(!solide(G.cells[x*N+z])){ x++; continue; }
+      let x2=x; while(x2+1<N&&solide(G.cells[(x2+1)*N+z])) x2++;
+      const w=(x2-x+1)*k, rx=Math.min(k*0.9,w/2);
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(x*k,z*k,w,k+0.4,rx); else ctx.rect(x*k,z*k,w,k+0.4);
+      ctx.fill(); ctx.stroke();
+      x=x2+1;
+    }
   }
   return c;
 }
