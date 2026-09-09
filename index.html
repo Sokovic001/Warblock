@@ -384,9 +384,10 @@
      autrement qu'au hasard, puisque tuer est devenu le seul moyen de s'enrichir. */
   /* L'argent porte l'information qui decide de la cible : il domine, les autres badges
      retombent au rang de detail. */
-  .lbl .cubes .mn{display:inline-block;background:linear-gradient(180deg,#FFE27A,#E08A0A);color:#3A1D00;
+  .lbl .mn{order:0;display:inline-block;background:linear-gradient(180deg,#FFE27A,#E08A0A);color:#3A1D00;
     border:2px solid #000;border-radius:8px;padding:0 6px;font-size:14px;line-height:19px;
     font-weight:800;text-shadow:none;box-shadow:0 2px 0 rgba(0,0,0,.55)}
+  .lbl .mn:empty{display:none}
   /* La couronne coiffe le plus riche encore en vie. Elle change de tete des qu'il se fait
      depouiller, ce qui en fait une cible mouvante plutot qu'un titre acquis. */
   .lbl .crown{position:absolute;left:50%;bottom:100%;transform:translate(-50%,-1px);width:26px;height:19px;
@@ -2877,7 +2878,7 @@ function hudFast(){
   for(const e of G.ents) if(e.alive&&e.pouch>0&&(!riche||e.pouch>riche.pouch)) riche=e;
   G.riche=riche;
   for(const e of G.ents){
-    if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':''); L.appendChild(e.lbl); }
+    if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':'')+'<span class="mn"></span>'; L.appendChild(e.lbl); }
     const hidden=!e.alive||(inBush(e)&&!e.isPlayer&&!canSee(p,e)); if(hidden){ e.lbl.style.display='none'; continue; }
     const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ e.lbl.style.display='none'; continue; }
     e.lbl.style.display='block'; e.lbl.style.left=s.sx+'px'; e.lbl.style.top=s.sy+'px';
@@ -2889,12 +2890,17 @@ function hudFast(){
     }
     // your own username above your head, like everyone else's
     e.lbl.children[1].textContent=e.name;
+    // Le montant coiffe le nom : c'est lui qu'on cherche en balayant l'ecran du regard, pas le
+    // pseudo. Le noeud est retrouve par classe et garde sur l'entite — le chercher a chaque image
+    // pour vingt brawlers ferait mille deux cents requetes par seconde pour rien.
+    if(!e.lblMn) e.lblMn=e.lbl.querySelector('.mn');
+    if(e.lblMn){ const v=(!e.isPlayer&&e.pouch>0)?money(e.pouch):'';
+      if(e.lblMn.textContent!==v) e.lblMn.textContent=v; }
     // power cubes and remaining lives, each as its own labelled badge — a bare "◆8" told nobody anything
     // your own cubes and lives live in the top bar; over your head they were just noise
     // Le joueur ne voit pas son propre magot ici : il l'a deja en haut a gauche, en plus gros.
     e.lbl.children[2].innerHTML = e.isPlayer ? ''
-      : (e.pouch > 0 ? `<span class="mn">${money(e.pouch)}</span>` : '')
-      + (e.cubes ? `<span class="cb">⬢${e.cubes}</span>` : '')
+      : (e.cubes ? `<span class="cb">⬢${e.cubes}</span>` : '')
       + (e.lives < C.livesFor(G.modeCfg) ? `<span class="lv">❤${e.lives}</span>` : '');
     const roi = e===G.riche;
     if(roi !== (e.lbl.dataset.roi==='1')){
