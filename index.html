@@ -1294,8 +1294,10 @@ function renderLobby(){
     const bientot=m.teamSize>1;
     d.className='mcard'+(m.id===selMode?' sel':'')+(bientot?' soon':'');
     d.disabled=bientot;
-    d.innerHTML=`<div class="who">${m.teams} ${m.teamSize>1?'teams of '+m.teamSize:'players'} · ${m.teams*m.teamSize} stakes</div><b>${m.name}</b><p>${m.desc}</p>`
-      + (bientot ? '<span class="soonTag">COMING SOON</span>' : `<span class="live" data-mode="${m.id}"></span>`);
+    // Sur une carte a venir, la description detaillait des regles qu'on ne peut pas encore jouer.
+    // Le nom et la composition des equipes suffisent a annoncer ce qui arrive.
+    d.innerHTML=`<div class="who">${m.teams} ${m.teamSize>1?'teams of '+m.teamSize:'players'} · ${m.teams*m.teamSize} stakes</div><b>${m.name}</b>`
+      + (bientot ? '<span class="soonTag">COMING SOON</span>' : `<p>${m.desc}</p><span class="live" data-mode="${m.id}"></span>`);
     if(!bientot) d.onclick=()=>{ selMode=m.id; renderLobby(); };
     md.appendChild(d); });
   const mode=C.MODES[selMode];
