@@ -3011,13 +3011,20 @@ function hud(){
   const ctx=mapCtx,S=170,k=S/N;
   ctx.clearRect(0,0,S,S);
   ctx.drawImage(G.mapImg,0,0);
-  // The safe circle is filled green rather than the outside being dimmed: on a slate ground the
-  // positive shape is what the eye finds first, and it is the one thing you actually run towards.
+  // Remplir le cercle sur en vert ne marchait pas : au coup d'envoi ZONE_START_R vaut 118 sur une
+  // carte de 152, le disque deborde donc de partout et teinte toute la minimap au lieu de dessiner
+  // quoi que ce soit. C'est le DEHORS qu'on assombrit : tant que la zone couvre la carte il n'y a
+  // rien a assombrir et la carte reste nette, puis le danger apparait a mesure qu'elle se referme.
+  const zr=Math.max(0,z.r*k);
   ctx.save();
-  ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2);
-  ctx.fillStyle='rgba(47,122,60,.55)'; ctx.fill();
+  ctx.beginPath(); ctx.rect(0,0,S,S); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2,true);
+  ctx.fillStyle='rgba(28,10,14,.62)'; ctx.fill('evenodd');
   ctx.restore();
-  ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.6; ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,Math.max(0,z.r*k),0,Math.PI*2); ctx.stroke();
+  ctx.save();
+  ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2);
+  ctx.fillStyle='rgba(47,122,60,.20)'; ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.8; ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2); ctx.stroke();
   if(z.shrinking){ ctx.setLineDash([4,4]); ctx.strokeStyle='#ffffffcc'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(z.to.cx*k,z.to.cz*k,z.to.r*k,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
   for(const pk of G.pickups) if(pk.kind==='cash'){
     ctx.fillStyle='#ffd23a'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
@@ -3037,20 +3044,31 @@ function buildMapImage(){
   // Two informations, nothing else: slate ground and the walls. Drawing the floor, the bushes and
   // the crates as well turned this into a 152x152 mosaic you could not read at a glance.
   ctx.fillStyle='#46536E'; ctx.fillRect(0,0,170,170);
-  // Runs of adjacent wall cells are merged into one rectangle before being drawn. Cell by cell,
-  // 152 columns of rounded corners read as gravel; merged, they read as walls.
-  ctx.fillStyle='#E08C8C'; ctx.strokeStyle='#8A4A4A'; ctx.lineWidth=Math.max(0.6,k*0.35);
-  const solide=t=>t===1||t===3;
-  for(let z=0;z<N;z++){
-    let x=0;
-    while(x<N){
-      if(!solide(G.cells[x*N+z])){ x++; continue; }
-      let x2=x; while(x2+1<N&&solide(G.cells[(x2+1)*N+z])) x2++;
-      const w=(x2-x+1)*k, rx=Math.min(k*0.9,w/2);
+  // La carte fait 152 cases pour 170 pixels : dessinees une par une, elles font 1,1 px et les
+  // murs generes au bruit se fragmentent en un millier d'eclats illisibles. On regroupe donc par
+  // blocs de 3 — une case de minimap vaut 3x3 cases de jeu, mur si la majorite l'est — ce qui
+  // ramene 979 formes a 237, de 3,3 px chacune. On perd le detail exact d'un mur, on gagne de
+  // pouvoir lire la structure de l'arene, qui est tout ce qu'on demande a une minimap.
+  const B=3, M=Math.ceil(N/B), km=170/M;
+  const gros=new Uint8Array(M*M);
+  for(let X=0;X<M;X++) for(let Z=0;Z<M;Z++){
+    let mur=0,tot=0;
+    for(let x=X*B;x<Math.min(N,(X+1)*B);x++) for(let z=Z*B;z<Math.min(N,(Z+1)*B);z++){ tot++; if(G.cells[x*N+z]===1) mur++; }
+    gros[X*M+Z] = mur*2>=tot ? 1 : 0;
+  }
+  // Les props (type 3) sont exclus : ce sont des cases isolees disseminees partout, qui se
+  // lisaient comme du mouchetis. Ils bloquent les tirs, mais on ne planifie pas dessus.
+  ctx.fillStyle='#E08C8C'; ctx.strokeStyle='#8A4A4A'; ctx.lineWidth=Math.max(0.7,km*0.22);
+  for(let Z=0;Z<M;Z++){
+    let X=0;
+    while(X<M){
+      if(!gros[X*M+Z]){ X++; continue; }
+      let X2=X; while(X2+1<M&&gros[(X2+1)*M+Z]) X2++;
+      const w=(X2-X+1)*km, rx=Math.min(km*0.55,w/2);
       ctx.beginPath();
-      if(ctx.roundRect) ctx.roundRect(x*k,z*k,w,k+0.4,rx); else ctx.rect(x*k,z*k,w,k+0.4);
+      if(ctx.roundRect) ctx.roundRect(X*km,Z*km,w,km+0.5,rx); else ctx.rect(X*km,Z*km,w,km+0.5);
       ctx.fill(); ctx.stroke();
-      x=x2+1;
+      X=X2+1;
     }
   }
   return c;
