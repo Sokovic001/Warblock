@@ -292,7 +292,7 @@
   .touch #intro b{font-size:72px} .touch #intro.go b{font-size:54px}
   /* Chat lives bottom-right, tucked beside the super button. The 💬 button pins the panel open;
      pressing T or Enter is a quick one-shot that closes itself after sending. */
-  #chat{left:14px;bottom:70px;width:min(320px,42vw);display:flex;flex-direction:column;align-items:flex-start;gap:4px;pointer-events:none}
+  #chat{left:calc(var(--hu)*2.2);bottom:calc(var(--hu)*12);width:min(320px,42vw);display:flex;flex-direction:column;align-items:flex-start;gap:4px;pointer-events:none}
   #chat.pinned{pointer-events:auto;background:rgba(13,20,44,.9);border:3px solid #000;border-radius:14px;padding:0;box-shadow:0 4px 0 #000;overflow:hidden}
   #chatHead{display:none;width:100%;align-items:center;justify-content:space-between;padding:5px 10px;
     background:linear-gradient(180deg,#2b3a75,#1a2450);border-bottom:3px solid #000;
@@ -303,7 +303,7 @@
   #chatLog div{max-width:100%;background:rgba(27,36,80,.92);border:calc(var(--hu)*.3) solid #000;border-radius:calc(var(--hu)*1.3);position:relative;
     padding:3px 9px;font-size:12px;font-family:Arial,sans-serif;font-weight:700;color:#fff;text-shadow:1px 1px 0 #000;
     animation:chatIn .25s ease-out;word-break:break-word;text-align:left}
-  #chatLog div::after{content:'';position:absolute;left:calc(var(--hu)*1.2);bottom:-calc(var(--hu)*.75);width:calc(var(--hu)*1);height:calc(var(--hu)*.8);
+  #chatLog div::after{content:'';position:absolute;left:calc(var(--hu)*1.2);bottom:calc(var(--hu)*-.75);width:calc(var(--hu)*1);height:calc(var(--hu)*.8);
     background:rgba(27,36,80,.92);border-left:calc(var(--hu)*.3) solid #000;border-bottom:calc(var(--hu)*.3) solid #000;
     clip-path:polygon(0 0,100% 100%,0 100%)}
   #chatLog div b{color:var(--cyan)} #chatLog div.me b{color:var(--yellow)} #chatLog div.sys{color:#b8c6e8;font-style:italic}
@@ -350,7 +350,7 @@
   .touch #chatBtn{left:12px;bottom:16px;width:42px;height:38px;font-size:15px}
   #respawn{left:50%;top:40%;transform:translate(-50%,-50%);display:none;background:var(--panel);border:3px solid #000;border-radius:14px;padding:10px 18px;font-size:18px;text-shadow:2px 2px 0 #000;box-shadow:0 4px 0 #000}
   .touch #respawn{font-size:13px;padding:7px 12px}
-  .hkey{position:absolute;bottom:-calc(var(--hu)*.6);left:50%;transform:translateX(-50%);font-size:calc(var(--hu)*1);
+  .hkey{position:absolute;bottom:calc(var(--hu)*-.6);left:50%;transform:translateX(-50%);font-size:calc(var(--hu)*1);
     background:#0B0F1F;border:calc(var(--hu)*.22) solid #000;border-radius:calc(var(--hu)*.5);padding:0 calc(var(--hu)*.45);color:#9FB4DD;
     letter-spacing:.06em}
   #cashout{position:absolute;right:calc(var(--hu)*23.3);bottom:calc(var(--hu)*8.1);left:auto;transform:none;display:none;
@@ -402,7 +402,7 @@
   /* le fond rouge est ce qui fait lire "kills" sans etiquette */
   #pouch .hbadge.kill{background:linear-gradient(180deg,#FF5C5C,#B01414)}
   #pouch .hbadge svg{width:66%;height:66%;display:block}
-  #pouch .hbadge b{position:absolute;right:-calc(var(--hu)*.45);bottom:-calc(var(--hu)*.8);font-size:calc(var(--hu)*1.55);color:#fff;
+  #pouch .hbadge b{position:absolute;right:calc(var(--hu)*-.45);bottom:calc(var(--hu)*-.8);font-size:calc(var(--hu)*1.55);color:#fff;
     -webkit-text-stroke:calc(var(--hu)*.38) #000;paint-order:stroke fill}
   /* Les trois emplacements restent visibles : un coeur perdu est grise, jamais retire, sinon on
      ne sait plus combien de vies on avait au depart. */
@@ -412,17 +412,21 @@
     box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
   #lifePill i{width:calc(var(--hu)*3.3);height:calc(var(--hu)*3.3);display:block;flex:0 0 auto;font-style:normal}
   #lifePill i svg{width:100%;height:100%;display:block}
-  #potAmt2{left:calc(var(--hu)*2.2);top:calc(var(--hu)*14.6);font-size:calc(var(--hu)*1.15);letter-spacing:.1em;color:#9fb4dd;
-    font-family:Arial,sans-serif;font-weight:700}
+  #potAmt2{left:calc(var(--hu)*2.2);top:calc(var(--hu)*14.9);font-size:calc(var(--hu)*1.5);
+    letter-spacing:.08em;color:var(--cash);-webkit-text-stroke:calc(var(--hu)*.34) #000;
+    paint-order:stroke fill;font-family:inherit;font-weight:800}
   /* Pastille centrale + barre de gaz SEPAREE dessous, comme la reference : dans la pastille,
      la barre se confondait avec le compteur. */
   #match{left:50%;top:calc(var(--hu)*3.2);transform:translateX(-50%);display:flex;flex-direction:column;
     align-items:center;gap:calc(var(--hu)*.5);background:none;border:0;box-shadow:none;padding:0}
-  #match .mbox{width:calc(var(--hu)*14.35);height:calc(var(--hu)*5.11);border-radius:calc(var(--hu)*1.3);display:flex;align-items:baseline;
-    justify-content:center;gap:calc(var(--hu)*.6);padding-top:calc(var(--hu)*.5);border:calc(var(--hu)*.39) solid #000;
+  #match .mbox{min-width:calc(var(--hu)*14.35);border-radius:calc(var(--hu)*1.3);display:flex;
+    flex-direction:column;align-items:center;justify-content:center;gap:0;
+    padding:calc(var(--hu)*.35) calc(var(--hu)*1.1) calc(var(--hu)*.5);border:calc(var(--hu)*.39) solid #000;
     background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
   #match .mbox b{font-size:calc(var(--hu)*3.4);line-height:1;-webkit-text-stroke:calc(var(--hu)*.45) #000;paint-order:stroke fill}
-  #match .mbox small{font-size:calc(var(--hu)*1.25);letter-spacing:.14em;color:#BCD0FF}
+  #match .mrow{display:flex;align-items:baseline;gap:calc(var(--hu)*.6)}
+  #match .mbox small{font-size:calc(var(--hu)*1.25);letter-spacing:.14em;color:#BCD0FF;white-space:nowrap}
+  #match #leftAmt{font-size:calc(var(--hu)*1.05);color:#8FA4D6;margin-top:calc(var(--hu)*-.15)}
   #match .mgas{width:calc(var(--hu)*11.8);height:calc(var(--hu)*.79);background:#0D1430;border:calc(var(--hu)*.24) solid #000;
     border-radius:99px;position:relative;overflow:hidden}
   #match .mgas i{position:absolute;inset:0;width:var(--gw,100%);background:linear-gradient(90deg,#7BE38A,#31A94A);transition:width .3s}
@@ -752,7 +756,7 @@
     <div id="pouch"><span class="hcoin">$</span><b class="amt" id="pouchAmt">$0</b><span class="hsep"></span><span class="hbadge cube" id="cubePill" title="Power cubes: +10% health and +10% damage each"><b id="killsAmt2">0</b></span><span class="hbadge kill" id="killPill" title="Kills"><b id="killsAmt">0</b></span></div>
     <div id="lifePill"></div>
     <div class="tiny" id="potAmt2"></div>
-    <div id="match"><div class="mbox"><b id="alive">20</b><small id="aliveLbl">ALIVE</small><small id="leftAmt"></small></div><div class="mgas"><i id="gasFill"></i></div><div class="zone" id="zoneTxt"></div></div>
+    <div id="match"><div class="mbox"><div class="mrow"><b id="alive">20</b><small id="aliveLbl">ALIVE</small></div><small id="leftAmt"></small></div><div class="mgas"><i id="gasFill"></i></div><div class="zone" id="zoneTxt"></div></div>
     <div id="mapwrap"><canvas id="map" width="170" height="170"></canvas></div>
     <div id="feed"></div>
     <div id="panel">
@@ -2935,8 +2939,8 @@ function hud(){
   }
   $('alive').textContent=alive;
   $('aliveLbl').textContent=team?'TEAMS':'ALIVE';
-  $('leftAmt').textContent = (!team && remaining>standing) ? remaining+' LEFT' : '';
-  $('potAmt2').textContent=G.modeCfg.cashout?'':'UP TO '+money(C.teamPayout(G.stake,G.modeCfg,C.RAKE).winner);
+  $('leftAmt').textContent = (!team && remaining>standing) ? remaining+' PLAYERS LEFT' : '';
+  $('potAmt2').textContent=G.modeCfg.cashout?'':'BANK UP TO '+money(C.teamPayout(G.stake,G.modeCfg,C.RAKE).winner);
   const sp=p.super/p.brawler.super.cost; $('superRing').style.setProperty('--p',(sp*100)+'%'); $('superRing').className=sp>=1?'ready':''; $('superIn').textContent=sp>=1?'SUPER!':Math.floor(sp*100)+'%';
   const z=G.zone, zt=$('zoneTxt'), ph=phases();
   let chaud=false;
