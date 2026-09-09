@@ -1574,7 +1574,7 @@ const RT_OPT={minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:T
 let rtScene=null, rtA=null, rtB=null;
 let postHurt=0, postTime=0, postGrade=true;
 const POST_VERT=`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`;
-const brightMat=new THREE.ShaderMaterial({uniforms:{tDiffuse:{value:null},uThreshold:{value:.85}},
+const brightMat=new THREE.ShaderMaterial({uniforms:{tDiffuse:{value:null},uThreshold:{value:.96}},
   vertexShader:POST_VERT,fragmentShader:`
   uniform sampler2D tDiffuse; uniform float uThreshold; varying vec2 vUv;
   void main(){ vec4 c=texture2D(tDiffuse,vUv);
@@ -1598,14 +1598,13 @@ const finalMat=new THREE.ShaderMaterial({uniforms:{tScene:{value:null},tBloom:{v
   uniform sampler2D tScene,tBloom; uniform float uBloom,uGrade,uHurt,uTime; varying vec2 vUv;
   void main(){
     vec3 c=texture2D(tScene,vUv).rgb;
-    c+=texture2D(tBloom,vUv).rgb*0.9*uBloom;
+    c+=texture2D(tBloom,vUv).rgb*0.30*uBloom;
     if(uGrade>0.5){
       float l=dot(c,vec3(.2126,.7152,.0722));
-      c=mix(vec3(l),c,1.18);
-      c=(c-0.5)*1.06+0.5;
-      c*=vec3(1.02,1.0,0.98);
+      c=mix(vec3(l),c,1.06);
+      c*=vec3(1.005,1.0,0.995);
       vec2 d=vUv-0.5;
-      c*=1.0-dot(d,d)*0.55;
+      c*=1.0-dot(d,d)*0.42;
     }
     if(uHurt>0.001){
       vec2 d=vUv-0.5; float r=smoothstep(0.18,0.52,dot(d,d));
@@ -2409,7 +2408,10 @@ function projUpdate(dt){
         // Pas de critique au super, ni sur une cible intouchable ou encore sous protection.
         // BOT_CRIT reste a false : on juge d'abord l'effet et l'equilibre cote joueur.
         if(p.owner.isPlayer&&!p.isSuper&&e.invuln<=0&&G.time>=C.GRACE){
-          if(p.owner.critShotId!==p.shotId){
+          // ---- TEMPORAIRE, pour valider l'effet : chaque tir du joueur est critique. ----
+          // A RETIRER une fois l'effet valide, la regle des trois tirs est juste en dessous.
+          if(CRIT_TEST){ p.owner.critNow=true; p.owner.critShotId=p.shotId; }
+          else if(p.owner.critShotId!==p.shotId){
             const r=C.critShot(p.owner.critState,e.id,G.time,C.critWindow(p.owner.brawler));
             p.owner.critState=r.state; p.owner.critShotId=p.shotId; p.owner.critNow=r.crit;
           }
@@ -2566,6 +2568,8 @@ const tmpV=new THREE.Vector3();
 function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)/2*innerWidth, sy:(1-tmpV.y)/2*innerHeight, ok:tmpV.z<1}; }
 // Effets d'un critique. La secousse et l'arret sur image sont coupes par prefers-reduced-motion :
 // ce sont exactement les deux choses qui derangent les personnes sensibles au mouvement.
+// TEMPORAIRE — mettre a false pour revenir a la regle des trois tirs consecutifs.
+const CRIT_TEST = true;
 const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 let critHold=0;
 function critFx(){
