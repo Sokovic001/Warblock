@@ -363,28 +363,37 @@
   .touch #cashout{min-width:0;padding:5px 14px;bottom:16px;border-width:3px;border-radius:12px} .touch #cashout small{font-size:8px} .touch #cashout b{font-size:17px}
   body.res #hud #pouch, body.res #hud #match{background:rgba(74,20,32,.85)}
   #labels{inset:0}
-  .lbl{position:absolute;transform:translate(-50%,-100%);text-align:center;white-space:nowrap;font-size:11px;text-shadow:1px 1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,-1px -1px 0 #000}
+  /* Colonne, pas une ligne. Nom, argent et badges se disputaient la meme ligne : le pseudo etait
+     ecrase et rien n'etait lisible. L'ordre est impose par `order` et non par le DOM, parce que
+     hudFast lit les enfants par index — children[1] le nom, children[3] la barre. */
+  .lbl{position:absolute;transform:translate(-50%,-100%);text-align:center;white-space:nowrap;
+    font-size:11px;display:flex;flex-direction:column;align-items:center;gap:1px;
+    text-shadow:1px 1px 0 #000,-1px 1px 0 #000,1px -1px 0 #000,-1px -1px 0 #000}
+  .lbl .nm{order:1} .lbl .bar{order:2} .lbl .am{order:3} .lbl .cubes{order:4}
   .lbl .bar{position:relative;width:64px;height:12px;background:#1a1a1a;border:2px solid #000;border-radius:5px;margin:2px auto 0;overflow:hidden} .lbl .bar i{display:block;height:100%;background:var(--red)} .lbl.you .bar i{background:var(--green)}
   .lbl .bar b{position:absolute;inset:0;font-size:9px;line-height:9px;color:#fff}
   .lbl.you .bar{width:84px;height:14px}
   .lbl.ally .bar i{background:var(--cyan)}
   .lbl.ally .nm{color:var(--cyan)}
   .lbl .am{display:flex;gap:2px;width:84px;margin:2px auto 0} .lbl .am i{flex:1;height:5px;background:#333;border:1px solid #000;border-radius:2px} .lbl .am i.on{background:var(--orange)}
-  .lbl .cubes{display:inline-flex;gap:4px;vertical-align:middle}
-  .lbl .cubes .cb{display:inline-flex;align-items:center;gap:3px;background:var(--cube);color:#06301f;
-    border:2px solid #000;border-radius:7px;padding:0 5px;font-size:11px;line-height:15px}
+  .lbl .cubes{display:flex;gap:3px;align-items:center;justify-content:center;margin-top:1px}
+  .lbl .cubes .cb{display:inline-flex;align-items:center;gap:2px;background:var(--cube);color:#06301f;
+    border:2px solid #000;border-radius:6px;padding:0 4px;font-size:10px;line-height:14px;text-shadow:none}
   .lbl .cubes .cb small{font-size:7px;letter-spacing:.08em;opacity:.8}
   /* Ce que porte l'adversaire, au-dessus de sa tete : c'est la seule facon de choisir sa cible
      autrement qu'au hasard, puisque tuer est devenu le seul moyen de s'enrichir. */
-  .lbl .cubes .mn{display:inline-block;background:linear-gradient(180deg,#FFD75E,#E08A0A);color:#3A1D00;
-    border:2px solid #000;border-radius:7px;padding:0 5px;font-size:11px;line-height:15px;font-weight:800}
+  /* L'argent porte l'information qui decide de la cible : il domine, les autres badges
+     retombent au rang de detail. */
+  .lbl .cubes .mn{display:inline-block;background:linear-gradient(180deg,#FFE27A,#E08A0A);color:#3A1D00;
+    border:2px solid #000;border-radius:8px;padding:0 6px;font-size:14px;line-height:19px;
+    font-weight:800;text-shadow:none;box-shadow:0 2px 0 rgba(0,0,0,.55)}
   /* La couronne coiffe le plus riche encore en vie. Elle change de tete des qu'il se fait
      depouiller, ce qui en fait une cible mouvante plutot qu'un titre acquis. */
-  .lbl .crown{position:absolute;left:50%;bottom:100%;transform:translate(-50%,-2px);width:22px;height:16px;
+  .lbl .crown{position:absolute;left:50%;bottom:100%;transform:translate(-50%,-1px);width:26px;height:19px;
     pointer-events:none;filter:drop-shadow(0 2px 0 rgba(0,0,0,.5))}
   .lbl .crown svg{display:block;width:100%;height:100%}
-  .lbl .cubes .lv{display:inline-block;background:#f0463c;color:#fff;border:2px solid #000;border-radius:7px;
-    padding:0 5px;font-size:11px;line-height:15px}
+  .lbl .cubes .lv{display:inline-block;background:#f0463c;color:#fff;border:2px solid #000;border-radius:6px;
+    padding:0 4px;font-size:10px;line-height:14px;text-shadow:none}
   .touch .lbl .cubes .cb small{display:none}
   .dmg{position:absolute;transform:translate(-50%,-50%);font-size:18px;color:#fff;text-shadow:2px 2px 0 #000,-2px 2px 0 #000,2px -2px 0 #000,-2px -2px 0 #000;animation:dmg .8s ease-out forwards}
   .dmg.you{color:var(--red)} .dmg.heal{color:var(--green)}
@@ -2868,7 +2877,7 @@ function hudFast(){
   for(const e of G.ents) if(e.alive&&e.pouch>0&&(!riche||e.pouch>riche.pouch)) riche=e;
   G.riche=riche;
   for(const e of G.ents){
-    if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span> <span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':''); L.appendChild(e.lbl); }
+    if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':''); L.appendChild(e.lbl); }
     const hidden=!e.alive||(inBush(e)&&!e.isPlayer&&!canSee(p,e)); if(hidden){ e.lbl.style.display='none'; continue; }
     const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ e.lbl.style.display='none'; continue; }
     e.lbl.style.display='block'; e.lbl.style.left=s.sx+'px'; e.lbl.style.top=s.sy+'px';
