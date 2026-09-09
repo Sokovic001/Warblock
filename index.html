@@ -94,6 +94,11 @@
   .gcard .tag{flex:0 1 auto;min-width:0;font-size:9px;letter-spacing:.08em;text-transform:uppercase;background:#0009;border:2px solid #0006;padding:3px 9px;border-radius:999px;font-family:Arial,sans-serif;font-weight:700;white-space:nowrap;text-align:right;overflow:hidden;text-overflow:ellipsis}
   @media (max-width:520px){ .gcard .ghead{flex-direction:column;align-items:flex-start;gap:4px} .gcard .tag{text-align:left} }
   .modes{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  /* Grise mais lisible : on doit pouvoir lire ce que le mode fera, sinon l'annonce ne sert a rien. */
+  .mcard.soon{filter:grayscale(.85);opacity:.5;cursor:default;box-shadow:0 5px 0 #000}
+  .mcard.soon:hover{transform:none}
+  .mcard .soonTag{display:inline-block;margin-top:6px;background:#0b0f1f;color:#cfe3ff;border:2px solid #000;
+    border-radius:999px;padding:1px 10px;font-size:10px;letter-spacing:.16em}
   .mcard{padding:12px 12px 10px;border:3px solid #000;border-radius:16px;background:linear-gradient(180deg,#2b3a75,#1a2450);color:#fff;text-align:left;transition:transform .1s;box-shadow:0 5px 0 #000}
   .mcard:hover{transform:translateY(-3px)} .mcard.sel{background:linear-gradient(180deg,#3ae0ff,#1668c7);box-shadow:0 5px 0 #000,0 0 0 4px var(--yellow)}
   .mcard b{font-size:20px;text-shadow:2px 2px 0 #000} .mcard .who{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--yellow);text-shadow:1px 1px 0 #000}
@@ -1282,9 +1287,17 @@ function renderLobby(){
   const md=$('modes'); md.innerHTML='';
   $('modeRow').style.display=game.modes.length>1?'block':'none';
   $('tierLbl').textContent=(game.modes.length>1?'4':'3')+' · Pick a table & drop in';
-  game.modes.forEach(id=>{ const m=C.MODES[id]; const d=document.createElement('button'); d.className='mcard'+(m.id===selMode?' sel':'');
-    d.innerHTML=`<div class="who">${m.teams} ${m.teamSize>1?'teams of '+m.teamSize:'players'} · ${m.teams*m.teamSize} stakes</div><b>${m.name}</b><p>${m.desc}</p><span class="live" data-mode="${m.id}"></span>`;
-    d.onclick=()=>{ selMode=m.id; renderLobby(); }; md.appendChild(d); });
+  game.modes.forEach(id=>{ const m=C.MODES[id]; const d=document.createElement('button');
+    // Les modes en equipe restent affiches, grises et inertes : les retirer laisserait croire que
+    // le jeu se limite au solo, alors qu'on veut au contraire annoncer ce qui vient. On les
+    // ouvrira quand il y aura assez de monde pour remplir dix equipes.
+    const bientot=m.teamSize>1;
+    d.className='mcard'+(m.id===selMode?' sel':'')+(bientot?' soon':'');
+    d.disabled=bientot;
+    d.innerHTML=`<div class="who">${m.teams} ${m.teamSize>1?'teams of '+m.teamSize:'players'} · ${m.teams*m.teamSize} stakes</div><b>${m.name}</b><p>${m.desc}</p>`
+      + (bientot ? '<span class="soonTag">COMING SOON</span>' : `<span class="live" data-mode="${m.id}"></span>`);
+    if(!bientot) d.onclick=()=>{ selMode=m.id; renderLobby(); };
+    md.appendChild(d); });
   const mode=C.MODES[selMode];
   const box=$('tiers'); box.innerHTML='';
   C.TIERS.forEach(t=>{ const p=C.teamPayout(t.stake,mode,C.RAKE); const b=document.createElement('button'); b.className='chip'; b.style.setProperty('--c',t.color); b.disabled=wallet<t.stake;
