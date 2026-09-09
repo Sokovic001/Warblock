@@ -2900,7 +2900,11 @@ function hudFast(){
     // your own cubes and lives live in the top bar; over your head they were just noise
     // Le joueur ne voit pas son propre magot ici : il l'a deja en haut a gauche, en plus gros.
     e.lbl.children[2].innerHTML = e.isPlayer ? ''
-      : (e.cubes ? `<span class="cb">⬢${e.cubes}</span>` : '')
+      // La barre affiche les PV absolus : un adversaire cube se trahit deja par son nombre, 280
+      // au lieu de 140. Le badge ne repete donc son endurance pour rien — ce qu'il ajoute, ce
+      // sont ses degats, qui doublent sans que rien d'autre le signale. Sous trois cubes l'ecart
+      // ne change pas un duel, et le badge n'etait que du bruit au-dessus de chaque tete.
+      : (e.cubes >= 3 ? `<span class="cb">⬢${e.cubes}</span>` : '')
       + (e.lives < C.livesFor(G.modeCfg) ? `<span class="lv">❤${e.lives}</span>` : '');
     const roi = e===G.riche;
     if(roi !== (e.lbl.dataset.roi==='1')){
