@@ -260,15 +260,21 @@
   /* container-type:size fait de #game l'unite de reference du HUD : 1cqw vaut 1 % de la largeur
      de l'ecran de jeu. Les tailles relevees sur la reference tiennent donc a toute resolution,
      ce qu'aucune valeur en px ne permet. Les regles .touch, en px, restent prioritaires. */
-  #game{position:fixed;inset:0;display:none;container-type:size}
+  #game{position:fixed;inset:0;display:none;container-type:size;
+    /* --hu est l'unite du HUD. cqw seul vaut 1 % de la LARGEUR : sur une fenetre plus large que
+       16:9 le HUD enflait pendant que la zone de jeu, elle, reste bornee par la hauteur. Le min()
+       laisse la hauteur reprendre la main des que l'ecran s'allonge. Le facteur 0.7 est la
+       reduction d'ensemble : la maquette etait relevee sur une reference tenue a bout de bras,
+       trop grosse pour un ecran de bureau a un metre. */
+    --hu:min(0.5cqw,0.9cqh)}
   #c{width:100%;height:100%;display:block;cursor:crosshair;image-rendering:auto}
   #hud{position:absolute;inset:0;pointer-events:none;font-size:14px;overflow:hidden}
   #hud>div{position:absolute}
   #vignette{inset:0;box-shadow:inset 0 0 120px 40px rgba(240,70,60,0)}
   #gasWarn{inset:0;box-shadow:inset 0 0 160px 60px rgba(140,230,80,0)}
-  #gasArrow{left:50%;top:13.5cqw;transform:translateX(-50%);display:none;z-index:7;
-    background:linear-gradient(180deg,#E5484D,#8A1622);border:.39cqw solid #000;border-radius:1.2cqw;
-    padding:.25cqw 1.4cqw .45cqw;box-shadow:0 .5cqw 0 rgba(0,0,0,.55);font-size:1.7cqw;
+  #gasArrow{left:50%;top:calc(var(--hu)*13.5);transform:translateX(-50%);display:none;z-index:7;
+    background:linear-gradient(180deg,#E5484D,#8A1622);border:calc(var(--hu)*.39) solid #000;border-radius:calc(var(--hu)*1.2);
+    padding:calc(var(--hu)*.25) calc(var(--hu)*1.4) calc(var(--hu)*.45);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55);font-size:calc(var(--hu)*1.7);
     letter-spacing:.05em;color:#fff;white-space:nowrap;animation:gasflash 1s ease-in-out infinite}
   @keyframes gasflash{50%{opacity:.55}}
   body.lowhp #vignette{animation:lowflash 1.1s ease-in-out infinite}
@@ -294,11 +300,11 @@
   #chat.pinned #chatHead{display:flex}
   #chatClose{background:#0006;border:2px solid #000;border-radius:7px;color:#fff;width:22px;height:20px;font-size:10px;line-height:1;padding:0}
   #chatLog{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%}
-  #chatLog div{max-width:100%;background:rgba(27,36,80,.92);border:.3cqw solid #000;border-radius:1.3cqw;position:relative;
+  #chatLog div{max-width:100%;background:rgba(27,36,80,.92);border:calc(var(--hu)*.3) solid #000;border-radius:calc(var(--hu)*1.3);position:relative;
     padding:3px 9px;font-size:12px;font-family:Arial,sans-serif;font-weight:700;color:#fff;text-shadow:1px 1px 0 #000;
     animation:chatIn .25s ease-out;word-break:break-word;text-align:left}
-  #chatLog div::after{content:'';position:absolute;left:1.2cqw;bottom:-.75cqw;width:1cqw;height:.8cqw;
-    background:rgba(27,36,80,.92);border-left:.3cqw solid #000;border-bottom:.3cqw solid #000;
+  #chatLog div::after{content:'';position:absolute;left:calc(var(--hu)*1.2);bottom:-calc(var(--hu)*.75);width:calc(var(--hu)*1);height:calc(var(--hu)*.8);
+    background:rgba(27,36,80,.92);border-left:calc(var(--hu)*.3) solid #000;border-bottom:calc(var(--hu)*.3) solid #000;
     clip-path:polygon(0 0,100% 100%,0 100%)}
   #chatLog div b{color:var(--cyan)} #chatLog div.me b{color:var(--yellow)} #chatLog div.sys{color:#b8c6e8;font-style:italic}
   @keyframes chatIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -330,12 +336,12 @@
     background:#1a2450;box-shadow:0 3px 0 #000;line-height:0;transition:transform .1s}
   #emoteWheel button:hover{transform:translateY(-3px)}
   #emoteWheel svg{display:block;width:100%;height:100%}
-  #emoteBtn{position:absolute;left:10.2cqw;bottom:3.6cqw;width:6.88cqw;height:6.88cqw;border-radius:50%;border:.39cqw solid #000;background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 .5cqw 0 rgba(0,0,0,.55);display:grid;place-items:center;font-size:2.6cqw;pointer-events:auto;cursor:pointer;color:#fff;padding:0}
+  #emoteBtn{position:absolute;left:calc(var(--hu)*10.2);bottom:calc(var(--hu)*3.6);width:calc(var(--hu)*6.88);height:calc(var(--hu)*6.88);border-radius:50%;border:calc(var(--hu)*.39) solid #000;background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55);display:grid;place-items:center;font-size:calc(var(--hu)*2.6);pointer-events:auto;cursor:pointer;color:#fff;padding:0}
     background:rgba(29,35,64,.85);color:#fff;font-size:20px;line-height:1;box-shadow:0 3px 0 #000;pointer-events:auto}
   #emoteBtn.on{background:linear-gradient(180deg,#ffe066,#ffb31f)}
   .touch #emoteBtn{left:62px;bottom:16px;width:42px;height:38px;font-size:17px}
   .touch #emoteWheel{bottom:62px;width:min(260px,52vw)} .touch #emoteWheel button{width:40px;height:40px}
-  #chatBtn{position:absolute;left:2.2cqw;bottom:3.6cqw;width:6.88cqw;height:6.88cqw;border-radius:50%;border:.39cqw solid #000;background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 .5cqw 0 rgba(0,0,0,.55);display:grid;place-items:center;font-size:2.6cqw;pointer-events:auto;cursor:pointer;color:#fff;padding:0}
+  #chatBtn{position:absolute;left:calc(var(--hu)*2.2);bottom:calc(var(--hu)*3.6);width:calc(var(--hu)*6.88);height:calc(var(--hu)*6.88);border-radius:50%;border:calc(var(--hu)*.39) solid #000;background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55);display:grid;place-items:center;font-size:calc(var(--hu)*2.6);pointer-events:auto;cursor:pointer;color:#fff;padding:0}
     background:rgba(29,35,64,.85);color:#fff;font-size:18px;line-height:1;box-shadow:0 3px 0 #000;pointer-events:auto}
   #chatBtn.on{background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000}
   .touch #chat{width:min(280px,52vw);bottom:62px;left:12px}
@@ -344,17 +350,17 @@
   .touch #chatBtn{left:12px;bottom:16px;width:42px;height:38px;font-size:15px}
   #respawn{left:50%;top:40%;transform:translate(-50%,-50%);display:none;background:var(--panel);border:3px solid #000;border-radius:14px;padding:10px 18px;font-size:18px;text-shadow:2px 2px 0 #000;box-shadow:0 4px 0 #000}
   .touch #respawn{font-size:13px;padding:7px 12px}
-  .hkey{position:absolute;bottom:-.6cqw;left:50%;transform:translateX(-50%);font-size:1cqw;
-    background:#0B0F1F;border:.22cqw solid #000;border-radius:.5cqw;padding:0 .45cqw;color:#9FB4DD;
+  .hkey{position:absolute;bottom:-calc(var(--hu)*.6);left:50%;transform:translateX(-50%);font-size:calc(var(--hu)*1);
+    background:#0B0F1F;border:calc(var(--hu)*.22) solid #000;border-radius:calc(var(--hu)*.5);padding:0 calc(var(--hu)*.45);color:#9FB4DD;
     letter-spacing:.06em}
-  #cashout{position:absolute;right:23.3cqw;bottom:8.1cqw;left:auto;transform:none;display:none;
-    pointer-events:auto;width:9.83cqw;height:9.83cqw;min-width:0;padding:0;border-radius:50%;
-    border:.39cqw solid #000;background:radial-gradient(circle at 34% 28%,#2B3A6E,#111938);
-    box-shadow:0 .55cqw 0 rgba(0,0,0,.55);flex-direction:column;align-items:center;justify-content:center;
+  #cashout{position:absolute;right:calc(var(--hu)*23.3);bottom:calc(var(--hu)*8.1);left:auto;transform:none;display:none;
+    pointer-events:auto;width:calc(var(--hu)*9.83);height:calc(var(--hu)*9.83);min-width:0;padding:0;border-radius:50%;
+    border:calc(var(--hu)*.39) solid #000;background:radial-gradient(circle at 34% 28%,#2B3A6E,#111938);
+    box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55);flex-direction:column;align-items:center;justify-content:center;
     color:#9FB4DD;line-height:1.05}
   #cashout.on{display:flex}
   #cashout.locked{filter:grayscale(.7);opacity:.75}
-  #cashout small{display:block;font-size:1.05cqw;letter-spacing:.1em;opacity:.95} #cashout b{font-size:1.6cqw;line-height:1.05;color:var(--cash)}
+  #cashout small{display:block;font-size:calc(var(--hu)*1.05);letter-spacing:.1em;opacity:.95} #cashout b{font-size:calc(var(--hu)*1.6);line-height:1.05;color:var(--cash)}
   @keyframes cashpulse{from{transform:translateX(-50%) scale(1)}to{transform:translateX(-50%) scale(1.05)}}
   .touch #cashout{min-width:0;padding:5px 14px;bottom:16px;border-width:3px;border-radius:12px} .touch #cashout small{font-size:8px} .touch #cashout b{font-size:17px}
   body.res #hud #pouch, body.res #hud #match{background:rgba(74,20,32,.85)}
@@ -380,72 +386,72 @@
      corner of the arena, which is exactly where you need to see incoming players. */
   /* Cluster gauche aux proportions de la reference, en cqw. Les classes sont prefixees h-
      parce que .pill, .badge et .coin existent deja ailleurs dans la feuille. */
-  #pouch{left:2.2cqw;top:3.2cqw;display:flex;align-items:center;height:5.35cqw;gap:.8cqw;
-    border:.39cqw solid #000;border-radius:2.68cqw;padding:0 1.2cqw 0 .55cqw;
-    background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
-  #pouch .hcoin{width:3.35cqw;height:3.35cqw;border-radius:50%;border:.3cqw solid #000;flex:0 0 auto;
+  #pouch{left:calc(var(--hu)*2.2);top:calc(var(--hu)*3.2);display:flex;align-items:center;height:calc(var(--hu)*5.35);gap:calc(var(--hu)*.8);
+    border:calc(var(--hu)*.39) solid #000;border-radius:calc(var(--hu)*2.68);padding:0 calc(var(--hu)*1.2) 0 calc(var(--hu)*.55);
+    background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
+  #pouch .hcoin{width:calc(var(--hu)*3.35);height:calc(var(--hu)*3.35);border-radius:50%;border:calc(var(--hu)*.3) solid #000;flex:0 0 auto;
     background:radial-gradient(circle at 34% 30%,#FFE27A,#E08A0A);display:grid;place-items:center;
-    font-size:1.6cqw;color:#7A3B00}
-  #pouch .amt{font-size:3.9cqw;line-height:1;color:var(--cash);-webkit-text-stroke:.48cqw #000;
+    font-size:calc(var(--hu)*1.6);color:#7A3B00}
+  #pouch .amt{font-size:calc(var(--hu)*3.9);line-height:1;color:var(--cash);-webkit-text-stroke:calc(var(--hu)*.48) #000;
     paint-order:stroke fill;text-shadow:none;transition:transform .1s}
   #pouch .amt.pop{transform:scale(1.16)}
-  #pouch .hsep{width:.3cqw;height:70%;background:#0009;border-radius:.2cqw;margin:0 .3cqw;flex:0 0 auto}
-  #pouch .hbadge{width:2.85cqw;height:2.85cqw;border-radius:.7cqw;border:.28cqw solid #000;position:relative;
+  #pouch .hsep{width:calc(var(--hu)*.3);height:70%;background:#0009;border-radius:calc(var(--hu)*.2);margin:0 calc(var(--hu)*.3);flex:0 0 auto}
+  #pouch .hbadge{width:calc(var(--hu)*2.85);height:calc(var(--hu)*2.85);border-radius:calc(var(--hu)*.7);border:calc(var(--hu)*.28) solid #000;position:relative;
     display:grid;place-items:center;flex:0 0 auto}
   #pouch .hbadge.cube{background:linear-gradient(180deg,#7FF3B0,#2E9E63)}
   /* le fond rouge est ce qui fait lire "kills" sans etiquette */
   #pouch .hbadge.kill{background:linear-gradient(180deg,#FF5C5C,#B01414)}
   #pouch .hbadge svg{width:66%;height:66%;display:block}
-  #pouch .hbadge b{position:absolute;right:-.45cqw;bottom:-.8cqw;font-size:1.55cqw;color:#fff;
-    -webkit-text-stroke:.38cqw #000;paint-order:stroke fill}
+  #pouch .hbadge b{position:absolute;right:-calc(var(--hu)*.45);bottom:-calc(var(--hu)*.8);font-size:calc(var(--hu)*1.55);color:#fff;
+    -webkit-text-stroke:calc(var(--hu)*.38) #000;paint-order:stroke fill}
   /* Les trois emplacements restent visibles : un coeur perdu est grise, jamais retire, sinon on
      ne sait plus combien de vies on avait au depart. */
-  #lifePill{left:2.2cqw;top:9.5cqw;width:13.57cqw;height:4.52cqw;border-radius:2.26cqw;
-    display:flex;align-items:center;justify-content:center;gap:.7cqw;padding:0 1cqw;
-    border:.39cqw solid #000;background:linear-gradient(180deg,#232E5E,#141C42);
-    box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
-  #lifePill i{width:3.3cqw;height:3.3cqw;display:block;flex:0 0 auto;font-style:normal}
+  #lifePill{left:calc(var(--hu)*2.2);top:calc(var(--hu)*9.5);width:calc(var(--hu)*13.57);height:calc(var(--hu)*4.52);border-radius:calc(var(--hu)*2.26);
+    display:flex;align-items:center;justify-content:center;gap:calc(var(--hu)*.7);padding:0 calc(var(--hu)*1);
+    border:calc(var(--hu)*.39) solid #000;background:linear-gradient(180deg,#232E5E,#141C42);
+    box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
+  #lifePill i{width:calc(var(--hu)*3.3);height:calc(var(--hu)*3.3);display:block;flex:0 0 auto;font-style:normal}
   #lifePill i svg{width:100%;height:100%;display:block}
-  #potAmt2{left:2.2cqw;top:14.6cqw;font-size:1.15cqw;letter-spacing:.1em;color:#9fb4dd;
+  #potAmt2{left:calc(var(--hu)*2.2);top:calc(var(--hu)*14.6);font-size:calc(var(--hu)*1.15);letter-spacing:.1em;color:#9fb4dd;
     font-family:Arial,sans-serif;font-weight:700}
   /* Pastille centrale + barre de gaz SEPAREE dessous, comme la reference : dans la pastille,
      la barre se confondait avec le compteur. */
-  #match{left:50%;top:3.2cqw;transform:translateX(-50%);display:flex;flex-direction:column;
-    align-items:center;gap:.5cqw;background:none;border:0;box-shadow:none;padding:0}
-  #match .mbox{width:14.35cqw;height:5.11cqw;border-radius:1.3cqw;display:flex;align-items:baseline;
-    justify-content:center;gap:.6cqw;padding-top:.5cqw;border:.39cqw solid #000;
-    background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
-  #match .mbox b{font-size:3.4cqw;line-height:1;-webkit-text-stroke:.45cqw #000;paint-order:stroke fill}
-  #match .mbox small{font-size:1.25cqw;letter-spacing:.14em;color:#BCD0FF}
-  #match .mgas{width:11.8cqw;height:.79cqw;background:#0D1430;border:.24cqw solid #000;
+  #match{left:50%;top:calc(var(--hu)*3.2);transform:translateX(-50%);display:flex;flex-direction:column;
+    align-items:center;gap:calc(var(--hu)*.5);background:none;border:0;box-shadow:none;padding:0}
+  #match .mbox{width:calc(var(--hu)*14.35);height:calc(var(--hu)*5.11);border-radius:calc(var(--hu)*1.3);display:flex;align-items:baseline;
+    justify-content:center;gap:calc(var(--hu)*.6);padding-top:calc(var(--hu)*.5);border:calc(var(--hu)*.39) solid #000;
+    background:linear-gradient(180deg,#232E5E,#141C42);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
+  #match .mbox b{font-size:calc(var(--hu)*3.4);line-height:1;-webkit-text-stroke:calc(var(--hu)*.45) #000;paint-order:stroke fill}
+  #match .mbox small{font-size:calc(var(--hu)*1.25);letter-spacing:.14em;color:#BCD0FF}
+  #match .mgas{width:calc(var(--hu)*11.8);height:calc(var(--hu)*.79);background:#0D1430;border:calc(var(--hu)*.24) solid #000;
     border-radius:99px;position:relative;overflow:hidden}
   #match .mgas i{position:absolute;inset:0;width:var(--gw,100%);background:linear-gradient(90deg,#7BE38A,#31A94A);transition:width .3s}
-  #match .zone{font-size:1.1cqw;letter-spacing:.1em;color:#DFF6E2;-webkit-text-stroke:.3cqw #000;
+  #match .zone{font-size:calc(var(--hu)*1.1);letter-spacing:.1em;color:#DFF6E2;-webkit-text-stroke:calc(var(--hu)*.3) #000;
     paint-order:stroke fill;font-family:inherit;background:none;padding:0}
   #match.hot .mgas i{background:linear-gradient(90deg,#FFB36B,#E5484D)}
   #match.hot .mbox{background:linear-gradient(180deg,#8A1622,#4A0A12)}
   #match.hot .zone{color:#FFD2C4}
-  #mapwrap{right:2.2cqw;top:3.2cqw}
-  #map{width:15.73cqw;height:15.73cqw;border:.55cqw solid #000;border-radius:2cqw;background:#46536E;box-shadow:0 .5cqw 0 rgba(0,0,0,.55)}
+  #mapwrap{right:calc(var(--hu)*2.2);top:calc(var(--hu)*3.2)}
+  #map{width:calc(var(--hu)*15.73);height:calc(var(--hu)*15.73);border:calc(var(--hu)*.55) solid #000;border-radius:calc(var(--hu)*2);background:#46536E;box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55)}
   /* Le fil ressemblait au chat, au point qu'on confondait un kill avec un message. Cinq axes les
      separent maintenant : bandeau plat contre bulle ronde, arete rouge, crane, capitales
      espacees, gris froid contre blanc. */
-  #feed{right:2.2cqw;top:20.4cqw;display:flex;flex-direction:column;gap:.35cqw;align-items:flex-end;text-shadow:none}
-  #feed div{display:flex;align-items:center;gap:.55cqw;background:rgba(9,12,26,.9);
-    border:.24cqw solid #000;border-left:.7cqw solid #E5484D;border-radius:.35cqw;
-    padding:.18cqw .75cqw .25cqw .5cqw;font-size:1.05cqw;letter-spacing:.07em;
+  #feed{right:calc(var(--hu)*2.2);top:calc(var(--hu)*20.4);display:flex;flex-direction:column;gap:calc(var(--hu)*.35);align-items:flex-end;text-shadow:none}
+  #feed div{display:flex;align-items:center;gap:calc(var(--hu)*.55);background:rgba(9,12,26,.9);
+    border:calc(var(--hu)*.24) solid #000;border-left:calc(var(--hu)*.7) solid #E5484D;border-radius:calc(var(--hu)*.35);
+    padding:calc(var(--hu)*.18) calc(var(--hu)*.75) calc(var(--hu)*.25) calc(var(--hu)*.5);font-size:calc(var(--hu)*1.05);letter-spacing:.07em;
     color:#98A8CC;white-space:nowrap;text-transform:uppercase;margin:0}
   #feed div.you{border-left-color:var(--cash);color:#E7D9AE}
-  #feed .fsk{width:1.5cqw;height:1.5cqw;flex:0 0 auto;display:block}
+  #feed .fsk{width:calc(var(--hu)*1.5);height:calc(var(--hu)*1.5);flex:0 0 auto;display:block}
   #feed .fsk svg{width:100%;height:100%;display:block}
-  #panel{right:2.2cqw;bottom:3.6cqw;display:flex;justify-content:flex-end;align-items:flex-end;pointer-events:none}
-  #superwrap{width:18.88cqw;height:18.88cqw;position:relative;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
-  #superRing{position:absolute;inset:0;border-radius:50%;border:.39cqw solid #000;
-    background:conic-gradient(var(--cash) var(--p),#131C40 0);box-shadow:0 .55cqw 0 rgba(0,0,0,.55)}
-  #superIn{position:relative;width:76%;height:76%;border-radius:50%;border:.32cqw solid #000;
-    display:grid;place-items:center;text-align:center;line-height:1.05;font-size:1.9cqw;color:#9FB4DD;
+  #panel{right:calc(var(--hu)*2.2);bottom:calc(var(--hu)*3.6);display:flex;justify-content:flex-end;align-items:flex-end;pointer-events:none}
+  #superwrap{width:calc(var(--hu)*18.88);height:calc(var(--hu)*18.88);position:relative;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
+  #superRing{position:absolute;inset:0;border-radius:50%;border:calc(var(--hu)*.39) solid #000;
+    background:conic-gradient(var(--cash) var(--p),#131C40 0);box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55)}
+  #superIn{position:relative;width:76%;height:76%;border-radius:50%;border:calc(var(--hu)*.32) solid #000;
+    display:grid;place-items:center;text-align:center;line-height:1.05;font-size:calc(var(--hu)*1.9);color:#9FB4DD;
     background:radial-gradient(circle at 34% 28%,#2B3A6E,#111938)}
-  #superRing.ready{background:var(--cash);box-shadow:0 .55cqw 0 rgba(0,0,0,.55),0 0 3cqw rgba(255,201,60,.6)}
+  #superRing.ready{background:var(--cash);box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55),0 0 calc(var(--hu)*3) rgba(255,201,60,.6)}
   #superRing.ready + #superIn{background:radial-gradient(circle at 34% 28%,#FFE27A,#E08A0A);color:#3A1D00}
   @keyframes pulse{from{transform:scale(1)}to{transform:scale(1.07)}}
   #superIn{width:80px;height:80px;border-radius:50%;background:linear-gradient(180deg,#ffb84a,#ff6a1a);border:3px solid #000;display:grid;place-items:center;font-size:12px;text-align:center;line-height:1.1;position:relative;text-shadow:2px 2px 0 #000;box-shadow:inset 0 -10px 0 #0003}
