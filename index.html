@@ -156,7 +156,6 @@
   #rightCol,#bottomBar{display:contents}   /* transparent wrappers: the desktop layout is untouched */
   /* ---------- PLAY BAR ---------- */
   #playbar{width:min(1080px,100%);display:flex;align-items:center;gap:14px;justify-content:center}
-  #playSub{font-size:12px;letter-spacing:.1em;color:#cfe3ff;text-shadow:1px 1px 0 #000;font-family:Arial,sans-serif;font-weight:700}
   #playBtn{background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000;border:4px solid #000;border-radius:18px;padding:12px 30px;box-shadow:0 6px 0 #7a3b00;transition:transform .1s}
   #playBtn:hover:not(:disabled){transform:translateY(-3px)} #playBtn:disabled{filter:grayscale(1);opacity:.55}
   #playBtn b{display:block;font-size:20px;letter-spacing:.02em}
@@ -204,7 +203,6 @@
   /* the confirm bar is pinned: always reachable without scrolling back */
   .touch #playbar{position:fixed;left:0;right:0;bottom:0;z-index:12;width:100%;flex-direction:column;gap:2px;align-items:stretch;
     padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:linear-gradient(180deg,#0b122b00,#0b122bdd 28%);backdrop-filter:blur(3px)}
-  .touch #playSub{text-align:center;font-size:10px}
   .touch #playBtn{width:100%;padding:10px 12px;border-width:3px;border-radius:14px;box-shadow:0 5px 0 #7a3b00}
   .touch #playBtn b{font-size:17px} .touch #playBtn small{font-size:10px}
   body.res.touch #playbar{background:linear-gradient(180deg,#4a142000,#4a1420ee 28%)}
@@ -684,7 +682,7 @@
   </div>
   <div id="bottomBar">
     <div class="row" id="tierRow"><div class="eyebrow" id="tierLbl">4 · Pick a table &amp; drop in</div><div class="tiers" id="tiers"></div></div>
-    <div id="playbar"><div id="playSub"></div><button id="playBtn"></button></div>
+    <div id="playbar"><button id="playBtn"></button></div>
   </div>
   <div id="build">V1 · demo credits only</div>
   <div class="lobbyBtns">
@@ -1302,7 +1300,6 @@ function renderLobby(){
   pb.disabled=wallet<selStake;
   pb.innerHTML=wallet<selStake ? 'NOT ENOUGH CREDITS'
     : `<b>ENTER ${ptier.label} TABLE</b><small>${money(selStake)} buy-in · ${'up to '+money(ppay.winner)}</small>`;
-  $('playSub').textContent=`${B[selBrawler].name} · ${mode.cashout?'RESURGENCE ':'MAXWIN '}${mode.name} · ${money(selStake)} table`;
   renderProfile();
   refreshOnline(true); // fill every counter now that all the cards exist, so nothing flashes empty
 }
