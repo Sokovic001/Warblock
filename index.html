@@ -405,6 +405,33 @@
     padding:0 4px;font-size:10px;line-height:14px;text-shadow:none}
   .touch .lbl .cubes .cb small{display:none}
   .dmg{position:absolute;transform:translate(-50%,-50%);font-size:18px;color:#fff;text-shadow:2px 2px 0 #000,-2px 2px 0 #000,2px -2px 0 #000,-2px -2px 0 #000;animation:dmg .8s ease-out forwards}
+  /* ---- coup critique ---- */
+  .dmg.crit{font-size:44px;color:#FFE27A;-webkit-text-stroke:5px #000;paint-order:stroke fill;
+    filter:drop-shadow(0 4px 0 rgba(0,0,0,.5));animation:dmgCrit 1.05s cubic-bezier(.2,1.3,.35,1)}
+  .dmg.crit::after{content:'CRITICAL';display:block;font-size:13px;letter-spacing:.22em;color:#FFE27A;
+    -webkit-text-stroke:3px #000;paint-order:stroke fill;margin-top:-4px}
+  @keyframes dmgCrit{0%{opacity:0;margin-top:8px;scale:.5}14%{opacity:1;scale:1.25}
+    28%{scale:1}100%{opacity:0;margin-top:-78px;scale:1.05}}
+  /* liseré doré plein cadre, très court */
+  #game.crit::after{content:'';position:absolute;inset:0;z-index:9;pointer-events:none;
+    box-shadow:inset 0 0 110px 30px rgba(255,201,60,.55);animation:critRim .4s ease-out forwards}
+  @keyframes critRim{to{opacity:0}}
+  /* pastille de série, en haut de l'écran */
+  #game.crit::before{content:'3× STREAK';position:absolute;left:50%;top:8%;transform:translateX(-50%);
+    z-index:10;pointer-events:none;background:linear-gradient(180deg,#FFE27A,#E08A0A);color:#3A1D00;
+    border:4px solid #000;border-radius:12px;padding:2px 16px 4px;font-size:20px;letter-spacing:.14em;
+    box-shadow:0 5px 0 rgba(0,0,0,.5);animation:critBadge .9s ease-out forwards}
+  @keyframes critBadge{0%{opacity:0;transform:translateX(-50%) scale(.6)}
+    12%{opacity:1;transform:translateX(-50%) scale(1.1)}25%{transform:translateX(-50%) scale(1)}
+    80%{opacity:1}100%{opacity:0}}
+  /* secousse de caméra : on bouge le canvas, jamais un élément centré par transform */
+  #game.crit #c{animation:critShake .34s ease-out}
+  @keyframes critShake{15%{translate:-9px 6px}40%{translate:8px -7px}70%{translate:-5px 3px}100%{translate:0 0}}
+  @media (prefers-reduced-motion:reduce){
+    #game.crit #c{animation:none}
+    .dmg.crit{animation:dmgCritFlat 1.05s ease-out}
+    @keyframes dmgCritFlat{0%{opacity:0}14%{opacity:1}100%{opacity:0;margin-top:-78px}}
+  }
   .dmg.you{color:var(--red)} .dmg.heal{color:var(--green)}
   @keyframes dmg{0%{opacity:1;margin-top:0;font-size:22px}100%{opacity:0;margin-top:-46px}}
   /* One slim bar carries the money, the cubes and the kills. Three stacked panels ate the top-left
@@ -1225,6 +1252,26 @@ const WBCore = (function(){
     }
     return cells;
   }
+  // ---------- coups critiques ----------
+  // Aucun hasard : le TROISIEME tir consecutif qui touche la meme cible passe entier a x1.5.
+  // Un tir = une pression sur la gachette, pas une balle : une rafale compte pour un, et elle
+  // compte comme touchee si au moins une de ses balles atteint la cible.
+  const CRIT = { mult:1.5, streak:3, windowBase:2, windowMin:3 };
+  // La fenetre suit l'arme. Une valeur fixe rendrait le critique inatteignable pour les armes
+  // lentes : HEX recharge en 2,1 s, il ne lui resterait que 0,4 s de marge sur une fenetre de
+  // 2,5 s. Ainsi chaque brawler dispose des memes 2 s de marge au-dela de sa propre recharge.
+  function critWindow(brawler){ return Math.max(CRIT.windowMin, brawler.ammoReload + CRIT.windowBase); }
+  // Etat de serie d'un tireur : la cible visee, le nombre de tirs touches d'affilee, et l'instant
+  // du dernier. `target` a null signifie un tir manque — la serie tombe.
+  function critShot(state, target, now, window){
+    const s = state || { target:null, count:0, last:-1e9 };
+    if(target === null || target === undefined) return { crit:false, state:{ target:null, count:0, last:now } };
+    const suite = s.target === target && (now - s.last) <= window;
+    const count = suite ? s.count + 1 : 1;
+    const crit = count >= CRIT.streak;
+    // apres un critique le compteur repart de zero : on ne peut pas enchainer deux critiques
+    return { crit, state:{ target, count: crit ? 0 : count, last: now } };
+  }
   const cents = v => Math.round(v*100)/100;          // money is only ever exact to the cent
   function payout(stake,players,rake){ const pot=cents(stake*players), cut=cents(pot*(rake===undefined?RAKE:rake)); return {pot,rake:cut,winner:cents(pot-cut)}; }
   function teamPayout(stake,mode,rake){ const tp=mode.teamSize*mode.teams; const p=payout(stake,tp,rake); return {...p, players:tp, split:cents(p.winner/mode.teamSize)}; }
@@ -1233,7 +1280,7 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -1623,8 +1670,8 @@ let actx;
 const MUS={ on:true, timer:0, step:0, wind:null, windGain:null, rumble:null, rumbleGain:null, master:null };
 function snd(type,gain){ try{ if(!MUS.on) return; if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)(); gain=gain==null?0.15:gain; if(gain<=0.004) return; const t=actx.currentTime;
   if(type==='shot'){ const b=actx.createBuffer(1,actx.sampleRate*0.08|0,actx.sampleRate), d=b.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,2); const s=actx.createBufferSource(); s.buffer=b; const g=actx.createGain(); g.gain.value=gain; const f=actx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=1800; s.connect(f).connect(g).connect(actx.destination); s.start(); return; }
-  const freqs={hit:[740],hurt:[150],box:[330,262],cube:[880,1175],cash:[880,1319,1760],super:[220,330,440,660],win:[523,659,784,1046],lose:[330,262,196]}[type]||[440];
-  freqs.forEach((fq,i)=>{ const o=actx.createOscillator(),g=actx.createGain(); o.type=type==='hit'||type==='hurt'?'square':'triangle'; o.frequency.value=fq; const t0=t+i*0.06; g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(gain,t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.15); o.connect(g).connect(actx.destination); o.start(t0); o.stop(t0+0.17); }); }catch(e){} }
+  const freqs={hit:[740],crit:[1245,1661],hurt:[150],box:[330,262],cube:[880,1175],cash:[880,1319,1760],super:[220,330,440,660],win:[523,659,784,1046],lose:[330,262,196]}[type]||[440];
+  freqs.forEach((fq,i)=>{ const o=actx.createOscillator(),g=actx.createGain(); o.type=type==='hit'||type==='hurt'?'square':'triangle'; if(type==='crit'){ o.type='triangle'; } o.frequency.value=fq; const t0=t+i*0.06; g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(gain,t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t0+0.15); o.connect(g).connect(actx.destination); o.start(t0); o.stop(t0+0.17); }); }catch(e){} }
 
 // ---------- music & ambience ----------
 // Everything is synthesised: a pulsing bass, a sparse minor arpeggio and a wind bed, all speeding up
@@ -2265,7 +2312,7 @@ function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(b) && d>2.5
 
 // ---------- projectiles ----------
 function spawnProjectile(owner,dirx,dirz,spec,isSuper,delay,origin){
-  const o=origin||owner; const pr={ owner,x:o.x+dirx*0.6,z:o.z+dirz*0.6,dx:dirx,dz:dirz,spd:spec.speed,range:spec.range,travel:0,dmg:spec.dmg,spec,isSuper,pierce:!!spec.pierce,knock:spec.knock||0,delay:delay||0,hit:new Set(),
+  const o=origin||owner; const pr={ owner,shotId:owner.shotId,x:o.x+dirx*0.6,z:o.z+dirz*0.6,dx:dirx,dz:dirz,spd:spec.speed,range:spec.range,travel:0,dmg:spec.dmg,spec,isSuper,pierce:!!spec.pierce,knock:spec.knock||0,delay:delay||0,hit:new Set(),
     mesh:new THREE.Mesh(projGeo,isSuper?projMatS:(owner.isPlayer?projMatP:projMatB)) };
   const r=isSuper?(spec.radius||0.3)*1.3:(spec.radius||0.22); pr.mesh.scale.set(r,r,r); pr.mesh.position.set(pr.x,1.0,pr.z); pr.mesh.visible=false; world.add(pr.mesh); G.projs.push(pr); return pr;
 }
@@ -2274,6 +2321,13 @@ function attack(e,dirx,dirz,aimDist){
   // one trigger pull costs one ammo and locks the trigger until the burst has finished plus a beat.
   // Without this, holding the button emptied all three shots inside a few frames.
   const spec=e.brawler.attack;
+  // Un tir = une pression sur la gachette. L'identifiant sert a traiter une rafale comme UN seul
+  // tir : la premiere balle qui touche decide du critique, les suivantes heritent du verdict.
+  // Et si le tir precedent n'a jamais rien touche, la serie tombe ici — c'est la contrepartie.
+  if(e.isPlayer){
+    if(e.shotId!==undefined && e.critShotId!==e.shotId) e.critState=null;
+    e.shotId=(e.shotId||0)+1;
+  }
   e.fireCd = 0.40 + (spec.stagger||0)*Math.max(0,spec.n-1);
   e.ammo--; e.ammoT=0; e.stealthT=0;
   fireSpec(e,dirx,dirz,e.brawler.attack,false,aimDist); snd('shot',e.isPlayer?0.14:0.06*Math.max(0,1-Math.hypot(e.x-G.player.x,e.z-G.player.z)/30)); return true;
@@ -2352,6 +2406,15 @@ function projUpdate(dt){
       for(const tu of G.turrets){ if(tu.owner.team===p.owner.team||p.hit.has(tu)) continue; if(Math.hypot(tu.x-p.x,tu.z-p.z)<0.8){ hurtTurret(tu,p.dmg); if(p.pierce) p.hit.add(tu); else { dead=true; break; } } }
       if(!dead) for(const e of G.ents){ if(e===p.owner||!e.alive||e.team===p.owner.team||p.hit.has(e)) continue; if(Math.hypot(e.x-p.x,e.z-p.z)<0.62){
         let dmg=p.dmg; if(p.spec.dmgFar!==undefined&&!p.isSuper) dmg=C.hexDamage(p.spec,p.travel);
+        // Pas de critique au super, ni sur une cible intouchable ou encore sous protection.
+        // BOT_CRIT reste a false : on juge d'abord l'effet et l'equilibre cote joueur.
+        if(p.owner.isPlayer&&!p.isSuper&&e.invuln<=0&&G.time>=C.GRACE){
+          if(p.owner.critShotId!==p.shotId){
+            const r=C.critShot(p.owner.critState,e.id,G.time,C.critWindow(p.owner.brawler));
+            p.owner.critState=r.state; p.owner.critShotId=p.shotId; p.owner.critNow=r.crit;
+          }
+          if(p.owner.critNow){ dmg*=C.CRIT.mult; G.critTarget=e; }
+        }
         damage(e,dmg,p.owner); if(p.knock){ e.knockx+=p.dx*p.knock*3; e.knockz+=p.dz*p.knock*3; }
         if(p.pierce) p.hit.add(e); else { dead=true; break; } } }
       if(!dead) for(const bx of G.boxes){ if(bx.hp<=0||p.hit.has(bx)) continue; if(Math.hypot(bx.x-p.x,bx.z-p.z)<0.75){ hurtBox(bx,p.dmg,p.owner); if(p.pierce) p.hit.add(bx); else { dead=true; break; } } }
@@ -2362,6 +2425,9 @@ function projUpdate(dt){
 
 // ---------- damage / death / loot ----------
 function damage(t,dmg,src){
+  // Consomme le drapeau des l'entree : si l'un des retours anticipes ci-dessous coupe court, il
+  // ne doit pas rester arme et decorer le prochain coup porte a quelqu'un d'autre.
+  const critique = G.critTarget===t; G.critTarget=null;
   if(!t.alive||G.time<C.GRACE) return;
   if(t.invuln>0) return;                       // just came back: a moment to move before taking fire
   if(src&&src!==t&&src.team===t.team) return;
@@ -2371,8 +2437,9 @@ function damage(t,dmg,src){
   if(src&&src.isPlayer) G.dmgDealt+=Math.max(0,Math.min(dmg,t.hp));
   t.hp-=dmg; t.lastDamageT=G.time; t.lastHitBy=src; t.flash=0.12; if(G.modeCfg&&G.modeCfg.cashout) t.cashLock=C.CASHOUT.lock;
   if(src&&src.alive) src.super=Math.min(src.brawler.super.cost,src.super+dmg);
-  floatText(t,'-'+dmg,t.isPlayer?'you':'');
-  if(t.isPlayer){ G.player.damageFlash=1; snd('hurt',0.12); } else if(src&&src.isPlayer) snd('hit',0.06);
+  floatText(t,'-'+dmg,(t.isPlayer?'you':'')+(critique?' crit':''));
+  if(t.isPlayer){ G.player.damageFlash=1; snd('hurt',0.12); }
+  else if(src&&src.isPlayer){ snd(critique?'crit':'hit',critique?0.11:0.06); if(critique) critFx(); }
   if(t.hp<=0) kill(t,src,'shot');
 }
 function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(Math.random()<C.HEART.boxChance?'heart':'cube',bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
@@ -2497,6 +2564,17 @@ function feed(txt,hi){ const d=document.createElement('div');
   if(hi) d.className='you'; const f=$('feed'); f.prepend(d); while(f.children.length>6) f.removeChild(f.lastChild); setTimeout(()=>{ if(d.parentNode) d.parentNode.removeChild(d); },9000); }
 const tmpV=new THREE.Vector3();
 function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)/2*innerWidth, sy:(1-tmpV.y)/2*innerHeight, ok:tmpV.z<1}; }
+// Effets d'un critique. La secousse et l'arret sur image sont coupes par prefers-reduced-motion :
+// ce sont exactement les deux choses qui derangent les personnes sensibles au mouvement.
+const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+let critHold=0;
+function critFx(){
+  const g=$('game'); if(!g) return;
+  g.classList.remove('crit'); void g.offsetWidth; g.classList.add('crit');
+  setTimeout(()=>g.classList.remove('crit'),520);
+  // arret sur image : c'est lui qui donne le poids au coup, une frame longue et le jeu reprend
+  if(!REDUCED) critHold=0.09;
+}
 function floatText(e,txt,cls){ const s=toScreen(e.x,2.3,e.z); if(!s.ok) return; const d=document.createElement('div'); d.className='dmg '+(cls||''); d.textContent=txt; d.style.left=(s.sx+(Math.random()-0.5)*30)+'px'; d.style.top=s.sy+'px'; $('labels').appendChild(d); setTimeout(()=>d.remove(),800); }
 
 // ---------- bots ----------
@@ -3580,7 +3658,10 @@ startTicker();
 armLobbyMusic();
 let last=0, rafId=0;
 function loop(now){
-  if(!G) return; const dt=Math.min(0.05,(now-last)/1000); last=now;
+  if(!G) return; let dt=Math.min(0.05,(now-last)/1000); last=now;
+  // Arret sur image : on gele la simulation sans geler le rendu, donc l'ecran reste vivant et
+  // l'impact se lit. Ralentir le dt plutot que sauter des images evite tout a-coup a la reprise.
+  if(critHold>0){ critHold-=dt; dt*=0.12; }
   if(G.running&&!G.paused&&G.intro>0){
     G.intro-=dt;
     const n=Math.ceil(G.intro);

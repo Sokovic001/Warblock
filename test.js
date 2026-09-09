@@ -57,6 +57,63 @@ test('the prize is what you carry out: a clean sweep pays exactly what the flat 
   }
 });
 
+console.log('Critical hits');
+const critSuite = (b, hits, now) => {   // enchaine des tirs et rend la liste des critiques
+  const w = C.critWindow(b); let st=null, out=[];
+  for (const [cible, t] of hits){ const r = C.critShot(st, cible, t===undefined?(now=(now||0)+0.5):t, w); st=r.state; out.push(r.crit); }
+  return out;
+};
+test('the third consecutive hit on the same target crits, the first two do not', () => {
+  const out = critSuite(C.BRAWLERS.bolt, [['a'],['a'],['a']]);
+  assert.deepStrictEqual(out, [false,false,true]);
+});
+test('the counter restarts after a crit: the fourth shot is not one', () => {
+  const out = critSuite(C.BRAWLERS.bolt, [['a'],['a'],['a'],['a']]);
+  assert.deepStrictEqual(out, [false,false,true,false]);
+  // et il faut de nouveau trois tirs pour en obtenir un second
+  assert.deepStrictEqual(critSuite(C.BRAWLERS.bolt, [['a'],['a'],['a'],['a'],['a'],['a']]),
+    [false,false,true,false,false,true]);
+});
+test('a missed shot drops the streak', () => {
+  // null = le tir n'a touche personne
+  assert.deepStrictEqual(critSuite(C.BRAWLERS.bolt, [['a'],['a'],[null],['a'],['a'],['a']]),
+    [false,false,false,false,false,true]);
+});
+test('switching target drops the streak, and each target counts on its own', () => {
+  assert.deepStrictEqual(critSuite(C.BRAWLERS.bolt, [['a'],['a'],['b']]), [false,false,false]);
+  // deux tirs sur A puis trois sur B : c'est B qui crite, A n'a rien transmis
+  assert.deepStrictEqual(critSuite(C.BRAWLERS.bolt, [['a'],['a'],['b'],['b'],['b']]),
+    [false,false,false,false,true]);
+});
+test('letting the window lapse drops the streak', () => {
+  const b = C.BRAWLERS.bolt, w = C.critWindow(b);
+  assert.deepStrictEqual(critSuite(b, [['a',0],['a',1],['a',1+w+0.01]]), [false,false,false]);
+  // pile sur la limite, la serie tient
+  assert.deepStrictEqual(critSuite(b, [['a',0],['a',1],['a',1+w]]), [false,false,true]);
+});
+test('the window is the weapon reload plus two seconds, floored at three', () => {
+  for (const b of Object.values(C.BRAWLERS))
+    assert.strictEqual(C.critWindow(b), Math.max(C.CRIT.windowMin, b.ammoReload + C.CRIT.windowBase), b.id);
+  assert.strictEqual(C.critWindow(C.BRAWLERS.rush), 3.1);
+  assert.strictEqual(C.critWindow(C.BRAWLERS.hex), 4.1);
+});
+test('every brawler can reach a crit while firing dry: window beats its own reload', () => {
+  // Sans ca, une arme lente ne pourrait jamais enchainer trois tirs dans la fenetre et le
+  // critique lui serait interdit de fait.
+  for (const b of Object.values(C.BRAWLERS))
+    assert.ok(C.critWindow(b) > b.ammoReload, `${b.id}: fenetre ${C.critWindow(b)} <= recharge ${b.ammoReload}`);
+});
+test('a crit is never a first shot, so it can never one-shot anyone', () => {
+  // Le critique est le TROISIEME tir : contre une cible qui meurt en deux, il est simplement
+  // inatteignable. C'est le cas de toutes les cibles fragiles — RUSH critique a 105 depasserait
+  // les 85 PV de HEX, mais HEX est deja mort au deuxieme tir, donc ce coup n'existe pas.
+  for (const a of Object.values(C.BRAWLERS)) for (const t of Object.values(C.BRAWLERS)){
+    if (eff(a)*2 >= t.hp) continue;                    // cible tombee avant le troisieme tir
+    assert.ok(eff(a)*C.CRIT.mult < t.hp,
+      `${a.id} critique ${Math.round(eff(a)*C.CRIT.mult)} tuerait ${t.id} (${t.hp} PV) d'un coup`);
+  }
+});
+
 console.log('Modes');
 test('three modes: solo 20×1, duo 10×2, trio 10×3', () => {
   const M = C.MODES; assert.deepStrictEqual([M.solo.teams,M.solo.teamSize],[20,1]); assert.deepStrictEqual([M.duo.teams,M.duo.teamSize],[10,2]); assert.deepStrictEqual([M.trio.teams,M.trio.teamSize],[10,3]);
