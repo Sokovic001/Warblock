@@ -1610,11 +1610,19 @@ const finalMat=new THREE.ShaderMaterial({uniforms:{tScene:{value:null},tBloom:{v
 // de FPS quand il change la densite. Les anciennes sont liberees : sans ce dispose(), chaque
 // changement de palier abandonnerait trois textures pleine taille sur le GPU.
 function makeTargets(){
-  const dprNow=renderer.getPixelRatio();
-  const W=Math.max(2,Math.floor((canvas.clientWidth||innerWidth)*dprNow));
-  const H=Math.max(2,Math.floor((canvas.clientHeight||innerHeight)*dprNow));
+  // La taille vient du tampon de dessin lui-meme, pas d'un calcul clientWidth x pixelRatio :
+  // au pixel pres, un ecart d'une unite ferait rescaler toute l'image au moment du blit final,
+  // et l'ecran entier paraitrait flou sans qu'on sache pourquoi.
+  const taille=renderer.getDrawingBufferSize(new THREE.Vector2());
+  const W=Math.max(2,taille.x|0), H=Math.max(2,taille.y|0);
   if(rtScene) rtScene.dispose(); if(rtA) rtA.dispose(); if(rtB) rtB.dispose();
-  rtScene=new THREE.WebGLRenderTarget(W,H,RT_OPT);
+  // antialias:true ne vaut QUE pour le tampon d'ecran. Des qu'on rend dans une cible, il est
+  // perdu et tous les contours du jeu se crenellent — en permanence, en mouvement comme a
+  // l'arret. La cible de scene doit donc etre multi-echantillonnee pour rendre ce qu'on perd.
+  const MS=renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget;
+  rtScene = MS ? new THREE.WebGLMultisampleRenderTarget(W,H,RT_OPT)
+               : new THREE.WebGLRenderTarget(W,H,RT_OPT);
+  if(MS) rtScene.samples=4;
   const w2=Math.max(2,W>>1), h2=Math.max(2,H>>1);
   rtA=new THREE.WebGLRenderTarget(w2,h2,RT_OPT);
   rtB=new THREE.WebGLRenderTarget(w2,h2,RT_OPT);
