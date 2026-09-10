@@ -3184,34 +3184,45 @@ function hud(){
   $('gasArrow').style.display = chaud ? 'block' : 'none';
   // Only what you can act on: the safe circle, the cash on the ground, your team, and you.
   // Drawing all 90 crates as dots turned the map into static.
-  const ctx=mapCtx,S=170,k=S/N;
+  const ctx=mapCtx,S=170;
+  // Vue rapprochee. A pleine carte, 152 cases tenaient dans 170 pixels : on voyait tout et on ne
+  // reperait rien. On n'affiche plus qu'une fenetre de VIEW cases centree sur le joueur, qui
+  // reste donc toujours au milieu — ce qui compte est sa position relative aux murs proches, pas
+  // sa place sur la carte entiere.
+  const VIEW=56, k=S/VIEW;
+  const ox=p.x-VIEW/2, oz=p.z-VIEW/2;
+  const px=wx=>(wx-ox)*k, pz=wz=>(wz-oz)*k;
   ctx.clearRect(0,0,S,S);
-  ctx.drawImage(G.mapImg,0,0);
+  ctx.fillStyle='#2A3145'; ctx.fillRect(0,0,S,S);   // hors carte : la bordure du monde se lit
+  ctx.drawImage(G.mapImg, ox/N*170, oz/N*170, VIEW/N*170, VIEW/N*170, 0, 0, S, S);
   // Remplir le cercle sur en vert ne marchait pas : au coup d'envoi ZONE_START_R vaut 118 sur une
   // carte de 152, le disque deborde donc de partout et teinte toute la minimap au lieu de dessiner
   // quoi que ce soit. C'est le DEHORS qu'on assombrit : tant que la zone couvre la carte il n'y a
   // rien a assombrir et la carte reste nette, puis le danger apparait a mesure qu'elle se referme.
   const zr=Math.max(0,z.r*k);
   ctx.save();
-  ctx.beginPath(); ctx.rect(0,0,S,S); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2,true);
+  ctx.beginPath(); ctx.rect(0,0,S,S); ctx.arc(px(z.cx),pz(z.cz),zr,0,Math.PI*2,true);
   ctx.fillStyle='rgba(28,10,14,.62)'; ctx.fill('evenodd');
   ctx.restore();
   ctx.save();
-  ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2);
+  ctx.beginPath(); ctx.arc(px(z.cx),pz(z.cz),zr,0,Math.PI*2);
   ctx.fillStyle='rgba(47,122,60,.20)'; ctx.fill();
   ctx.restore();
-  ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.8; ctx.beginPath(); ctx.arc(z.cx*k,z.cz*k,zr,0,Math.PI*2); ctx.stroke();
-  if(z.shrinking){ ctx.setLineDash([4,4]); ctx.strokeStyle='#ffffffcc'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(z.to.cx*k,z.to.cz*k,z.to.r*k,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
+  ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.8; ctx.beginPath(); ctx.arc(px(z.cx),pz(z.cz),zr,0,Math.PI*2); ctx.stroke();
+  if(z.shrinking){ ctx.setLineDash([4,4]); ctx.strokeStyle='#ffffffcc'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(px(z.to.cx),pz(z.to.cz),z.to.r*k,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
   for(const pk of G.pickups) if(pk.kind==='cash'){
     ctx.fillStyle='#ffd23a'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.arc(pk.x*k,pk.z*k,3.4,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px(pk.x),pz(pk.z),3.4,0,Math.PI*2); ctx.fill(); ctx.stroke();
   }
   if(G.modeCfg.teamSize>1) for(const e of G.ents){
     if(!e.alive||e.isPlayer||e.team!==p.team) continue;
     ctx.fillStyle='#FFC93C'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.arc(e.x*k,e.z*k,3.2,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px(e.x),pz(e.z),3.2,0,Math.PI*2); ctx.fill(); ctx.stroke();
   }
-  ctx.save(); ctx.translate(p.x*k,p.z*k); ctx.rotate(-Math.atan2(p.ax,p.az));
+  // Rotation inversee sur les DEUX axes : la fleche pointait a l'oppose du cap. Le canvas tourne
+  // dans le sens horaire, axe y vers le bas, donc une pointe en (0,-r) doit tourner de
+  // atan2(ax,-az) et non de -atan2(ax,az).
+  ctx.save(); ctx.translate(px(p.x),pz(p.z)); ctx.rotate(Math.atan2(p.ax,-p.az));
   ctx.beginPath(); ctx.moveTo(0,-6.5); ctx.lineTo(4.6,5); ctx.lineTo(0,2.6); ctx.lineTo(-4.6,5); ctx.closePath();
   ctx.fillStyle='#fff'; ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.fill(); ctx.stroke(); ctx.restore();
 }
