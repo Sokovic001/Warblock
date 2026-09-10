@@ -115,17 +115,37 @@
     transition:transform .12s,box-shadow .12s,opacity .12s;box-shadow:0 6px 0 #000;opacity:.8}
   .chip:hover:not(:disabled){transform:translateY(-4px);opacity:1}
   .chip:disabled{opacity:.3;cursor:not-allowed;filter:grayscale(1)}
-  .chip .bet b{color:#fff}
   .chip.sel{background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000;opacity:1;
     transform:translateY(-6px) scale(1.04);box-shadow:0 8px 0 #7a3b00,0 0 0 4px #fff,0 0 26px #ffd23a99}
-  .chip.sel .bet small{color:#7a3b00} .chip.sel .bet b{color:#000}
   .chip.sel .queue{color:#5a3300} .chip.sel .diff{color:#7a2e00} .chip.sel .queue b{color:#000}
   .chip.sel .win{background:linear-gradient(180deg,#28c93f,#12833a);box-shadow:0 3px 0 #0b4d20}
   .chip.sel::after{content:"✓";position:absolute;top:-11px;right:-9px;width:28px;height:28px;border-radius:50%;
     background:var(--green);border:3px solid #000;color:#fff;font-size:14px;line-height:22px;box-shadow:0 3px 0 #000}
-  .chip .ring{width:62px;height:62px;margin:0 auto 8px;border-radius:50%;border:5px solid #000;background:var(--c);display:grid;place-items:center;font-size:17px;color:#fff;box-shadow:inset 0 -8px 0 #0003}
-  .chip .bet small,.chip .win small{display:block;font-size:9px;letter-spacing:.16em;font-family:Arial,sans-serif;font-weight:700}
-  .chip .bet small{color:#8fa6d8} .chip .bet b{font-size:24px;line-height:1.05}
+  /* Escalier de quatre marches : le rang du palier se lit sans avoir a lire un nom. Les
+     couleurs viennent de --tint / --tintL posees sur la carte, donc un cinquieme palier ne
+     demanderait qu'une ligne de donnees. */
+  .chip .head{margin:6px 0 13px;display:grid;place-items:center;gap:9px}
+  .chip .steps{display:flex;gap:6px;align-items:flex-end;height:34px}
+  .chip .steps i{width:13px;border:3px solid #000;border-radius:6px 6px 4px 4px;background:#0E1533;
+    box-shadow:inset 0 2px 0 rgba(255,255,255,.06)}
+  .chip .steps i.on{background:linear-gradient(180deg,var(--tintL),var(--tint));
+    box-shadow:inset 0 2px 0 rgba(255,255,255,.45),0 2px 0 rgba(0,0,0,.4)}
+  .chip .steps i.cur{box-shadow:inset 0 2px 0 rgba(255,255,255,.5),0 0 12px var(--tint),0 2px 0 rgba(0,0,0,.4)}
+  .chip .steps i:nth-child(1){height:13px} .chip .steps i:nth-child(2){height:20px}
+  .chip .steps i:nth-child(3){height:27px} .chip .steps i:nth-child(4){height:34px}
+  /* ENTRY au-dessus de la plaque : place apres le montant, il obligeait a lire le chiffre avant
+     de savoir ce qu'il representait. */
+  .chip .entry{font-size:10.5px;letter-spacing:.2em;color:#93A7D1;font-family:Arial,sans-serif;font-weight:800}
+  .chip .plate{width:88%;border:3px solid #000;border-radius:12px;padding:.14em .8em .2em;
+    display:flex;align-items:baseline;justify-content:center;gap:.06em;position:relative;overflow:hidden;
+    font-family:'Baloo 2',system-ui,sans-serif;font-weight:800;
+    font-size:clamp(26px,3.2vw,38px);line-height:1.15;font-variant-numeric:tabular-nums;
+    background:linear-gradient(180deg,#141C40,#0A1029);box-shadow:inset 0 3px 8px rgba(0,0,0,.6);color:#EAF2FF}
+  .chip .plate::before{content:'';position:absolute;left:0;top:0;bottom:0;width:9px;background:var(--tint)}
+  .chip .plate .cur{font-size:.58em;translate:0 -.3em;color:var(--tintL)}
+  /* Sur la carte doree, le bleu tres sombre resterait lisible mais l'etiquette non. */
+  .chip.sel .entry{color:#7A5A12}
+  .chip .win small{display:block;font-size:9px;letter-spacing:.16em;font-family:Arial,sans-serif;font-weight:700}
   /* the payout is the reason anyone picks a table — it gets its own green plate */
   .chip .win{margin-top:7px;border:2px solid #000;border-radius:11px;padding:3px 6px 5px;
     background:linear-gradient(180deg,#5ce04b,#2ea043);box-shadow:0 3px 0 #14532d}
@@ -170,7 +190,6 @@
      qui decide du choix. Elle etait deux fois plus petite que le nom de la table. */
   #playBtn small{display:block;font-size:16px;font-family:inherit;font-weight:800;color:#5a3300;
     margin-top:2px;letter-spacing:.01em}
-  .chip.sel .ring{box-shadow:inset 0 -8px 0 #0003,0 0 0 3px #fff}
 
   /* ---------- MOBILE LOBBY ---------- */
   .touch #lobby{gap:12px;padding:12px 12px calc(96px + env(safe-area-inset-bottom));justify-content:flex-start}
@@ -204,8 +223,14 @@
   .touch .chip.sel{transform:translateY(-3px) scale(1.03);box-shadow:0 6px 0 #7a3b00,0 0 0 3px #fff,0 0 18px #ffd23a99}
   .touch .chip.sel::after{width:22px;height:22px;font-size:11px;line-height:16px;top:-8px;right:-6px;border-width:2px}
 
-  .touch .chip .ring{width:38px;height:38px;border-width:4px;font-size:11px;margin-bottom:5px}
-  .touch .chip .bet b{font-size:15px} .touch .chip .bet small,.touch .chip .win small{font-size:7px;letter-spacing:.1em}
+  .touch .chip .head{margin:2px 0 7px;gap:5px}
+  .touch .chip .steps{height:20px;gap:4px} .touch .chip .steps i{width:8px;border-width:2px}
+  .touch .chip .steps i:nth-child(1){height:8px} .touch .chip .steps i:nth-child(2){height:12px}
+  .touch .chip .steps i:nth-child(3){height:16px} .touch .chip .steps i:nth-child(4){height:20px}
+  .touch .chip .entry{font-size:7px;letter-spacing:.14em}
+  .touch .chip .plate{width:94%;font-size:15px;border-width:2px;border-radius:8px;padding:.1em .3em .16em}
+  .touch .chip .plate::before{width:5px}
+  .touch .chip .win small{font-size:7px;letter-spacing:.1em}
   .touch .chip .win{margin-top:4px;padding:2px 4px 3px;border-radius:8px} .touch .chip .win b{font-size:17px}
   .touch .chip .diff{font-size:7px;margin-top:4px}
   .touch .chip .queue{font-size:8px;margin-top:3px} .touch .chip .queue b{font-size:9px} .touch .chip .queue i{width:6px;height:6px;margin-right:2px}
@@ -1351,14 +1376,23 @@ function renderLobby(){
     md.appendChild(d); });
   const mode=C.MODES[selMode];
   const box=$('tiers'); box.innerHTML='';
-  C.TIERS.forEach(t=>{ const p=C.teamPayout(t.stake,mode,C.RAKE); const b=document.createElement('button'); b.className='chip'; b.style.setProperty('--c',t.color); b.disabled=wallet<t.stake;
+  const TINTS=[['#3FBF4F','#8CE89A'],['#4FB3FF','#A9DDFF'],['#E8B44A','#FFE07A'],['#D9455C','#FF97A6']];
+  C.TIERS.forEach((t,rang)=>{ const p=C.teamPayout(t.stake,mode,C.RAKE); const b=document.createElement('button'); b.className='chip'; b.disabled=wallet<t.stake;
+    // Le rang vient de l'index dans TIERS, jamais d'une valeur ecrite a la main : ajouter une
+    // table suffirait a la placer correctement dans l'escalier.
+    const [tint,tintL]=TINTS[rang%TINTS.length];
+    b.style.setProperty('--tint',tint); b.style.setProperty('--tintL',tintL);
+    const marches=[0,1,2,3].map(i=>`<i class="${i<rang?'on':i===rang?'on cur':''}"></i>`).join('');
     // the two numbers that decide anything: what you put in, and what you can walk out with
     const takeHome = mode.cashout ? p.winner : (mode.teamSize>1 ? p.split : p.winner);
-    const winLabel = 'UP TO';
-    b.innerHTML=`<div class="ring">${t.stake<1?Math.round(t.stake*100)+'¢':'$'+t.stake}</div>`
-      +`<div class="bet"><small>BET</small><b>${money(t.stake)}</b></div>`
+    // Reste dynamique : en solo Resurgence on banque, en equipe c'est une part, et un solo
+    // MAXWIN ne peut pas « banker ». Un libelle fige mentirait dans deux cas sur trois.
+    const winLabel = mode.cashout ? 'BANK UP TO' : (mode.teamSize>1 ? 'YOUR SHARE' : 'WIN UP TO');
+    const mnt=money(t.stake), sansCur=mnt.replace('$','');
+    b.innerHTML=`<div class="head"><div class="steps">${marches}</div><div class="entry">ENTRY</div>`
+      +`<div class="plate"><span class="cur">$</span>${sansCur}</div></div>`
       +`<div class="win"><small>${winLabel}</small><b>${money(takeHome)}</b></div>`
-      +`<div class="diff">${t.label} · ${p.players} seats</div>`
+      +`<div class="diff">${p.players} SEATS</div>`
       +`<div class="queue" data-stake="${t.stake}"></div>`;
     if(t.stake===selStake) b.classList.add('sel');
     b.onclick=()=>{ selStake=t.stake; renderLobby(); }; box.appendChild(b); });
