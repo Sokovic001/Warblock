@@ -1277,6 +1277,23 @@ const WBCore = (function(){
     }
     return cells;
   }
+  // ---------- obstacles de couverture ----------
+  // L'or ne sert qu'a ce qui se ramasse. Les obstacles prenaient P.acc, qui vaut 0xFFD23A pour
+  // FARM — exactement la couleur du sac de butin, au chiffre pres. En jeu on les confondait avec
+  // les caisses a casser. LOOT_GOLD est expose pour qu'un test puisse verifier qu'aucun obstacle
+  // ne le reprend, et casse si quelqu'un reintroduit du dore plus tard.
+  const LOOT_GOLD = 0xFFD23A;
+  // Un trio par biome. Seul FARM est actif (BIOME_COUNT = 1) ; les deux autres attendent le leur.
+  const PROPS = {
+    farm: [
+      { id:'barrel', body:0x8A5A25, top:0xB0793A, band:0x4A4A52 },
+      { id:'bale',   body:0xD9B45C, tie:0x6E5A28 },
+      { id:'stump',  body:0x6E4620, top:0xC79A5E, core:0xA87D45 },
+    ],
+  };
+  // Derive des coordonnees, jamais de l'index dans la liste : la carte doit etre reproductible et
+  // identique pour tous, ce qui comptera le jour ou un serveur fera autorite.
+  function propKind(x,z){ return (((x*73856093) ^ (z*19349663)) >>> 0) % 3; }
   // ---------- coups critiques ----------
   // Aucun hasard : le TROISIEME tir consecutif qui touche la meme cible passe entier a x1.5.
   // Un tir = une pression sur la gachette, pas une balle : une rafale compte pour un, et elle
@@ -1305,7 +1322,7 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -1897,9 +1914,13 @@ function buildWorld(seed){
       for(let y=0;y<h-1;y++) blocks.push({x,y,z,color:col(y===0 ? P.w2 : P.w)});
       caps.push({x,y:h-1,z,color:P.wt});
     }
-    else if(t===3){ // waist-high prop: a chunky block you can duck behind, in the biome accent colour
-      blocks.push({x,y:0,z,color:col(P.acc)});
-      props.push({x,z,color:P.acc});
+    else if(t===3){
+      // Le bloc de sol prenait P.acc lui aussi : un carre dore restait visible sous chaque
+      // obstacle, ce qui suffisait a le faire lire comme une caisse a butin. Il prend desormais
+      // la teinte sombre de l'obstacle pose dessus.
+      const k=C.propKind(x,z), spec=C.PROPS.farm[k];
+      blocks.push({x,y:0,z,color:col(spec.body)});
+      props.push({x,z,kind:k});
     }
   }
   const m=new THREE.Matrix4(), q=new THREE.Quaternion(), pos=new THREE.Vector3(), scl=new THREE.Vector3();
@@ -1924,22 +1945,40 @@ function buildWorld(seed){
 
   // props get a black outline and a darker cap so they read as solid cover from above
   if(props.length){
-    // half crates, half barrels — Brawl arenas mix both, and the silhouettes break up the grid
-    const barrels=props.filter((_,i)=>i%2===1), crates=props.filter((_,i)=>i%2===0);
-    const put=(geo,list,y,sc,mat,shade)=>{
+    // Trois elements de ferme au lieu de caisses et tonneaux jaunes. Le type vient de la case,
+    // pas de l'index dans la liste : deux joueurs sur la meme graine voient la meme carte.
+    const barrels=props.filter(p2=>p2.kind===0), bales=props.filter(p2=>p2.kind===1),
+          stumps=props.filter(p2=>p2.kind===2);
+    const PR=C.PROPS.farm;
+    const put=(geo,list,y,sc,mat,shade,dx)=>{
       if(!list.length) return null;
       const im=new THREE.InstancedMesh(geo,mat||new THREE.MeshLambertMaterial(),list.length);
-      list.forEach((p2,i)=>{ m.makeTranslation(p2.x+0.5,y,p2.z+0.5); if(sc) m.scale(new THREE.Vector3(sc,sc,sc)); im.setMatrixAt(i,m);
+      list.forEach((p2,i)=>{ m.makeTranslation(p2.x+0.5+(dx||0),y,p2.z+0.5); if(sc) m.scale(new THREE.Vector3(sc,sc,sc)); im.setMatrixAt(i,m);
         if(!mat) im.setColorAt(i,new THREE.Color(p2.color).offsetHSL(0,0,shade||0)); });
       im.instanceMatrix.needsUpdate=true; if(im.instanceColor) im.instanceColor.needsUpdate=true; world.add(im); return im;
     };
-    put(new THREE.BoxGeometry(0.94,0.96,0.94), crates, 0.48, 1.09, outlineMat);
-    put(new THREE.BoxGeometry(0.94,0.96,0.94), crates, 0.48, 1, null, 0);
-    put(new THREE.BoxGeometry(0.99,0.12,0.99), crates, 0.98, 1, null, 0.12);
+    // `uni` pose une couleur unique sur toute une instance : les trois obstacles ont des teintes
+    // fixes, plus rien ne derive de la couleur d'accent du biome.
+    const uni=c=>new THREE.MeshLambertMaterial({color:c});
+    // --- tonneau ---
     put(new THREE.CylinderGeometry(0.44,0.40,0.98,12), barrels, 0.49, 1.11, outlineMat);
-    put(new THREE.CylinderGeometry(0.44,0.40,0.98,12), barrels, 0.49, 1, null, 0);
-    put(new THREE.CylinderGeometry(0.47,0.47,0.14,12), barrels, 0.86, 1, null, 0.13);   // upper hoop
-    put(new THREE.CylinderGeometry(0.45,0.45,0.12,12), barrels, 0.22, 1, null, -0.10);  // lower hoop
+    put(new THREE.CylinderGeometry(0.44,0.40,0.98,12), barrels, 0.49, 1, uni(PR[0].body));
+    put(new THREE.CylinderGeometry(0.40,0.40,0.08,12), barrels, 0.99, 1, uni(PR[0].top));
+    put(new THREE.CylinderGeometry(0.47,0.47,0.13,12), barrels, 0.80, 1, uni(PR[0].band));
+    put(new THREE.CylinderGeometry(0.455,0.455,0.13,12), barrels, 0.26, 1, uni(PR[0].band));
+    // --- botte de paille, couchee : elle occupe toujours une seule case ---
+    const couche=new THREE.Matrix4().makeRotationZ(Math.PI/2);
+    put(new THREE.CylinderGeometry(0.46,0.46,0.92,14).applyMatrix4(couche), bales, 0.47, 1.09, outlineMat);
+    put(new THREE.CylinderGeometry(0.46,0.46,0.92,14).applyMatrix4(couche), bales, 0.47, 1, uni(PR[1].body));
+    // Des cylindres fins plutot que des TorusGeometry : un tore de 6x16 coute pres de 200
+    // triangles piece pour un lien qu'on ne distingue pas a trois metres.
+    for(const dx of [-0.24,0.24])
+      put(new THREE.CylinderGeometry(0.475,0.475,0.07,12).applyMatrix4(couche), bales, 0.47, 1, uni(PR[1].tie), 0, dx);
+    // --- souche ---
+    put(new THREE.CylinderGeometry(0.42,0.48,0.80,10), stumps, 0.40, 1.11, outlineMat);
+    put(new THREE.CylinderGeometry(0.42,0.48,0.80,10), stumps, 0.40, 1, uni(PR[2].body));
+    put(new THREE.CylinderGeometry(0.38,0.38,0.10,10), stumps, 0.82, 1, uni(PR[2].top));
+    put(new THREE.CylinderGeometry(0.20,0.20,0.11,10), stumps, 0.86, 1, uni(PR[2].core));
     const ps=new THREE.InstancedMesh(shadowGeo,shadowMat,props.length);
     props.forEach((p2,i)=>{ m.makeTranslation(p2.x+0.5,0.03,p2.z+0.5); m.scale(new THREE.Vector3(1.5,1,1.5)); ps.setMatrixAt(i,m); });
     ps.instanceMatrix.needsUpdate=true; world.add(ps);

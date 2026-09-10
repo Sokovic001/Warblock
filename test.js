@@ -57,6 +57,40 @@ test('the prize is what you carry out: a clean sweep pays exactly what the flat 
   }
 });
 
+console.log('Cover props');
+test('a cell always yields the same prop, whoever generates the map', () => {
+  // Derive des coordonnees et non de l'index dans la liste : deux joueurs sur la meme graine
+  // doivent voir la meme carte, ce qui comptera le jour ou un serveur fera autorite.
+  for (const [x,z] of [[0,0],[37,91],[151,151],[7,3]])
+    assert.strictEqual(C.propKind(x,z), C.propKind(x,z), `${x},${z}`);
+  assert.notStrictEqual(C.propKind(37,91), undefined);
+  for (let x=0;x<40;x++) for (let z=0;z<40;z++){
+    const k=C.propKind(x,z);
+    assert.ok(Number.isInteger(k) && k>=0 && k<C.PROPS.farm.length, `${x},${z} -> ${k}`);
+  }
+});
+test('all three props show up on a full map, in roughly equal shares', () => {
+  const n=[0,0,0];
+  for (let x=0;x<C.MAP;x++) for (let z=0;z<C.MAP;z++) n[C.propKind(x,z)]++;
+  const total=n.reduce((a,b)=>a+b), tiers=total/3;
+  n.forEach((v,i)=>{
+    assert.ok(v>0, `${C.PROPS.farm[i].id} n'apparait jamais`);
+    assert.ok(Math.abs(v-tiers)/tiers < 0.10, `${C.PROPS.farm[i].id}: ${(100*v/total).toFixed(1)}%`);
+  });
+});
+test('no prop borrows the loot gold: it is reserved for what you pick up', () => {
+  // La regle a tenir : l'or ne sert qu'a ce qui se ramasse. Les obstacles prenaient la couleur
+  // d'accent du biome, 0xFFD23A pour FARM — exactement celle du sac de butin — et on les
+  // confondait avec les caisses. Compare a la constante partagee, donc ce test casse si
+  // quelqu'un reintroduit du dore dans un obstacle plus tard, y compris dans un autre biome.
+  for (const [biome, trio] of Object.entries(C.PROPS))
+    for (const prop of trio)
+      for (const [role, teinte] of Object.entries(prop)){
+        if (role==='id') continue;
+        assert.notStrictEqual(teinte, C.LOOT_GOLD, `${biome}.${prop.id}.${role} reprend l'or du butin`);
+      }
+});
+
 console.log('Critical hits');
 const critSuite = (b, hits, now) => {   // enchaine des tirs et rend la liste des critiques
   const w = C.critWindow(b); let st=null, out=[];
