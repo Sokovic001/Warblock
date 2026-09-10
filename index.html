@@ -969,10 +969,10 @@ const WBCore = (function(){
     // `dpr` is the sharpness ceiling for the tier. Even LOW stays at 1.5× — dropping to 1× on a
     // 3× screen looks far worse than thinning the scenery, and sharpness is what people notice.
     presets: {
-      low:    { name:'LOW',    leaves:5,  gas:30,  dpr:1.5, bloom:false },
-      medium: { name:'MEDIUM', leaves:8,  gas:55,  dpr:2.0, bloom:false },
-      high:   { name:'HIGH',   leaves:11, gas:80,  dpr:2.5, bloom:true  },
-      ultra:  { name:'ULTRA',  leaves:15, gas:110, dpr:3.0, bloom:true  },
+      low:    { name:'LOW',    leaves:5,  gas:30,  dpr:1.5 },
+      medium: { name:'MEDIUM', leaves:8,  gas:55,  dpr:2.0 },
+      high:   { name:'HIGH',   leaves:11, gas:80,  dpr:2.5 },
+      ultra:  { name:'ULTRA',  leaves:15, gas:110, dpr:3.0 },
     },
     down: 46, up: 57,        // fps thresholds for stepping the tier
   };
@@ -1562,109 +1562,9 @@ const CAM_OFF=new THREE.Vector3(0,20.5,12.5);
 scene.add(new THREE.HemisphereLight(0xffffff,0x4a6b3a,0.95));
 const sun=new THREE.DirectionalLight(0xfff6e0,0.75); sun.position.set(24,60,18); scene.add(sun);
 const rim=new THREE.DirectionalLight(0xbfe0ff,0.28); rim.position.set(-30,20,-24); scene.add(rim);
-// ---------- post-traitement, ecrit a la main ----------
-// Pas d'EffectComposer ni de fichiers examples/js : Three.js est en r128 depuis un CDN, et faire
-// correspondre des exemples a une version precise se solde par un ecran noir sans message. Tout
-// tient ici avec les seules API du coeur : des WebGLRenderTarget, des ShaderMaterial, et un quad
-// plein ecran rendu par une camera orthographique.
-const quadCam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
-const quadScene=new THREE.Scene();
-const quadMesh=new THREE.Mesh(new THREE.PlaneGeometry(2,2),null); quadScene.add(quadMesh);
-const RT_OPT={minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,format:THREE.RGBAFormat};
-let rtScene=null, rtA=null, rtB=null;
-let postHurt=0, postTime=0, postGrade=true;
-const POST_VERT=`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`;
-const blurMat=new THREE.ShaderMaterial({uniforms:{tDiffuse:{value:null},
-  uDir:{value:new THREE.Vector2(1,0)},uTexel:{value:new THREE.Vector2(1/512,1/288)}},
-  vertexShader:POST_VERT,fragmentShader:`
-  uniform sampler2D tDiffuse; uniform vec2 uDir; uniform vec2 uTexel; varying vec2 vUv;
-  void main(){ vec2 o=uDir*uTexel;
-    vec3 s=texture2D(tDiffuse,vUv).rgb*0.2270270270;
-    s+=texture2D(tDiffuse,vUv+o*1.3846153846).rgb*0.3162162162;
-    s+=texture2D(tDiffuse,vUv-o*1.3846153846).rgb*0.3162162162;
-    s+=texture2D(tDiffuse,vUv+o*3.2307692308).rgb*0.0702702703;
-    s+=texture2D(tDiffuse,vUv-o*3.2307692308).rgb*0.0702702703;
-    gl_FragColor=vec4(s,1.); }`});
-const finalMat=new THREE.ShaderMaterial({uniforms:{tScene:{value:null},tBloom:{value:null},
-  uBloom:{value:1.},uGrade:{value:1.},uHurt:{value:0.},uTime:{value:0.}},
-  vertexShader:POST_VERT,fragmentShader:`
-  uniform sampler2D tScene,tBloom; uniform float uBloom,uGrade,uHurt,uTime; varying vec2 vUv;
-  void main(){
-    vec3 c=texture2D(tScene,vUv).rgb;
-    c+=texture2D(tBloom,vUv).rgb*0.85*uBloom;
-    if(uGrade>0.5){
-      float l=dot(c,vec3(.2126,.7152,.0722));
-      c=mix(vec3(l),c,1.06);
-      c*=vec3(1.005,1.0,0.995);
-      vec2 d=vUv-0.5;
-      c*=1.0-dot(d,d)*0.42;
-    }
-    if(uHurt>0.001){
-      vec2 d=vUv-0.5; float r=smoothstep(0.18,0.52,dot(d,d));
-      float p=0.75+0.25*sin(uTime*6.0);
-      c=mix(c,vec3(0.85,0.06,0.10),r*uHurt*p);
-    }
-    gl_FragColor=vec4(c,1.); }`});
-// Les cibles dependent de la taille du canvas ET du pixel ratio. Elles sont donc refaites depuis
-// resize(), qui est appele aussi bien au redimensionnement de la fenetre que par le surveillant
-// de FPS quand il change la densite. Les anciennes sont liberees : sans ce dispose(), chaque
-// changement de palier abandonnerait trois textures pleine taille sur le GPU.
-function makeTargets(){
-  // La taille vient du tampon de dessin lui-meme, pas d'un calcul clientWidth x pixelRatio :
-  // au pixel pres, un ecart d'une unite ferait rescaler toute l'image au moment du blit final,
-  // et l'ecran entier paraitrait flou sans qu'on sache pourquoi.
-  const taille=renderer.getDrawingBufferSize(new THREE.Vector2());
-  const W=Math.max(2,taille.x|0), H=Math.max(2,taille.y|0);
-  if(rtScene) rtScene.dispose(); if(rtA) rtA.dispose(); if(rtB) rtB.dispose();
-  // antialias:true ne vaut QUE pour le tampon d'ecran. Des qu'on rend dans une cible, il est
-  // perdu et tous les contours du jeu se crenellent — en permanence, en mouvement comme a
-  // l'arret. La cible de scene doit donc etre multi-echantillonnee pour rendre ce qu'on perd.
-  const MS=renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget;
-  rtScene = MS ? new THREE.WebGLMultisampleRenderTarget(W,H,RT_OPT)
-               : new THREE.WebGLRenderTarget(W,H,RT_OPT);
-  if(MS) rtScene.samples=4;
-  const w2=Math.max(2,W>>1), h2=Math.max(2,H>>1);
-  rtA=new THREE.WebGLRenderTarget(w2,h2,RT_OPT);
-  rtB=new THREE.WebGLRenderTarget(w2,h2,RT_OPT);
-  // le texel du flou depend de la taille des cibles : il se met a jour avec elles, sinon le flou
-  // s'etale ou se resserre au hasard des redimensionnements
-  blurMat.uniforms.uTexel.value.set(1/w2,1/h2);
-}
-function blit(mat,target){
-  quadMesh.material=mat;
-  renderer.setRenderTarget(target||null);
-  renderer.render(quadScene,quadCam);
-}
-function renderPost(){
-  const useBloom=!!(Q&&Q.bloom), usePost=useBloom||postGrade||postHurt>0.001;
-  // chemin sans post-traitement : on rend droit a l'ecran, il ne coute rien de plus qu'avant
-  if(!usePost||!rtScene){ renderer.setRenderTarget(null); renderer.render(scene,camera); return; }
-  renderer.setRenderTarget(rtScene); renderer.clear(); renderer.render(scene,camera);
-  if(useBloom){
-    // Bloom SELECTIF. Trier par luminosite ne marche pas sur cette palette : le sol nu est a
-    // 0,692 et sature a 1,0 une fois eclaire, donc tout le decor passait n'importe quel seuil et
-    // bavait. On rend donc une seconde fois, mais en ne montrant a la camera que le calque 1 —
-    // l'or, les coeurs, les cubes, le gaz et les eclats d'explosion. Le reste sort noir et ne
-    // peut plus briller, quelle que soit sa luminosite.
-    const fond=scene.background; scene.background=null;
-    camera.layers.set(1);
-    renderer.setRenderTarget(rtA); renderer.clear(); renderer.render(scene,camera);
-    camera.layers.set(0); scene.background=fond;
-    blurMat.uniforms.tDiffuse.value=rtA.texture; blurMat.uniforms.uDir.value.set(1,0); blit(blurMat,rtB);
-    blurMat.uniforms.tDiffuse.value=rtB.texture; blurMat.uniforms.uDir.value.set(0,1); blit(blurMat,rtA);
-  }
-  finalMat.uniforms.tScene.value=rtScene.texture;
-  finalMat.uniforms.tBloom.value=useBloom?rtA.texture:null;
-  finalMat.uniforms.uBloom.value=useBloom?1:0;
-  finalMat.uniforms.uGrade.value=postGrade?1:0;
-  finalMat.uniforms.uHurt.value=postHurt;
-  finalMat.uniforms.uTime.value=postTime;
-  blit(finalMat,null);
-}
 function resize(){
   const w=canvas.clientWidth||innerWidth, h=canvas.clientHeight||innerHeight;
   renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
-  makeTargets();
 }
 addEventListener('resize',resize); resize();
 const world=new THREE.Group(); scene.add(world);
@@ -2064,7 +1964,7 @@ function buildWorld(seed){
   const zoneMesh=new THREE.Mesh(new THREE.CylinderGeometry(1,1,16,80,1,true),new THREE.MeshBasicMaterial({color:0x7fe05a,transparent:true,opacity:0.22,side:THREE.DoubleSide,depthWrite:false})); zoneMesh.position.y=6; world.add(zoneMesh);
   const gasFloor=new THREE.Mesh(new THREE.RingGeometry(1,3,72),new THREE.MeshBasicMaterial({color:0x69d43e,transparent:true,opacity:0.34,side:THREE.DoubleSide,depthWrite:false})); gasFloor.rotation.x=-Math.PI/2; gasFloor.position.y=0.05; world.add(gasFloor);
   const gasMat=new THREE.MeshBasicMaterial({color:0x8bf05a,transparent:true,opacity:0.4,depthWrite:false});
-  const gasParts=[]; for(let i=0;i<C.QUALITY.presets.ultra.gas;i++){ const mesh=new THREE.Mesh(boxGeo,gasMat); const sc=0.7+rng()*1.3; mesh.scale.set(sc,sc*0.7,sc); mesh.layers.enable(1); world.add(mesh); gasParts.push({mesh,a:rng()*Math.PI*2,off:1+rng()*16,ph:rng()*9,sp:(rng()-0.5)*0.11}); }
+  const gasParts=[]; for(let i=0;i<C.QUALITY.presets.ultra.gas;i++){ const mesh=new THREE.Mesh(boxGeo,gasMat); const sc=0.7+rng()*1.3; mesh.scale.set(sc,sc*0.7,sc); world.add(mesh); gasParts.push({mesh,a:rng()*Math.PI*2,off:1+rng()*16,ph:rng()*9,sp:(rng()-0.5)*0.11}); }
   return {cells,biomes,rng,zoneMesh,gasFloor,gasParts,bushMeshes};
 }
 
@@ -2352,7 +2252,7 @@ function explode(x,z,radius,dmg,owner,knock){
   for(const t of G.ents){ if(t===owner||!t.alive||t.team===owner.team) continue; const d=Math.hypot(t.x-x,t.z-z); if(d<radius){ damage(t,dmg,owner); if(knock){ const k=knock/Math.max(0.3,d); t.knockx+=(t.x-x)*k*3; t.knockz+=(t.z-z)*k*3; } } }
   for(const bx of G.boxes){ if(Math.hypot(bx.x-x,bx.z-z)<radius) hurtBox(bx,dmg,owner); }
   for(const tu of G.turrets){ if(tu.owner.team!==owner.team&&Math.hypot(tu.x-x,tu.z-z)<radius) hurtTurret(tu,dmg); }
-  const ring=new THREE.Mesh(new THREE.RingGeometry(0.3,radius,40),new THREE.MeshBasicMaterial({color:0xff7a1a,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.set(x,0.06,z); ring.layers.enable(1); world.add(ring); G.fx.push({mesh:ring,life:0.35,max:0.35});
+  const ring=new THREE.Mesh(new THREE.RingGeometry(0.3,radius,40),new THREE.MeshBasicMaterial({color:0xff7a1a,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.set(x,0.06,z); world.add(ring); G.fx.push({mesh:ring,life:0.35,max:0.35});
   const dp=Math.hypot(x-G.player.x,z-G.player.z); snd('shot',0.2*Math.max(0,1-dp/30));
 }
 function useSuper(e,aimDist){
@@ -2460,7 +2360,7 @@ function spawnPickup(kind,x,z,amount,owner){
     : kind==='cube'  ? new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5),cubeMat)
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
   let px=x+(Math.random()-0.5)*1.4, pz=z+(Math.random()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
-  mesh.position.set(px, kind==='heart'?0.75:0.5, pz); mesh.layers.enable(1); world.add(mesh);
+  mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
   // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
   // ground for the rest of the match
   const shadow=new THREE.Mesh(shadowGeo,shadowMat);
@@ -3069,9 +2969,7 @@ function hudFast(){
   // le liseré ne pulse qu'en dessous du seuil, sinon l'écran clignoterait à chaque égratignure
   const bas=p.alive&&p.hp<maxHp(p)*0.3;
   document.body.classList.toggle('lowhp',bas);
-  // Passe en uniform au shader final, pas en recreant un materiau : monte progressivement de 0 a
-  // 1 entre 30 % et 0 % de PV, pour que le lisere s'installe au lieu d'apparaitre d'un coup.
-  postHurt = bas ? clamp(1-(p.hp/maxHp(p))/0.3,0,1) : 0;
+
   $('gasWarn').style.boxShadow=`inset 0 0 160px 60px rgba(120,220,80,${p.gasHurt?0.5:0})`; p.gasHurt=false;
   // labels over heads
   const L=$('labels');
@@ -3719,8 +3617,7 @@ function loop(now){
   // the pixel ratio never stepped down on a slow device, AUTO could never climb back after a
   // manual pick, and the pause panel kept printing the initial 60 FPS.
   adaptRes(dt);
-  postTime+=dt;
-  renderPost();
+  renderer.render(scene,camera);
   rafId=(G.running||$('game').style.display==='block')?requestAnimationFrame(loop):0;
 }
 })();

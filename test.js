@@ -574,20 +574,6 @@ test('the spread is wide enough to feel (over 2 units) and stays in bounds', () 
 
 console.log('Power cubes');
 test('each cube adds +10% hp and +10% damage, capped at 10', () => { const b = C.BRAWLERS.bolt; assert.strictEqual(C.maxHp(b,0), b.hp); assert.strictEqual(C.maxHp(b,5), Math.round(b.hp*1.5)); assert.strictEqual(C.maxHp(b,25), C.maxHp(b,10)); assert.ok(Math.abs(C.dmgMult(3)-1.3)<1e-9); assert.strictEqual(C.dmgMult(99), C.dmgMult(10)); });
-test('bloom only switches on from HIGH upwards', () => {
-  // Le post-traitement coute une passe plein ecran plus deux flous : c'est exactement ce qu'une
-  // machine deja en difficulte ne peut pas payer. Il suit donc le palier, comme leaves et gas,
-  // et le surveillant de FPS le coupe en redescendant.
-  assert.strictEqual(C.preset('low').bloom, false);
-  assert.strictEqual(C.preset('medium').bloom, false);
-  assert.strictEqual(C.preset('high').bloom, true);
-  assert.strictEqual(C.preset('ultra').bloom, true);
-  // et il ne se rallume jamais en descendant d'un palier
-  for (let i=1;i<C.QUALITY.order.length;i++){
-    const bas=C.preset(C.QUALITY.order[i-1]), haut=C.preset(C.QUALITY.order[i]);
-    assert.ok(!(bas.bloom && !haut.bloom), `${bas.name} → ${haut.name}`);
-  }
-});
 test('every fired spec declares a numeric stagger, so a bot cooldown can never be NaN', () => {
   // A bot arms its own cooldown with atk.stagger*atk.n. VOLT shipped with no stagger at all, so
   // that came out NaN — and NaN<=0 is false for ever. A VOLT bot fired once at first contact
