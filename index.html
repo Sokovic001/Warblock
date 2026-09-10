@@ -1112,7 +1112,42 @@ const WBCore = (function(){
   const BOX_HP = 90;
   // Out-of-combat regeneration, and the health pickups that speed it up.
   const HEAL = { delay: 3.0, rate: 0.075 };        // fraction of max hp per second, once left alone
-  const HEART = { heal: 0.40, boxChance: 0.35 };  // a heart from a box restores 40% of max health
+  const HEART = { heal: 0.40 };                    // a heart from a box restores 40% of max health
+  // ---------- fumigene ----------
+  // Les trois tirages d'un coffre au meme endroit : leur somme doit faire 1, un test le verifie.
+  // boxChance vivait sur HEART, ce qui laissait la part du cube implicite et invisible.
+  const BOX_DROP = { smoke: 0.10, heart: 0.32, cube: 0.58 };
+  // Tous les reglages du fumigene ici, aucun chiffre disperse dans le rendu.
+  const SMOKE = {
+    radius: 5.5,        // rayon du nuage
+    deploy: 0.5,        // deploiement
+    dense: 4.0,         // opacite pleine
+    fade: 1.5,          // dissipation
+    throwT: 0.55,       // vol de la grenade, en arc
+    range: 7,           // portee de lancer
+    hideAt: 0.35,       // densite a partir de laquelle la fumee masque
+    puffs: 26,          // sprites par nuage
+  };
+  const smokeLife = () => SMOKE.deploy + SMOKE.dense + SMOKE.fade;
+  // Densite du nuage a un instant donne : monte au deploiement, tient, puis retombe.
+  function smokeDensity(age){
+    if(age < 0) return 0;
+    if(age < SMOKE.deploy) return age / SMOKE.deploy;
+    if(age < SMOKE.deploy + SMOKE.dense) return 1;
+    const t = (age - SMOKE.deploy - SMOKE.dense) / SMOKE.fade;
+    return t >= 1 ? 0 : 1 - t;
+  }
+  // Le segment observateur -> cible traverse-t-il le disque ? Distance point-segment classique,
+  // avec la projection bornee aux extremites : un observateur DANS le nuage doit repondre vrai,
+  // et c'est le cas puisque sa propre distance au centre est alors inferieure au rayon.
+  function segmentHitsDisc(ax, az, bx, bz, cx, cz, r){
+    const dx = bx - ax, dz = bz - az;
+    const l2 = dx*dx + dz*dz;
+    let t = l2 > 0 ? ((cx - ax)*dx + (cz - az)*dz) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const px = ax + dx*t, pz = az + dz*t;
+    return Math.hypot(cx - px, cz - pz) <= r;
+  }
   const BOT = { reaction: 0.55, fireMult: 1.35, sight: 14, dropCubesOnKill: true };
   // Movement is earned, not given: a brawler that hits hard up close with a big health pool has to
   // walk slower than a fragile one that fights from range. Speed is derived from hp and reach so the
@@ -1322,7 +1357,7 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, BOX_DROP, SMOKE, smokeLife, smokeDensity, segmentHitsDisc, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -2427,7 +2462,14 @@ function damage(t,dmg,src){
   else if(src&&src.isPlayer){ snd(critique?'crit':'hit',critique?0.11:0.06); if(critique) critFx(); }
   if(t.hp<=0) kill(t,src,'shot');
 }
-function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(Math.random()<C.HEART.boxChance?'heart':'cube',bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
+// Un joueur ne porte qu'un fumigene a la fois : s'il en a deja un, le coffre rend un cube plutot
+// que rien. Un ramassage perdu se lit comme un bug, pas comme une regle.
+function rollBoxDrop(src){
+  const r=Math.random(), D=C.BOX_DROP;
+  if(r < D.smoke) return (src && src.smoke) ? 'cube' : 'smoke';
+  return r < D.smoke + D.heart ? 'heart' : 'cube';
+}
+function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(rollBoxDrop(src),bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
 function spawnPickup(kind,x,z,amount,owner){
   const mesh =
       kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
