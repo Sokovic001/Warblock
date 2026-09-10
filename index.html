@@ -2325,7 +2325,13 @@ function moveEntity(e,mx,mz,dt){
 
 // ---------- line of sight (walls block, bushes hide unless close) ----------
 function losClear(ax,az,bx,bz){ const d=Math.hypot(bx-ax,bz-az), steps=Math.ceil(d/0.3); for(let i=1;i<steps;i++){ const t=i/steps; if(isWall(ax+(bx-ax)*t,az+(bz-az)*t)) return false; } return true; }
-function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(b) && d>2.5 && !(inBush(a)&&cellAt(a.x,a.z)===cellAt(b.x,b.z)&&d<4)) return false; return losClear(a.x,a.z,b.x,b.z); }
+function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z);
+  if(inBush(b) && d>2.5 && !(inBush(a)&&cellAt(a.x,a.z)===cellAt(b.x,b.z)&&d<4)) return false;
+  // La fumee coupe la vue, et rien d'autre : les balles la traversent, c'est la contrepartie qui
+  // empeche l'objet d'etre un abri total. Branchee ici seulement, jamais recopiee ailleurs.
+  if(G.smokes) for(const sm of G.smokes)
+    if(sm.density>=C.SMOKE.hideAt && C.segmentHitsDisc(a.x,a.z,b.x,b.z,sm.x,sm.z,C.SMOKE.radius)) return false;
+  return losClear(a.x,a.z,b.x,b.z); }
 
 // ---------- projectiles ----------
 function spawnProjectile(owner,dirx,dirz,spec,isSuper,delay,origin){
@@ -2492,8 +2498,13 @@ function removePickup(pk){
 }
 function collect(e,pk){
   if(pk.kind==='heart' && e.hp>=maxHp(e)) return;        // full health: walk over it, leave it there
+  if(pk.kind==='smoke' && e.smoke) return;              // deja un en poche : on le laisse au sol
   if(!removePickup(pk)) return;
-  if(pk.kind==='cube'){
+  if(pk.kind==='smoke'){
+    e.smoke=true;
+    if(e.isPlayer){ snd('cube',0.12); floatText(e,'SMOKE','heal'); }
+  }
+  else if(pk.kind==='cube'){
     const before=maxHp(e);
     e.cubes=Math.min(C.CUBE.max,e.cubes+pk.amount);
     e.hp=Math.min(maxHp(e),e.hp+(maxHp(e)-before));      // the bonus health comes with the cube
@@ -3362,7 +3373,7 @@ function startMatch(stake){
   const seed=(Date.now()^(Math.random()*1e9))>>>0;
   const mode=C.MODES[selMode];
   G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],camT:new THREE.Vector3(),
-       dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
+       dmgDealt:0,looted:0,survivedT:0,lostPouch:0,smokes:[],grenades:[] };
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
   $('cashout').className=mode.cashout?'on':'';
