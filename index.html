@@ -1915,12 +1915,13 @@ function buildWorld(seed){
       caps.push({x,y:h-1,z,color:P.wt});
     }
     else if(t===3){
-      // Le bloc de sol prenait P.acc lui aussi : un carre dore restait visible sous chaque
-      // obstacle, ce qui suffisait a le faire lire comme une caisse a butin. Il prend desormais
-      // la teinte sombre de l'obstacle pose dessus.
-      const k=C.propKind(x,z), spec=C.PROPS.farm[k];
-      blocks.push({x,y:0,z,color:col(spec.body)});
-      props.push({x,z,kind:k});
+      // Pas de bloc ici. blocks rend des cubes PLEINS de 1x1x1 a y+0.5 : celui qui etait pousse
+      // pour un obstacle enfermait completement le maillage pose dessus, tonneau comme caisse.
+      // Ce cube etait donc l'obstacle que l'on voyait, et il prenait P.acc — l'or du butin. Le
+      // vrai maillage n'a jamais ete visible, seul son contour depassait. floorTiles pose deja
+      // une dalle plate sous chaque case, teintee en P.wsh pour les murs et les obstacles :
+      // le sol reste donc couvert, et l'obstacle se voit enfin.
+      props.push({x,z,kind:C.propKind(x,z)});
     }
   }
   const m=new THREE.Matrix4(), q=new THREE.Quaternion(), pos=new THREE.Vector3(), scl=new THREE.Vector3();
