@@ -2357,10 +2357,43 @@ const smokeTex=(function(){
   return new THREE.CanvasTexture(c);
 })();
 const smokeMat=new THREE.SpriteMaterial({map:smokeTex,transparent:true,depthWrite:false,opacity:0.85});
-const nadeMat=new THREE.MeshLambertMaterial({color:0x39424e,emissive:0x0e1116});
-const nadeCapMat=new THREE.MeshLambertMaterial({color:0xdfe8ef,emissive:0x5b6772});
-const nadeGeo=new THREE.CylinderGeometry(0.17,0.17,0.42,10);
-const nadeCapGeo=new THREE.CylinderGeometry(0.19,0.19,0.09,10);
+// Le fumigène, d'après la fiche d'objet validée. Les cotes en sont reprises telles quelles : corps
+// r 0,30 sur 0,86 de haut en 14 segments, deux bandes r 0,315 sur 0,10 aux hauteurs 0,30 et 0,70,
+// capuchon tronqué 0,20 → 0,26 sur 0,16, levier 0,08 × 0,34 × 0,10 incliné de 0,22 rad, goupille en
+// tore r 0,11, grille sombre sur le dessus. L'ensemble à 0,44, soit 0,45 unité de haut : exactement
+// la stature qu'avait l'ancien canister, donc rien ne bouge dans l'échelle du décor.
+const NADE_SCALE=0.44;
+// Le modèle est bâti sur sa base, comme la fiche. On le recentre sur son milieu pour que l'objet
+// flotte à la même hauteur qu'un cube et culbute autour de son centre en vol.
+const NADE_MID=0.57;
+const nadeBodyGeo=new THREE.CylinderGeometry(0.30,0.30,0.86,14);
+const nadeBandGeo=new THREE.CylinderGeometry(0.315,0.315,0.10,14);
+const nadeCapGeo=new THREE.CylinderGeometry(0.20,0.26,0.16,12);
+const nadeLeverGeo=new THREE.BoxGeometry(0.08,0.34,0.10);
+const nadeRingGeo=new THREE.TorusGeometry(0.11,0.032,6,14);
+const nadeVentGeo=new THREE.CylinderGeometry(0.13,0.13,0.05,10);
+const nadeBodyMat=new THREE.MeshLambertMaterial({color:0x5A6B52});
+const nadeBandMat=new THREE.MeshLambertMaterial({color:0xEDF2E8});
+const nadeCapMat=new THREE.MeshLambertMaterial({color:0x3E4A39});
+const nadeLeverMat=new THREE.MeshLambertMaterial({color:0xB9C2AE});
+const nadeRingMat=new THREE.MeshLambertMaterial({color:0xC9D2BE});
+const nadeVentMat=new THREE.MeshLambertMaterial({color:0x22291E});
+// Un seul constructeur pour l'objet posé au sol et pour celui qui vole. Deux copies du même modèle
+// finiraient par diverger, et c'est justement ce décalage qui a fait rater l'icône la première fois.
+function makeNade(){
+  const g=new THREE.Group(), inner=new THREE.Group();
+  const body=new THREE.Mesh(nadeBodyGeo,nadeBodyMat); body.position.y=0.50;
+  const ol=new THREE.Mesh(nadeBodyGeo,outlineMat); ol.scale.setScalar(1.10); ol.position.y=0.50;
+  inner.add(ol,body);
+  for(const y of [0.30,0.70]){ const b=new THREE.Mesh(nadeBandGeo,nadeBandMat); b.position.y=y; inner.add(b); }
+  const cap=new THREE.Mesh(nadeCapGeo,nadeCapMat); cap.position.y=0.97; inner.add(cap);
+  const lever=new THREE.Mesh(nadeLeverGeo,nadeLeverMat); lever.position.set(0.24,0.90,0); lever.rotation.z=0.22; inner.add(lever);
+  const ring=new THREE.Mesh(nadeRingGeo,nadeRingMat); ring.position.set(-0.26,1.0,0); ring.rotation.y=Math.PI/2; inner.add(ring);
+  const vent=new THREE.Mesh(nadeVentGeo,nadeVentMat); vent.position.y=1.05; inner.add(vent);
+  inner.position.y=-NADE_MID;
+  g.add(inner); g.scale.setScalar(NADE_SCALE);
+  return g;
+}
 // the ring that shows where a grenade is about to land — the one marker you read mid-fight
 const markGeo=new THREE.RingGeometry(0.86,1,30).rotateX(-Math.PI/2);
 const markMat=new THREE.MeshBasicMaterial({color:0xdfe8ef,transparent:true,opacity:0.75,side:THREE.DoubleSide,depthWrite:false});
@@ -2407,7 +2440,9 @@ const projMatP=new THREE.MeshBasicMaterial({color:0xfff1b0}), projMatB=new THREE
 // boxGeo — which is exactly why this needs a list rather than a blanket walk.
 const SHARED=new Set([boxGeo, shadowGeo, shadowMat, cubeMat, bagMat, boxMat, outlineMat, turretMat,
   fireMat, heartMat, crateBodyGeo, crateFrameMat, crateQMat, plankGeo, projGeo, projMatP, projMatB, projMatS,
-  smokeTex, smokeMat, nadeMat, nadeCapMat, nadeGeo, nadeCapGeo, markGeo, markMat, cloudFloorGeo, cloudEdgeGeo]);
+  smokeTex, smokeMat, markGeo, markMat, cloudFloorGeo, cloudEdgeGeo,
+  nadeBodyGeo, nadeBandGeo, nadeCapGeo, nadeLeverGeo, nadeRingGeo, nadeVentGeo,
+  nadeBodyMat, nadeBandMat, nadeCapMat, nadeLeverMat, nadeRingMat, nadeVentMat]);
 function discard(obj){
   if(!obj) return;
   const done=new Set();
@@ -2496,10 +2531,7 @@ function throwSmoke(e,aimDist){
     for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(nx,nz)){ tx=nx; tz=nz; break; } }
   }
   e.gadget=C.smokeThrown(e.gadget);
-  const g=new THREE.Group();
-  const body=new THREE.Mesh(nadeGeo,nadeMat); g.add(body);
-  const cap=new THREE.Mesh(nadeCapGeo,nadeCapMat); cap.position.y=0.24; g.add(cap);
-  const ol=new THREE.Mesh(nadeGeo,outlineMat); ol.scale.setScalar(1.18); g.add(ol);
+  const g=makeNade();
   g.position.set(e.x,0.9,e.z); world.add(g);
   const marker=new THREE.Mesh(markGeo,markMat.clone()); marker.position.set(tx,0.05,tz); world.add(marker);
   G.nades.push({x:e.x,z:e.z,tx,tz,t:0,owner:e,mesh:g,marker});
@@ -2702,11 +2734,7 @@ function spawnPickup(kind,x,z,amount,owner){
       kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
     : kind==='cube'  ? new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5),cubeMat)
       // a canister lying in the grass, the same object you see flying when someone throws one
-    : kind==='smoke' ? (()=>{ const g=new THREE.Group();
-        const body=new THREE.Mesh(nadeGeo,nadeMat); body.rotation.z=Math.PI/2; g.add(body);
-        const cap=new THREE.Mesh(nadeCapGeo,nadeCapMat); cap.rotation.z=Math.PI/2; cap.position.x=0.24; g.add(cap);
-        const ol=new THREE.Mesh(nadeGeo,outlineMat); ol.rotation.z=Math.PI/2; ol.scale.setScalar(1.2); g.add(ol);
-        g.scale.setScalar(1.25); return g; })()
+    : kind==='smoke' ? makeNade()
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
   let px=x+(Math.random()-0.5)*1.4, pz=z+(Math.random()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
   mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
@@ -3476,15 +3504,18 @@ const hudHeart=(on,i)=>`<svg viewBox="0 0 34 32" xmlns="http://www.w3.org/2000/s
     fill="${on?`url(#hg${i})`:'#1A2346'}" stroke="#0B0F1F" stroke-width="3.4" stroke-linejoin="round"/>
   ${on?'<path d="M9 10 q3.2 -4.2 7.2 -4.2" stroke="#FFB0B0" stroke-width="2.4" fill="none" stroke-linecap="round" opacity=".85"/>':''}
 </svg>`;
-// Le canister exact que l'on ramasse par terre, vu de profil : même silhouette couchée, même corps
-// ardoise, même bouchon clair d'un côté, même contour noir. Les teintes sont celles de nadeMat et
-// nadeCapMat, et les proportions celles de nadeGeo et nadeCapGeo — corps 0,42 de long sur 0,34 de
-// haut, bouchon un peu plus large, débordant à droite. L'objet au sol et l'objet dans la poche
-// doivent se reconnaître l'un l'autre du premier coup d'œil.
+// Le même objet que celui qu'on ramasse, vu de face : corps olive à deux bandes claires, capuchon
+// sombre avec sa grille, levier à droite, goupille à gauche. Teintes et proportions reprises de
+// makeNade(), pour que l'objet au sol et celui de la poche restent le même objet.
 const HUD_NADE=`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-  <rect x="3.1" y="5.9" width="15.1" height="12.2" rx="2.2" fill="#39424E" stroke="#0B0F1F" stroke-width="1.9" stroke-linejoin="round"/>
-  <rect x="17.2" y="5.2" width="4.4" height="13.6" rx="1.6" fill="#DFE8EF" stroke="#0B0F1F" stroke-width="1.8" stroke-linejoin="round"/>
-  <path d="M6.3 9.2h7.2" stroke="#6E7A88" stroke-width="1.7" stroke-linecap="round" opacity=".9"/>
+  <rect x="7.4" y="6.5" width="10.2" height="14.6" rx="2.4" fill="#5A6B52" stroke="#0B0F1F" stroke-width="1.8" stroke-linejoin="round"/>
+  <rect x="7.1" y="9.5" width="10.8" height="1.9" fill="#EDF2E8" stroke="#0B0F1F" stroke-width="1.1"/>
+  <rect x="7.1" y="16.3" width="10.8" height="1.9" fill="#EDF2E8" stroke="#0B0F1F" stroke-width="1.1"/>
+  <path d="M8.1 7.2 L9.1 4.4 H15.9 L16.9 7.2 Z" fill="#3E4A39" stroke="#0B0F1F" stroke-width="1.6" stroke-linejoin="round"/>
+  <ellipse cx="12.5" cy="4.4" rx="3.4" ry="1.1" fill="#22291E" stroke="#0B0F1F" stroke-width="1.1"/>
+  <rect x="15.3" y="4.1" width="2.6" height="5.8" rx="1" fill="#B9C2AE" stroke="#0B0F1F" stroke-width="1.5" transform="rotate(-12.6 16.6 7)"/>
+  <circle cx="8" cy="5.1" r="2.2" fill="none" stroke="#0B0F1F" stroke-width="2.6"/>
+  <circle cx="8" cy="5.1" r="2.2" fill="none" stroke="#C9D2BE" stroke-width="1.3"/>
 </svg>`;
 $('gadgetIn').insertAdjacentHTML('afterbegin',HUD_NADE);
 $('killPill').insertAdjacentHTML('afterbegin',HUD_SKULL);
