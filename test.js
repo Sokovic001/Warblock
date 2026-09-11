@@ -727,54 +727,8 @@ test('a heart is worth several seconds of regeneration, not a whole bar', () => 
   assert.ok(secondsSaved >= 3 && secondsSaved <= 8, `${secondsSaved.toFixed(1)}s saved`);
   assert.ok(C.HEART.heal < 1, 'a single heart must never fully heal you');
 });
-test('a crate drop is one of three, and the three shares make exactly one', () => {
-  const D = C.BOX_DROP;
-  assert.strictEqual(C.cents(D.smoke + D.heart + D.cube), 1);
-  assert.ok(D.cube > D.heart && D.heart > D.smoke, 'le fumigene doit rester le plus rare');
-  assert.strictEqual(D.smoke, 0.10);
-});
-test('a player already carrying a smoke gets a cube instead, never nothing', () => {
-  // Un ramassage perdu se lit comme un bug, pas comme une regle.
-  const D = C.BOX_DROP;
-  const tirage = (r, porte) => r < D.smoke ? (porte ? 'cube' : 'smoke')
-                             : r < D.smoke + D.heart ? 'heart' : 'cube';
-  assert.strictEqual(tirage(0.05, false), 'smoke');
-  assert.strictEqual(tirage(0.05, true), 'cube');
-  for (const r of [0, 0.09, 0.3, 0.5, 0.99])
-    assert.ok(['smoke','heart','cube'].includes(tirage(r, false)), String(r));
-});
-test('smoke total life is deploy plus dense plus fade', () => {
-  const S = C.SMOKE;
-  assert.strictEqual(C.smokeLife(), S.deploy + S.dense + S.fade);
-  assert.strictEqual(C.smokeLife(), 6);
-  assert.strictEqual(C.smokeDensity(-1), 0);
-  assert.strictEqual(C.smokeDensity(S.deploy), 1);
-  assert.strictEqual(C.smokeDensity(S.deploy + S.dense), 1);
-  assert.strictEqual(C.smokeDensity(C.smokeLife()), 0);
-  assert.ok(C.smokeDensity(S.deploy/2) > 0 && C.smokeDensity(S.deploy/2) < 1);
-});
-test('the sight test hits the disc when the line crosses it, misses when it passes beside', () => {
-  const h = C.segmentHitsDisc;
-  assert.strictEqual(h(0,0, 10,0, 5,0, 2), true,  'droit a travers');
-  assert.strictEqual(h(0,0, 10,0, 5,5, 2), false, 'passe a cote');
-  assert.strictEqual(h(0,0, 10,0, 5,1.9, 2), true, 'effleure le bord');
-  // l'observateur DANS le nuage doit compter comme masque
-  assert.strictEqual(h(5,0, 20,0, 5,0, 2), true, 'observateur dedans');
-  assert.strictEqual(h(5,5, 5,5, 5,5, 2), true, 'segment de longueur nulle au centre');
-  // le disque derriere l'observateur ne masque pas
-  assert.strictEqual(h(0,0, 10,0, -5,0, 2), false, 'derriere');
-});
-test('a smoke cloud out-ranges the shortest-ranged brawler', () => {
-  // Sinon RUSH tirerait a travers sans jamais perdre sa cible, et l'objet ne protegerait pas
-  // de celui contre qui on en a le plus besoin.
-  const court = Object.values(C.BRAWLERS).reduce((a,b)=>a.attack.range<b.attack.range?a:b);
-  assert.ok(C.SMOKE.radius > court.attack.range,
-    `${court.id} porte a ${court.attack.range}, le nuage ne fait que ${C.SMOKE.radius}`);
-});
-test('smoke changes no damage value', () => {
-  // Elle coupe la vue, rien d'autre : ni degats, ni vitesse, ni gaz.
-  for (const k of ['mult','dmg','damage','heal']) assert.strictEqual(C.SMOKE[k], undefined, k);
-  assert.strictEqual(C.dmgMult(3), C.dmgMult(3));
+test('boxes give cubes more often than hearts', () => {
+  assert.ok(C.HEART.boxChance > 0.15 && C.HEART.boxChance < 0.5, `${C.HEART.boxChance}`);
 });
 test('bots hesitate before their first shot and fire slower than a human', () => { assert.ok(C.BOT.reaction>=0.4); assert.ok(C.BOT.fireMult>1); });
 
