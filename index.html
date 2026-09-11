@@ -3476,16 +3476,15 @@ const hudHeart=(on,i)=>`<svg viewBox="0 0 34 32" xmlns="http://www.w3.org/2000/s
     fill="${on?`url(#hg${i})`:'#1A2346'}" stroke="#0B0F1F" stroke-width="3.4" stroke-linejoin="round"/>
   ${on?'<path d="M9 10 q3.2 -4.2 7.2 -4.2" stroke="#FFB0B0" stroke-width="2.4" fill="none" stroke-linecap="round" opacity=".85"/>':''}
 </svg>`;
-// La grenade elle-même plutôt qu'un nuage : le nuage est ce qu'elle produit, pas l'objet qu'on
-// tient. Même facture que les autres icônes du HUD — aplats, contour sombre, 24×24.
+// Le canister exact que l'on ramasse par terre, vu de profil : même silhouette couchée, même corps
+// ardoise, même bouchon clair d'un côté, même contour noir. Les teintes sont celles de nadeMat et
+// nadeCapMat, et les proportions celles de nadeGeo et nadeCapGeo — corps 0,42 de long sur 0,34 de
+// haut, bouchon un peu plus large, débordant à droite. L'objet au sol et l'objet dans la poche
+// doivent se reconnaître l'un l'autre du premier coup d'œil.
 const HUD_NADE=`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="18.8" cy="4.4" r="2.7" fill="none" stroke="#0B0F1F" stroke-width="1.8"/>
-  <path d="M11.6 6.4 16.4 3.6" stroke="#0B0F1F" stroke-width="4" stroke-linecap="round"/>
-  <path d="M11.6 6.4 16.4 3.6" stroke="#C6D2DE" stroke-width="1.9" stroke-linecap="round"/>
-  <rect x="8" y="4.3" width="6.4" height="3.8" rx="1.2" fill="#9AA7B5" stroke="#0B0F1F" stroke-width="1.7"/>
-  <circle cx="11.2" cy="15.1" r="7" fill="#4F6E40" stroke="#0B0F1F" stroke-width="1.8"/>
-  <path d="M4.6 12.6h13.2M4.6 17.6h13.2" stroke="#0B0F1F" stroke-width="1.1" opacity=".5"/>
-  <path d="M7.4 10.9a5.2 5.2 0 0 1 3.4-2.1" stroke="#A8CE96" stroke-width="1.8" fill="none" stroke-linecap="round" opacity=".85"/>
+  <rect x="3.1" y="5.9" width="15.1" height="12.2" rx="2.2" fill="#39424E" stroke="#0B0F1F" stroke-width="1.9" stroke-linejoin="round"/>
+  <rect x="17.2" y="5.2" width="4.4" height="13.6" rx="1.6" fill="#DFE8EF" stroke="#0B0F1F" stroke-width="1.8" stroke-linejoin="round"/>
+  <path d="M6.3 9.2h7.2" stroke="#6E7A88" stroke-width="1.7" stroke-linecap="round" opacity=".9"/>
 </svg>`;
 $('gadgetIn').insertAdjacentHTML('afterbegin',HUD_NADE);
 $('killPill').insertAdjacentHTML('afterbegin',HUD_SKULL);
