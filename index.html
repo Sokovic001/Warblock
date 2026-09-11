@@ -2360,9 +2360,12 @@ const smokeMat=new THREE.SpriteMaterial({map:smokeTex,transparent:true,depthWrit
 // Le fumigène, d'après la fiche d'objet validée. Les cotes en sont reprises telles quelles : corps
 // r 0,30 sur 0,86 de haut en 14 segments, deux bandes r 0,315 sur 0,10 aux hauteurs 0,30 et 0,70,
 // capuchon tronqué 0,20 → 0,26 sur 0,16, levier 0,08 × 0,34 × 0,10 incliné de 0,22 rad, goupille en
-// tore r 0,11, grille sombre sur le dessus. L'ensemble à 0,44, soit 0,45 unité de haut : exactement
-// la stature qu'avait l'ancien canister, donc rien ne bouge dans l'échelle du décor.
-const NADE_SCALE=0.44;
+// tore r 0,11, grille sombre sur le dessus. La fiche donnait 0,44 d'échelle, soit une demi-unité de
+// haut : à cette taille l'objet ne fait qu'une quinzaine de pixels à l'écran et son dessin ne
+// survit pas — les bandes claires et le contour mangent l'olive, on ne lit qu'un cylindre rayé.
+// Monté à 0,65, soit 0,73 unité, il reste le plus petit élément du décor (souche 0,80, caisse à
+// butin 0,82, botte 0,92, tonneau 0,98, brawler 1,44) et son dessin se lit enfin.
+const NADE_SCALE=0.65;
 // Le modèle est bâti sur sa base, comme la fiche. On le recentre sur son milieu pour que l'objet
 // flotte à la même hauteur qu'un cube et culbute autour de son centre en vol.
 const NADE_MID=0.57;
