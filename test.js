@@ -335,8 +335,11 @@ test('four tiers, ordered, each lighter than the next', () => {
   assert.deepStrictEqual(C.QUALITY.order, ['low','medium','high','ultra']);
   for (let i=1;i<C.QUALITY.order.length;i++){
     const a = C.preset(C.QUALITY.order[i-1]), b = C.preset(C.QUALITY.order[i]);
-    assert.ok(b.leaves > a.leaves && b.gas > a.gas && b.dpr >= a.dpr, `${a.name} → ${b.name}`);
+    assert.ok(b.leaves > a.leaves && b.gas > a.gas && b.smoke > a.smoke && b.dpr >= a.dpr, `${a.name} → ${b.name}`);
   }
+});
+test('even the lightest tier draws a smoke cloud you can read', () => {
+  for (const t of C.QUALITY.order) assert.ok(C.preset(t).smoke >= 5, t);
 });
 test('the guess follows the hardware, weakest to strongest', () => {
   const rank = t => C.QUALITY.order.indexOf(t);
@@ -715,6 +718,328 @@ test('the map is twice the old size and still fully connected', () => {
   for (const seed of [9, 42, 777, 2024]) assert.strictEqual(unreachable(seed), 0, `seed ${seed}`);
 });
 
+console.log('Smoke grenade');
+const cloud = (x, z, age) => ({ x, z, age: age === undefined ? C.SMOKE.bloom : age });
+test('the gadget is switched on and every piece of it is exported', () => {
+  assert.strictEqual(C.SMOKE_READY, true);
+  for (const fn of ['smokeStart','smokeTick','canThrowSmoke','smokeThrown','smokeLanding','smokeRadius','segmentHitsDisc','smokeSightBlocked'])
+    assert.strictEqual(typeof C[fn], 'function', fn);
+});
+test('a disc sitting on the line of fire is hit', () => {
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,0, 1), true);
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,0.9, 1), true);
+  assert.strictEqual(C.segmentHitsDisc(0,0, 0,10, 0.5,5, 1), true);
+});
+test('a disc beside the line is not', () => {
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,1.1, 1), false);
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,-4, 1), false);
+});
+test('the segment ends where the shot ends: a disc behind you or past the target never blocks', () => {
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, -4,0, 1), false, 'behind the shooter');
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 14,0, 1), false, 'past the target');
+  // the same discs would both be hit if the maths used the infinite line instead
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, -0.5,0, 1), true, 'just behind, still touching');
+});
+test('a disc that only grazes the line does not block it', () => {
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,1, 1), false, 'exactly tangent');
+  assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,0.999, 1), true);
+});
+test('a cloud with no radius left blocks nothing', () => {
+  for (const r of [0, -1, NaN, undefined]) assert.strictEqual(C.segmentHitsDisc(0,0, 10,0, 5,0, r), false, String(r));
+});
+test('sight is blocked the same way in both directions', () => {
+  const cs = [cloud(5, 0.4)];
+  assert.strictEqual(C.smokeSightBlocked(cs, 0,0, 10,0), C.smokeSightBlocked(cs, 10,0, 0,0));
+  assert.strictEqual(C.smokeSightBlocked(cs, 0,0, 10,0), true);
+});
+test('a brawler standing on top of you is never hidden by smoke', () => {
+  const cs = [cloud(0.5, 0)];
+  assert.strictEqual(C.smokeSightBlocked(cs, 0,0, C.SMOKE.near*0.9,0), false);
+  assert.strictEqual(C.smokeSightBlocked(cs, 0,0, C.SMOKE.near+0.5,0), true);
+});
+test('an expired cloud, an empty list and no list at all all leave sight clear', () => {
+  assert.strictEqual(C.smokeSightBlocked([cloud(5,0,C.SMOKE.life)], 0,0, 10,0), false);
+  assert.strictEqual(C.smokeSightBlocked([cloud(5,0,C.SMOKE.life+3)], 0,0, 10,0), false);
+  assert.strictEqual(C.smokeSightBlocked([], 0,0, 10,0), false);
+  assert.strictEqual(C.smokeSightBlocked(null, 0,0, 10,0), false);
+});
+test('any one cloud on the line is enough', () => {
+  const cs = [cloud(30,30), cloud(5,0), cloud(-9,-9)];
+  assert.strictEqual(C.smokeSightBlocked(cs, 0,0, 10,0), true);
+  assert.strictEqual(C.smokeSightBlocked([cs[0], cs[2]], 0,0, 10,0), false);
+});
+test('the cloud blooms, stands at full size, then thins to nothing', () => {
+  const S = C.SMOKE;
+  assert.strictEqual(C.smokeRadius(0), 0);
+  assert.strictEqual(C.smokeRadius(-1), 0);
+  assert.strictEqual(C.smokeRadius(S.bloom), S.radius);
+  assert.strictEqual(C.smokeRadius(S.life - S.fade), S.radius);
+  assert.ok(C.smokeRadius(S.bloom/2) > 0 && C.smokeRadius(S.bloom/2) < S.radius, 'still growing');
+  assert.ok(C.smokeRadius(S.life - S.fade/2) < S.radius, 'already thinning');
+  assert.strictEqual(C.smokeRadius(S.life), 0);
+  assert.strictEqual(C.smokeRadius(S.life + 10), 0);
+});
+test('the cloud never grows past its stated radius, and only ever grows then shrinks', () => {
+  let peak = 0, falling = false;
+  for (let t = 0; t <= C.SMOKE.life + 1; t += 0.05){
+    const r = C.smokeRadius(t);
+    assert.ok(r <= C.SMOKE.radius + 1e-9, `radius ${r} at ${t}s`);
+    if (r + 1e-9 < peak) falling = true;
+    else if (falling) assert.ok(r <= 1e-9, `grew again at ${t}s`);
+    peak = Math.max(peak, r);
+  }
+  assert.strictEqual(peak, C.SMOKE.radius);
+});
+test('you start every life empty-handed: grenades are found, never issued', () => {
+  const g = C.smokeStart();
+  assert.deepStrictEqual(g, { charges: 0, cd: 0 });
+  assert.strictEqual(C.canThrowSmoke(g), false, 'nothing to throw at the drop');
+});
+test('nothing about the pouch refills on its own', () => {
+  let g = C.smokeStart();
+  for (let i = 0; i < 6000; i++) g = C.smokeTick(g, 0.05);   // five minutes, a whole match
+  assert.strictEqual(g.charges, 0, 'waiting must never hand you a grenade');
+  assert.strictEqual(C.canThrowSmoke(g), false);
+});
+test('picking one up fills the pouch one grenade at a time, up to the cap', () => {
+  let g = C.smokeStart();
+  for (let i = 1; i <= C.SMOKE.charges; i++){
+    assert.strictEqual(C.smokeRoom(g), true, `room for number ${i}`);
+    g = C.smokePicked(g);
+    assert.strictEqual(g.charges, i);
+  }
+  assert.strictEqual(C.smokeRoom(g), false, 'a full pouch takes no more');
+  assert.strictEqual(C.smokePicked(g).charges, C.SMOKE.charges, 'and cannot be overfilled');
+});
+test('a pickup never clears the throw lock you are already serving', () => {
+  const g = C.smokePicked({ charges: 0, cd: 2.5 });
+  assert.strictEqual(g.charges, 1);
+  assert.strictEqual(g.cd, 2.5);
+  assert.strictEqual(C.canThrowSmoke(g), false);
+});
+test('throwing spends one charge and locks the button', () => {
+  const g = C.smokeThrown(C.smokePicked(C.smokeStart()));
+  assert.strictEqual(g.charges, 0);
+  assert.strictEqual(g.cd, C.SMOKE.cooldown);
+  assert.strictEqual(C.canThrowSmoke(g), false, 'still locked');
+});
+test('an empty pouch and a locked button both refuse the throw', () => {
+  assert.strictEqual(C.canThrowSmoke({ charges: 0, cd: 0 }), false);
+  assert.strictEqual(C.canThrowSmoke({ charges: 2, cd: 0.1 }), false);
+  assert.strictEqual(C.canThrowSmoke(null), false);
+  assert.strictEqual(C.canThrowSmoke(undefined), false);
+});
+test('the lock runs down to exactly zero and stops there', () => {
+  let g = C.smokeThrown({ charges: 2, cd: 0 });
+  for (let i = 0; i < 200; i++) g = C.smokeTick(g, 0.05);
+  assert.strictEqual(g.cd, 0);
+  assert.strictEqual(C.canThrowSmoke(g), true, 'usable again once the lock clears');
+});
+test('a pouch can never be talked into holding more than the cap', () => {
+  for (const n of [3, 99, 2.7, -4, NaN, undefined])
+    assert.ok(C.smokeTick({ charges: n, cd: 0 }, 0).charges <= C.SMOKE.charges, String(n));
+  assert.strictEqual(C.smokeTick({ charges: -4, cd: 0 }, 0).charges, 0, 'nor less than nothing');
+});
+test('two crates, two throws, then you are out until you find another', () => {
+  const S = C.SMOKE;
+  let g = C.smokePicked(C.smokePicked(C.smokeStart()));      // two lucky crates
+  g = C.smokeThrown(g);
+  g = C.smokeTick(g, S.cooldown);
+  assert.strictEqual(C.canThrowSmoke(g), true, 'the second one is ready');
+  g = C.smokeThrown(g);
+  assert.strictEqual(g.charges, 0);
+  g = C.smokeTick(g, 600);
+  assert.strictEqual(C.canThrowSmoke(g), false, 'and no amount of waiting brings one back');
+});
+test('the grenade lands where you aim, clamped to how far an arm can throw', () => {
+  const S = C.SMOKE;
+  assert.strictEqual(C.smokeLanding(0,0, 1,0, 5).x, 5);
+  assert.strictEqual(C.smokeLanding(0,0, 1,0, 99).dist, S.range, 'clamped long');
+  assert.strictEqual(C.smokeLanding(0,0, 1,0, undefined).dist, S.range, 'no distance given: full throw');
+  assert.strictEqual(C.smokeLanding(0,0, 1,0, NaN).dist, S.range);
+  assert.strictEqual(C.smokeLanding(0,0, 1,0, -3).dist, 0, 'a negative throw is a drop at your feet');
+});
+test('a throw of zero drops the grenade on your own feet', () => {
+  const at = C.smokeLanding(11,7, 1,0, 0);
+  assert.strictEqual(at.dist, 0);
+  assert.deepStrictEqual([at.x, at.z], [11, 7], 'exactly where you stand, whichever way you face');
+  assert.deepStrictEqual([C.smokeLanding(11,7, 0,-1, 0).x, C.smokeLanding(11,7, 0,-1, 0).z], [11, 7]);
+});
+test('the getaway works: a cloud dropped on you hides you from everyone at range', () => {
+  const me = { x: 20, z: 20 };
+  const at = C.smokeLanding(me.x, me.z, 1, 0, 0);
+  const cloud = [{ x: at.x, z: at.z, age: C.SMOKE.bloom }];
+  // whichever way an enemy stands off, the line into you crosses the cloud you are sitting in
+  for (const a of [0, 0.7, 1.9, 3.0, 4.4, 5.8]) for (const d of [3, 6, 10, 14]) {
+    const ex = me.x + Math.cos(a)*d, ez = me.z + Math.sin(a)*d;
+    assert.strictEqual(C.smokeSightBlocked(cloud, ex, ez, me.x, me.z), true, `enemy at ${d} blocks, angle ${a}`);
+  }
+});
+test('the getaway holds while you walk out, and ends once you are clear of the cloud', () => {
+  const cloud = [{ x: 0, z: 0, age: C.SMOKE.bloom }];
+  const enemy = { x: 0, z: -12 };                          // watching from the north
+  // you leave due east. Inside the cloud, and for a while past its edge, the line still crosses it
+  assert.strictEqual(C.smokeSightBlocked(cloud, enemy.x, enemy.z, 1, 0), true, 'one step out');
+  assert.strictEqual(C.smokeSightBlocked(cloud, enemy.x, enemy.z, C.SMOKE.radius-0.2, 0), true, 'at the edge');
+  assert.strictEqual(C.smokeSightBlocked(cloud, enemy.x, enemy.z, C.SMOKE.radius+2, 0), false, 'well clear: they see you again');
+});
+test('a self-drop covers you, a full throw does not — that is the whole choice', () => {
+  assert.strictEqual(C.smokeCoversThrower(0), true);
+  assert.strictEqual(C.smokeCoversThrower(C.SMOKE.radius - 0.01), true);
+  assert.strictEqual(C.smokeCoversThrower(C.SMOKE.radius), false, 'standing exactly on the edge is not cover');
+  assert.strictEqual(C.smokeCoversThrower(C.SMOKE.range), false, 'a full throw is a screen, not a getaway');
+  assert.strictEqual(C.smokeCoversThrower(undefined), false, 'no distance means a throw at full range');
+  assert.strictEqual(C.smokeCoversThrower(-5), true, 'a negative throw is still a drop on yourself');
+});
+test('landing and cover read the throw distance the same way', () => {
+  for (const d of [0, -4, 1, C.SMOKE.radius, 5, 99, NaN, undefined, null, 'far'])
+    assert.strictEqual(C.smokeLanding(0,0, 1,0, d).dist, C.smokeThrowDist(d), String(d));
+  assert.strictEqual(C.smokeThrowDist('far'), C.SMOKE.range, 'anything that is not a number is a full throw');
+  assert.strictEqual(C.smokeThrowDist(Infinity), C.SMOKE.range);
+});
+test('your own fresh cloud is one-way: you see them, they have lost you', () => {
+  const mine = [{ x: 0, z: 0, age: C.SMOKE.bloom, team: 3 }];
+  const me = [0, 0], them = [10, 0];
+  assert.strictEqual(C.smokeSightBlocked(mine, me[0],me[1], them[0],them[1], 3), false, 'you look out');
+  assert.strictEqual(C.smokeSightBlocked(mine, them[0],them[1], me[0],me[1], 7), true, 'they look in');
+});
+test('the window belongs to the team, not the thrower alone', () => {
+  const cloud = [{ x: 0, z: 0, age: C.SMOKE.bloom, team: 3 }];
+  assert.strictEqual(C.smokeSightBlocked(cloud, 0,0, 10,0, 3), false, 'a team-mate shares it');
+  for (const other of [0, 2, 4, 19]) assert.strictEqual(C.smokeSightBlocked(cloud, 0,0, 10,0, other), true, `team ${other}`);
+});
+test('the window is counted from full size, and lasts exactly as long as it says', () => {
+  const S = C.SMOKE, at = age => ({ x:0, z:0, age, team:1 });
+  assert.strictEqual(C.smokeSeeThrough(at(0), 1), true, 'yours from the moment it lands');
+  assert.strictEqual(C.smokeSeeThrough(at(S.bloom + S.oneWay - 0.01), 1), true, 'the last instant of it');
+  assert.strictEqual(C.smokeSeeThrough(at(S.bloom + S.oneWay), 1), false, 'and then it is over');
+  assert.strictEqual(C.smokeWindowLeft(at(S.bloom)), S.oneWay, 'a full window once it is up');
+  assert.strictEqual(C.smokeWindowLeft(at(S.life)), 0);
+  assert.strictEqual(C.smokeWindowLeft(null), 0);
+});
+test('once the window shuts, your own cloud blinds you like everyone else', () => {
+  const S = C.SMOKE, old = [{ x: 0, z: 0, age: S.bloom + S.oneWay + 0.1, team: 3 }];
+  assert.strictEqual(C.smokeSightBlocked(old, 0,0, 10,0, 3), true, 'no more free look');
+  assert.strictEqual(C.smokeSightBlocked(old, 10,0, 0,0, 7), true, 'still hides you, both ways now');
+});
+test('the one-way advantage always ends well before the cloud does', () => {
+  const S = C.SMOKE;
+  assert.ok(S.oneWay > 0, 'without it the gadget is a blindfold you throw at yourself');
+  assert.ok(S.bloom + S.oneWay < S.life - S.fade, 'every cloud must spend real time blinding both sides');
+  assert.ok(S.charges * (S.bloom + S.oneWay) < 12, 'a full pouch must not add up to a lasting one-way wall');
+});
+test('no viewer given means the old symmetric rule, unchanged', () => {
+  const cloud = [{ x: 5, z: 0, age: C.SMOKE.bloom, team: 3 }];
+  for (const v of [undefined, null]) assert.strictEqual(C.smokeSightBlocked(cloud, 0,0, 10,0, v), true, String(v));
+  assert.strictEqual(C.smokeSeeThrough(cloud[0], undefined), false);
+  assert.strictEqual(C.smokeSeeThrough(null, 3), false);
+});
+test('team 0 is a real team, not a missing one', () => {
+  const cloud = [{ x: 0, z: 0, age: C.SMOKE.bloom, team: 0 }];
+  assert.strictEqual(C.smokeSightBlocked(cloud, 0,0, 10,0, 0), false, 'team 0 sees through its own smoke');
+  assert.strictEqual(C.smokeSightBlocked(cloud, 0,0, 10,0, 1), true);
+});
+test('standing in your own cloud reads as hidden, with the window counting down', () => {
+  const S = C.SMOKE, clouds = [{ x: 0, z: 0, age: S.bloom, team: 2 }];
+  const inside = C.smokeCover(clouds, 1, 1, 2);
+  assert.strictEqual(inside.hidden, true);
+  assert.strictEqual(inside.window, S.oneWay);
+  assert.strictEqual(inside.exposed, false);
+  const outside = C.smokeCover(clouds, S.radius + 1, 0, 2);
+  assert.deepStrictEqual(outside, { hidden: false, window: 0, exposed: false });
+});
+test('an expired cloud covers nobody, and a stale one covers without a window', () => {
+  const S = C.SMOKE;
+  assert.strictEqual(C.smokeCover([{ x:0, z:0, age:S.life, team:2 }], 0, 0, 2).hidden, false);
+  const stale = C.smokeCover([{ x:0, z:0, age:S.bloom + S.oneWay + 0.5, team:2 }], 0, 0, 2);
+  assert.strictEqual(stale.hidden, true);
+  assert.strictEqual(stale.window, 0);
+});
+test('standing in an enemy fresh cloud is a trap, and says so', () => {
+  const S = C.SMOKE, theirs = [{ x: 0, z: 0, age: S.bloom, team: 5 }];
+  const cv = C.smokeCover(theirs, 0.5, 0, 2);
+  assert.strictEqual(cv.exposed, true, 'they are watching you through it');
+  assert.strictEqual(cv.window, 0, 'and you get no window of your own');
+  // once their window shuts it is just smoke again, and it hides you like any other
+  const after = C.smokeCover([{ x:0, z:0, age:S.bloom + S.oneWay + 0.5, team:5 }], 0.5, 0, 2);
+  assert.strictEqual(after.exposed, false);
+  assert.strictEqual(after.hidden, true);
+});
+test('the cover check tolerates an empty map and a missing list', () => {
+  for (const c of [[], null, undefined]) assert.deepStrictEqual(C.smokeCover(c, 0, 0, 1), { hidden:false, window:0, exposed:false });
+});
+test('a self-drop still does not blind the brawler already on top of you', () => {
+  const cloud = [{ x: 0, z: 0, age: C.SMOKE.bloom }];
+  assert.strictEqual(C.smokeSightBlocked(cloud, C.SMOKE.near*0.5, 0, 0, 0), false, 'point blank sees through it');
+  assert.strictEqual(C.smokeSightBlocked(cloud, C.SMOKE.near+0.3, 0, 0, 0), true, 'a step further and you are gone');
+});
+test('the aim vector does not have to be normalised', () => {
+  const a = C.smokeLanding(3,4, 0,7, 5), b = C.smokeLanding(3,4, 0,1, 5);
+  assert.ok(Math.abs(a.x-b.x) < 1e-9 && Math.abs(a.z-b.z) < 1e-9);
+  assert.strictEqual(Math.round(Math.hypot(a.x-3, a.z-4)*1e9)/1e9, 5);
+});
+test('the throw out-ranges the cloud, so you can smoke a spot without standing in it', () => {
+  assert.ok(C.SMOKE.range > C.SMOKE.radius * 1.5, 'a grenade you can only drop at your feet is not a gadget');
+});
+test('a crate leaves exactly one of three things, and the odds add up', () => {
+  const D = C.BOX_DROP;
+  assert.ok(D.smoke > 0 && D.heart > 0 && D.cube > 0, 'every drop must stay possible');
+  // la part du cube est ecrite dans la table, pas deduite : si elle derive du reste, ce test casse
+  assert.strictEqual(C.cents(D.smoke + D.heart + D.cube), 1, 'les trois tirages doivent faire 1');
+  const seen = { smoke: 0, heart: 0, cube: 0 };
+  for (let i = 0; i < 100000; i++){ const k = C.boxDrop(i / 100000); assert.ok(k in seen, k); seen[k]++; }
+  assert.ok(Math.abs(seen.smoke/100000 - D.smoke) < 0.002, `smoke ${seen.smoke/1000}%`);
+  assert.ok(Math.abs(seen.heart/100000 - D.heart) < 0.002, `heart ${seen.heart/1000}%`);
+  assert.strictEqual(seen.smoke + seen.heart + seen.cube, 100000, 'every crate leaves something');
+});
+test('the drop table reads the edges of the roll the same way every time', () => {
+  const D = C.BOX_DROP;
+  assert.strictEqual(C.boxDrop(0), 'smoke');
+  assert.strictEqual(C.boxDrop(D.smoke - 1e-9), 'smoke');
+  assert.strictEqual(C.boxDrop(D.smoke), 'heart', 'the boundary belongs to the next slice');
+  assert.strictEqual(C.boxDrop(D.smoke + D.heart), 'cube');
+  assert.strictEqual(C.boxDrop(0.999999), 'cube');
+  assert.strictEqual(C.boxDrop(() => 0.05), 'smoke', 'a generator works as well as a number');
+  for (const junk of [undefined, null, NaN, 'x']) assert.strictEqual(C.boxDrop(junk), 'smoke', String(junk));
+});
+test('cubes stay the common drop, so breaking crates still means getting stronger', () => {
+  const D = C.BOX_DROP, cube = D.cube;
+  assert.ok(cube > D.heart && cube > D.smoke, `cube ${cube}, heart ${D.heart}, smoke ${D.smoke}`);
+});
+test('a grenade is roughly one crate in five: rare enough to be worth crossing the map for', () => {
+  const per = 1 / C.BOX_DROP.smoke;
+  assert.ok(per >= 3 && per <= 8, `one crate in ${per.toFixed(1)}`);
+});
+test('the map never holds enough grenades for everyone at once', () => {
+  for (const m of Object.values(C.MODES)){
+    const crates = m.boxes || C.BOXES, players = m.teams * m.teamSize;
+    const perPlayer = crates * C.BOX_DROP.smoke / players;
+    assert.ok(perPlayer < 1, `${m.id}: ${perPlayer.toFixed(2)} grenades per player is not scarce`);
+  }
+});
+test('nobody can keep a corner smoked forever', () => {
+  assert.ok(C.SMOKE.charges <= 3, 'a pouch you can stockpile in is a smoke wall waiting to happen');
+  // nothing refills, so a full pouch is the whole budget until you find another crate
+  const uptime = C.SMOKE.charges * C.SMOKE.life;
+  assert.ok(uptime < 20, `${uptime}s of cloud from one full pouch is too much standing smoke`);
+});
+test('two grenades can still overlap into one wall', () => {
+  assert.ok(C.SMOKE.cooldown < C.SMOKE.life - C.SMOKE.fade, 'the second lands before the first thins out');
+});
+test('the cloud spends most of its life at full strength', () => {
+  const S = C.SMOKE;
+  assert.ok(S.bloom + S.fade < S.life * 0.5, 'a cloud that is always growing or dying blinds nobody');
+  assert.ok(S.flight >= 0.3 && S.flight <= 1, `${S.flight}s in the air is either instant or a joke`);
+});
+test('the cloud is wider than the point-blank window and narrower than a brawler\'s awareness', () => {
+  assert.ok(C.SMOKE.radius > C.SMOKE.near * 2, 'a cloud you can see straight across hides nothing');
+  assert.ok(C.SMOKE.radius * 2 < C.BOT.sight, 'wider than anyone can see makes it a wall, not a gadget');
+});
+test('the point-blank window is tighter than the cloud, so smoke always has an effect', () => {
+  assert.ok(C.SMOKE.near < C.SMOKE.radius);
+  assert.ok(C.SMOKE.near > 0, 'without it you could blind someone punching you');
+});
+
 console.log('Pacing');
 test('spawn protection is short (Showdown-style)', () => assert.ok(C.GRACE>=5 && C.GRACE<=12));
 test('out-of-combat healing is a real option: full hp in 15–20 s, and it starts quickly', () => {
@@ -728,7 +1053,8 @@ test('a heart is worth several seconds of regeneration, not a whole bar', () => 
   assert.ok(C.HEART.heal < 1, 'a single heart must never fully heal you');
 });
 test('boxes give cubes more often than hearts', () => {
-  assert.ok(C.HEART.boxChance > 0.15 && C.HEART.boxChance < 0.5, `${C.HEART.boxChance}`);
+  assert.ok(C.BOX_DROP.heart > 0.15 && C.BOX_DROP.heart < 0.5, `${C.BOX_DROP.heart}`);
+  assert.ok(C.BOX_DROP.cube > C.BOX_DROP.heart);
 });
 test('bots hesitate before their first shot and fire slower than a human', () => { assert.ok(C.BOT.reaction>=0.4); assert.ok(C.BOT.fireMult>1); });
 

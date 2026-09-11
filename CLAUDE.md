@@ -19,7 +19,7 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `node test.js` après chaque modification.** 125 tests, aucune dépendance.
+- **Lancer `node test.js` après chaque modification.** 185 tests, aucune dépendance.
 - **Vérifier la syntaxe des blocs `<script>`** après une édition automatisée : une regex qui
   extrait les blocs puis `node --check` attrape les erreurs avant d'ouvrir le navigateur.
 - **Ne jamais mettre un commentaire `//` en fin d'une ligne existante** lors d'une édition par
@@ -41,6 +41,14 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 - La vitesse d'un brawler est toujours celle que donne `derivedSpeed()`, jamais une valeur écrite
   à la main.
 - Les montants du bandeau « live wins » sont produits par les vraies fonctions de paiement.
+- Les trois parts de `BOX_DROP` font toujours 1, et le cube reste le drop le plus courant.
+- Les fumigènes restent rares : rien ne se recharge avec le temps, et tout le stock de caisses
+  d'un mode donne moins d'une grenade par joueur — vérifié sur les cinq modes.
+- La fuite est garantie : un fumigène lâché à ses pieds cache le lanceur de tout adversaire situé
+  au-delà de deux blocs, sous n'importe quel angle et à n'importe quelle distance.
+- Le sens unique de la fumée est borné : la fenêtre appartient à l'équipe qui a lancé et se ferme
+  avant que le nuage ne commence à se dissiper. Passé la fenêtre, le nuage aveugle les deux côtés.
+- La fumée n'arrête jamais un projectile, et ne cache jamais quelqu'un collé à soi.
 
 ## Historique
 

@@ -24,12 +24,12 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 125 tests, sans dépendance
+npm test        # 185 tests, sans dépendance
 ```
 
 Les règles du jeu vivent dans un bloc pur (`WBCore`) à l'intérieur de `index.html`, sans DOM ni
 WebGL. `test.js` extrait ce bloc et l'exécute dans Node : économie, paiements, génération de
-carte, équilibrage des brawlers, files d'attente, chat, qualité graphique. Le rendu, lui, n'est
+carte, équilibrage des brawlers, files d'attente, chat, qualité graphique, grenade fumigène. Le rendu, lui, n'est
 pas couvert — il demande un navigateur.
 
 ## Structure

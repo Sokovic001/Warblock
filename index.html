@@ -525,7 +525,33 @@
   #feed div.you{border-left-color:var(--cash);color:#E7D9AE}
   #feed .fsk{width:calc(var(--hu)*1.5);height:calc(var(--hu)*1.5);flex:0 0 auto;display:block}
   #feed .fsk svg{width:100%;height:100%;display:block}
-  #panel{right:calc(var(--hu)*2.2);bottom:calc(var(--hu)*3.6);display:flex;justify-content:flex-end;align-items:flex-end;pointer-events:none}
+  #panel{right:calc(var(--hu)*2.2);bottom:calc(var(--hu)*3.6);display:flex;justify-content:flex-end;align-items:flex-end;gap:calc(var(--hu)*1.4);pointer-events:none}
+  /* The gadget sits beside the super, about two thirds its size: it is a tool, not the payoff.
+     Everything is in --hu like the rest of the HUD, and the inner disc is a percentage, so the
+     slot scales with the panel instead of pinning itself to a pixel size. */
+  #gadget{width:calc(var(--hu)*12.8);height:calc(var(--hu)*12.8);position:relative;display:grid;place-items:center;pointer-events:auto;cursor:pointer;margin-bottom:calc(var(--hu)*1.2)}
+  #gadgetRing{position:absolute;inset:0;border-radius:50%;border:calc(var(--hu)*.39) solid #000;
+    background:conic-gradient(#6FC3FF var(--p),#131C40 0);box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55)}
+  #gadgetIn{position:relative;width:74%;height:74%;border-radius:50%;border:calc(var(--hu)*.32) solid #000;
+    display:grid;place-items:center;background:radial-gradient(circle at 34% 28%,#2B3A6E,#111938)}
+  #gadgetIn .ico{font-size:calc(var(--hu)*4.6);line-height:1}
+  #gadgetN{position:absolute;right:calc(var(--hu)*-1);bottom:calc(var(--hu)*-1);min-width:calc(var(--hu)*3.6);height:calc(var(--hu)*3.6);
+    border-radius:99px;border:calc(var(--hu)*.32) solid #000;background:#131C40;color:#fff;font-size:calc(var(--hu)*1.9);
+    display:grid;place-items:center;padding:0 calc(var(--hu)*.5);box-shadow:0 calc(var(--hu)*.35) 0 rgba(0,0,0,.55)}
+  #gadget.ready #gadgetRing{background:#6FC3FF;box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55),0 0 calc(var(--hu)*3) rgba(111,195,255,.55)}
+  #gadget.ready #gadgetIn{background:radial-gradient(circle at 34% 28%,#EAF6FF,#8FB6D4)}
+  #gadget.ready #gadgetN{background:#2F7FD1}
+  /* until you have thrown your first one of the match, the slot asks to be noticed */
+  #gadget.ready.new #gadgetRing{animation:pulse .8s infinite alternate}
+  #gadget.wait{opacity:.55;filter:grayscale(.6)}
+  /* what the cloud you are standing in is doing for you right now */
+  #smokeState{position:absolute;right:0;bottom:calc(var(--hu)*21.5);display:none;white-space:nowrap;
+    padding:calc(var(--hu)*.55) calc(var(--hu)*1.3);border:calc(var(--hu)*.39) solid #000;border-radius:calc(var(--hu)*1.3);
+    font-size:calc(var(--hu)*1.5);letter-spacing:.08em;background:linear-gradient(180deg,#232E5E,#141C42);color:#DFE8EF;
+    box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55);pointer-events:none}
+  #smokeState.see{background:linear-gradient(180deg,#3E93E0,#1B5FB8);color:#fff}
+  #smokeState.blind{background:linear-gradient(180deg,#46536E,#28324A)}
+  #smokeState.spotted{background:linear-gradient(180deg,#FF5C5C,#B01414);color:#fff;animation:pulse .5s infinite alternate}
   #superwrap{width:calc(var(--hu)*18.88);height:calc(var(--hu)*18.88);position:relative;display:grid;place-items:center;pointer-events:auto;cursor:pointer}
   #superRing{position:absolute;inset:0;border-radius:50%;border:calc(var(--hu)*.39) solid #000;
     background:conic-gradient(var(--cash) var(--p),#131C40 0);box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55)}
@@ -718,6 +744,9 @@
   .touch #pauseBtn{left:auto;right:108px;top:8px;transform:none;width:38px;height:32px;font-size:11px;border-width:2px}
   .touch #panel{right:12px;bottom:12px}
   .touch #superwrap{width:104px;height:104px} .touch #superIn{width:76px;height:76px;font-size:11px}
+  /* the super is pinned to a pixel size on touch, so the gadget follows it in the same proportion */
+  .touch #gadget{width:70px;height:70px;margin-bottom:6px} .touch #gadgetIn .ico{font-size:25px}
+  .touch #gadgetN{min-width:20px;height:20px;font-size:11px} .touch #smokeState{bottom:118px;font-size:10px}
   .touch .lbl{font-size:9px} .touch .lbl .bar{width:52px;height:9px} .touch .lbl.you .bar{width:66px;height:11px} .touch .lbl .am{width:66px} .touch .lbl .bar b{font-size:8px;line-height:8px}
   .touch .dmg{font-size:14px}
   .touch #lobby h1{font-size:40px}
@@ -787,14 +816,17 @@
     <div class="rsec"><h3>Fighting</h3>
       <p><b>Ammo.</b> Three shots, reloading one at a time. Watch the pips above your head.</p>
       <p><b>Super.</b> Charges as you deal damage. Every brawler has a different one — burst, slam, fire pool, heal, stealth, dash, turret.</p>
+      <p><b>Smoke grenade.</b> <b>You start with none.</b> They come out of crates, about one in five, and you can carry two at a time. Die and whatever is left drops on the ground for whoever gets there first. <kbd>G</kbd> throws one <b>at your own feet</b>: the cloud closes over you, whoever was shooting loses you, and you walk out. The ☁ button next to your super throws one where you are pointing instead, to screen off a lane.</p>
+      <p><b>The first 4 seconds are yours.</b> A fresh cloud is one-way: your team looks straight through it while nobody can look back in. The badge above the ☁ button counts it down. After that the cloud blinds everyone alike for the rest of its 7s, you included. Standing in <i>their</i> fresh smoke is the same trap in reverse, and the badge turns red to say so.</p>
+      <p>Bullets always fly straight through smoke. It buys sight, a retreat or a flank, never a free kill. Nothing refills on its own: once you have thrown your last one, the only way to get another is to break more crates.</p>
       <p><b>Power cubes.</b> Break boxes for cubes: each gives +10% max health and +10% damage, up to 10. Killers inherit them.</p>
       <p><b>Speed is earned.</b> A brawler is only fast if it is fragile or fights from range: Brick (200 hp, reach 4.6) walks at 5.65 while Ghost (95 hp) runs at 8.10. Tanks trade mobility for the right to stand still and win a brawl.</p>
       <p><b>Bushes</b> hide you until someone gets close. <b>Walls</b> block shots — except Volt, who lobs bombs over them.</p>
       <p><b>The gas</b> shrinks the map and damages a percentage of your health per second. The screen edge flashes green while it burns you, and the safe circle is drawn on the minimap.</p>
     </div>
     <div class="rsec"><h3>Controls</h3>
-      <p class="ctl"><kbd>WASD</kbd> move · mouse to aim · <kbd>LMB</kbd> attack · <kbd>RMB</kbd> or <kbd>Space</kbd> super · <kbd>Q</kbd> auto-aim shot · <kbd>C</kbd> cash out · <kbd>Esc</kbd> pause</p>
-      <p class="ctl"><b>Touch:</b> left thumb moves · right thumb taps for a quick auto-aimed shot, or drags to aim and releases to fire · the orange button fires your super (drag it to aim).</p>
+      <p class="ctl"><kbd>WASD</kbd> move · mouse to aim · <kbd>LMB</kbd> attack · <kbd>RMB</kbd> or <kbd>Space</kbd> super · <kbd>G</kbd> smoke yourself (☁ button to place one) · <kbd>Q</kbd> auto-aim shot · <kbd>C</kbd> cash out · <kbd>Esc</kbd> pause</p>
+      <p class="ctl"><b>Touch:</b> left thumb moves · right thumb taps for a quick auto-aimed shot, or drags to aim and releases to fire · the orange button fires your super (drag it to aim) · tap the ☁ button to smoke yourself and get out, or drag it to place the cloud elsewhere.</p>
     </div>
   </div>
 </div></section>
@@ -837,6 +869,8 @@
     <div id="mapwrap"><canvas id="map" width="170" height="170"></canvas></div>
     <div id="feed"></div>
     <div id="panel">
+      <div id="smokeState"></div>
+      <div id="gadget" title="Smoke grenade (G) — drops at your feet, hides you, and you keep seeing out for 4s"><div id="gadgetRing" style="--p:0%"></div><div id="gadgetIn"><span class="ico">☁</span><b id="gadgetN">0</b></div></div>
       <div id="superwrap" title="Super (Space / right click)"><div id="superRing" style="--p:0%"></div><div id="superIn">SUPER</div></div>
     </div>
     <div id="stickL" class="stick"><div class="knob"></div></div>
@@ -994,10 +1028,10 @@ const WBCore = (function(){
     // `dpr` is the sharpness ceiling for the tier. Even LOW stays at 1.5× — dropping to 1× on a
     // 3× screen looks far worse than thinning the scenery, and sharpness is what people notice.
     presets: {
-      low:    { name:'LOW',    leaves:5,  gas:30,  dpr:1.5 },
-      medium: { name:'MEDIUM', leaves:8,  gas:55,  dpr:2.0 },
-      high:   { name:'HIGH',   leaves:11, gas:80,  dpr:2.5 },
-      ultra:  { name:'ULTRA',  leaves:15, gas:110, dpr:3.0 },
+      low:    { name:'LOW',    leaves:5,  gas:30,  smoke:7,  dpr:1.5 },
+      medium: { name:'MEDIUM', leaves:8,  gas:55,  smoke:10, dpr:2.0 },
+      high:   { name:'HIGH',   leaves:11, gas:80,  smoke:13, dpr:2.5 },
+      ultra:  { name:'ULTRA',  leaves:15, gas:110, smoke:17, dpr:3.0 },
     },
     down: 46, up: 57,        // fps thresholds for stepping the tier
   };
@@ -1112,8 +1146,119 @@ const WBCore = (function(){
   const BOX_HP = 90;
   // Out-of-combat regeneration, and the health pickups that speed it up.
   const HEAL = { delay: 3.0, rate: 0.075 };        // fraction of max hp per second, once left alone
-  const HEART = { heal: 0.40, boxChance: 0.35 };  // a heart from a box restores 40% of max health
+  const HEART = { heal: 0.40 };                   // a heart from a box restores 40% of max health
+  // What a broken crate leaves behind. One table drawn once, so the three chances always add up to
+  // one and no drop can quietly crowd another out. Whatever is left over is a power cube.
+  // La part du cube est écrite, pas déduite : on doit pouvoir lire la règle sans la calculer.
+  // Un test vérifie que les trois font exactement 1.
+  const BOX_DROP = { smoke: 0.20, heart: 0.30, cube: 0.50 };
+  function boxDrop(rng){
+    const raw = typeof rng === 'function' ? rng() : rng;
+    const v = Math.abs(Number(raw) || 0) % 1;
+    if (v < BOX_DROP.smoke) return 'smoke';
+    if (v < BOX_DROP.smoke + BOX_DROP.heart) return 'heart';
+    return 'cube';
+  }
   const BOT = { reaction: 0.55, fireMult: 1.35, sight: 14, dropCubesOnKill: true };
+  // ---- Smoke grenade. Not something you are handed: a scarce thing found in crates, one in five,
+  // and lost with the rest of your kit when you die. Thrown on the ground it blooms into a cloud
+  // nobody can see through, and it blocks sight only, never bullets — a retreat or a flank, never a
+  // free kill. Everything about it is plain geometry, so all of it is testable: the Game layer only
+  // draws what these functions decide.
+  const SMOKE_READY = true;        // flip to false to take the gadget out of a build entirely
+  const SMOKE = {
+    charges: 2,      // the most you can carry at once. You start a life with none.
+    cooldown: 3,     // seconds between two throws: both can never land on the same spot at once
+    range: 9,        // how far it can be thrown
+    flight: 0.55,    // seconds in the air before it lands
+    radius: 5.0,     // the cloud, in cells
+    bloom: 0.45,     // seconds from landing to full size
+    oneWay: 4,       // seconds, counted from full size, where the cloud is yours (see below)
+    life: 7,         // seconds the cloud stands
+    fade: 1.2,       // the last seconds of `life`, where it thins out and stops blinding anyone
+    near: 2.0,       // nose to nose, smoke hides nobody: you always see who is on top of you
+  };
+  // You spawn empty-handed, every life. Nothing about the gadget refills on its own: the only way
+  // to hold one is to break a crate and get lucky, which is what keeps clouds rare on the map.
+  function smokeStart(){ return { charges: 0, cd: 0 }; }
+  const smokeClamp = n => Math.max(0, Math.min(SMOKE.charges, Math.floor(n) || 0));
+  function smokeTick(g, dt){
+    const s = g || smokeStart();
+    return { charges: smokeClamp(s.charges), cd: Math.max(0, (s.cd || 0) - dt) };
+  }
+  function canThrowSmoke(g){ return SMOKE_READY && !!g && (g.charges || 0) >= 1 && (g.cd || 0) <= 0; }
+  function smokeThrown(g){ return { charges: smokeClamp((g && g.charges || 0) - 1), cd: SMOKE.cooldown }; }
+  // Picking one up off the ground. A full pouch takes nothing, so the pickup stays where it is.
+  function smokeRoom(g){ return smokeClamp(g && g.charges) < SMOKE.charges; }
+  function smokePicked(g){ return { charges: smokeClamp((g && g.charges || 0) + 1), cd: (g && g.cd) || 0 }; }
+  // How far the grenade actually goes: never past what an arm can throw, never behind you. Zero is
+  // a drop on your own feet, and anything that is not a real number means a throw at full range.
+  function smokeThrowDist(dist){
+    const want = (typeof dist === 'number' && isFinite(dist)) ? dist : SMOKE.range;
+    return Math.max(0, Math.min(SMOKE.range, want));
+  }
+  function smokeLanding(x, z, ax, az, dist){
+    const l = Math.hypot(ax, az) || 1, d = smokeThrowDist(dist);
+    return { x: x + ax/l*d, z: z + az/l*d, dist: d };
+  }
+  // Would a cloud landing that far ahead still hide the thrower? This is the whole choice the gadget
+  // offers — a getaway on your own feet, or a screen thrown across a lane — and it is why the quick
+  // input passes 0 while the aimed one passes the distance you picked.
+  function smokeCoversThrower(dist){ return smokeThrowDist(dist) < SMOKE.radius; }
+  // The cloud grows, stands, then thins out. A radius of 0 means it blinds nobody any more.
+  function smokeRadius(age){
+    if (!(age >= 0) || age >= SMOKE.life) return 0;
+    const grow = Math.min(1, age / SMOKE.bloom);
+    const left = Math.min(1, (SMOKE.life - age) / SMOKE.fade);
+    return SMOKE.radius * grow * left;
+  }
+  // Does the straight line from A to B pass through a disc? Measured against the *segment*, not the
+  // infinite line it sits on, so a cloud behind your back never blinds you.
+  function segmentHitsDisc(ax, az, bx, bz, cx, cz, r){
+    if (!(r > 0)) return false;
+    const dx = bx - ax, dz = bz - az, len2 = dx*dx + dz*dz;
+    let t = len2 > 0 ? ((cx - ax)*dx + (cz - az)*dz) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const px = ax + dx*t - cx, pz = az + dz*t - cz;
+    return px*px + pz*pz < r*r;
+  }
+  // A fresh cloud belongs to the team that threw it. For `oneWay` seconds after it reaches full
+  // size, that team looks straight through it while nobody can look back in — you see them, they
+  // have lost you. Once the window closes the cloud blinds everyone alike for the rest of its life,
+  // so nobody gets a permanent one-way wall out of it.
+  function smokeSeeThrough(cloud, viewerTeam){
+    if (!cloud || viewerTeam === undefined || viewerTeam === null) return false;
+    return cloud.team === viewerTeam && cloud.age < SMOKE.bloom + SMOKE.oneWay;
+  }
+  function smokeWindowLeft(cloud){ return cloud ? Math.max(0, SMOKE.bloom + SMOKE.oneWay - cloud.age) : 0; }
+  // Where you stand, told from the clouds you are standing in. Being inside a live cloud is what
+  // hides you from everyone past `near`, whichever way they look — except from the team that threw
+  // it while their window is still open, which is the one case where standing in smoke is a trap.
+  function smokeCover(clouds, x, z, team){
+    let hidden = false, window = 0, exposed = false;
+    if (SMOKE_READY && clouds) for (const c of clouds){
+      const r = smokeRadius(c.age);
+      if (!(r > 0)) continue;
+      const dx = c.x - x, dz = c.z - z;
+      if (dx*dx + dz*dz >= r*r) continue;
+      hidden = true;
+      if (c.team === team) window = Math.max(window, smokeWindowLeft(c));
+      else if (smokeWindowLeft(c) > 0) exposed = true;
+    }
+    return { hidden, window, exposed };
+  }
+  // Sight from A to B, against every cloud on the map. `viewerTeam` is whoever is doing the looking:
+  // leave it out and every cloud blinds both ways, which is what a cloud past its window does.
+  function smokeSightBlocked(clouds, ax, az, bx, bz, viewerTeam){
+    if (!SMOKE_READY || !clouds || !clouds.length) return false;
+    const dx = bx - ax, dz = bz - az;
+    if (dx*dx + dz*dz <= SMOKE.near*SMOKE.near) return false;
+    for (const c of clouds){
+      if (smokeSeeThrough(c, viewerTeam)) continue;
+      if (segmentHitsDisc(ax, az, bx, bz, c.x, c.z, smokeRadius(c.age))) return true;
+    }
+    return false;
+  }
   // Movement is earned, not given: a brawler that hits hard up close with a big health pool has to
   // walk slower than a fragile one that fights from range. Speed is derived from hp and reach so the
   // relationship can never drift as we tune, plus a small per-role agility offset (an assassin is
@@ -1322,7 +1467,9 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
+           SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower,
+           smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -2188,6 +2335,30 @@ const heartTex=(function(){
   const t=new THREE.CanvasTexture(c); return t;
 })();
 const heartMat=new THREE.SpriteMaterial({map:heartTex,transparent:true,depthWrite:false});
+// smoke: one soft puff drawn once, then reused by every particle of every cloud. A sprite always
+// faces the camera, so a handful of them read as a volume from the fixed three-quarter view.
+const smokeTex=(function(){
+  const c=document.createElement('canvas'); c.width=c.height=128; const g=c.getContext('2d');
+  const grd=g.createRadialGradient(64,64,2,64,64,62);
+  grd.addColorStop(0,'rgba(255,255,255,0.98)');
+  grd.addColorStop(0.45,'rgba(233,238,243,0.80)');
+  grd.addColorStop(0.78,'rgba(203,212,222,0.34)');
+  grd.addColorStop(1,'rgba(190,200,212,0)');
+  g.fillStyle=grd; g.beginPath(); g.arc(64,64,62,0,Math.PI*2); g.fill();
+  return new THREE.CanvasTexture(c);
+})();
+const smokeMat=new THREE.SpriteMaterial({map:smokeTex,transparent:true,depthWrite:false,opacity:0.85});
+const nadeMat=new THREE.MeshLambertMaterial({color:0x39424e,emissive:0x0e1116});
+const nadeCapMat=new THREE.MeshLambertMaterial({color:0xdfe8ef,emissive:0x5b6772});
+const nadeGeo=new THREE.CylinderGeometry(0.17,0.17,0.42,10);
+const nadeCapGeo=new THREE.CylinderGeometry(0.19,0.19,0.09,10);
+// the ring that shows where a grenade is about to land — the one marker you read mid-fight
+const markGeo=new THREE.RingGeometry(0.86,1,30).rotateX(-Math.PI/2);
+const markMat=new THREE.MeshBasicMaterial({color:0xdfe8ef,transparent:true,opacity:0.75,side:THREE.DoubleSide,depthWrite:false});
+// a cloud's footprint. Built once and shared: a match can hold dozens of clouds, and rebuilding a
+// disc and a ring for each of them piles up geometry nothing ever frees.
+const cloudFloorGeo=new THREE.CircleGeometry(1,32).rotateX(-Math.PI/2);
+const cloudEdgeGeo=new THREE.RingGeometry(0.94,1,32).rotateX(-Math.PI/2);
 const crateBodyGeo=new THREE.BoxGeometry(0.92,0.82,0.92);
 const crateFrameMat=new THREE.MeshLambertMaterial({color:0x8a5a25});
 const crateQMat=new THREE.MeshBasicMaterial({map:qTex,transparent:true,depthWrite:false});
@@ -2226,7 +2397,8 @@ const projMatP=new THREE.MeshBasicMaterial({color:0xfff1b0}), projMatB=new THREE
 // rebuilt by every buildWorld() and must go, even though the particles wearing it use the shared
 // boxGeo — which is exactly why this needs a list rather than a blanket walk.
 const SHARED=new Set([boxGeo, shadowGeo, shadowMat, cubeMat, bagMat, boxMat, outlineMat, turretMat,
-  fireMat, heartMat, crateBodyGeo, crateFrameMat, crateQMat, plankGeo, projGeo, projMatP, projMatB, projMatS]);
+  fireMat, heartMat, crateBodyGeo, crateFrameMat, crateQMat, plankGeo, projGeo, projMatP, projMatB, projMatS,
+  smokeTex, smokeMat, nadeMat, nadeCapMat, nadeGeo, nadeCapGeo, markGeo, markMat, cloudFloorGeo, cloudEdgeGeo]);
 function discard(obj){
   if(!obj) return;
   const done=new Set();
@@ -2241,7 +2413,7 @@ function discard(obj){
 function makeEntity(name,x,z,stake,isPlayer,brawler,acc,team){
   const e={ name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
     ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:Math.random()*0.3,aim:0,id:Math.random(),
-    speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0 };
+    speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0, gadget:C.smokeStart() };
   e.mesh=makeBrawlerMesh(new THREE.Color(brawler.color),isPlayer,brawler.id); e.mesh.position.set(x,0,z); world.add(e.mesh);
   e.stealthT=0; e.dashT=0;
   return e;
@@ -2290,7 +2462,95 @@ function moveEntity(e,mx,mz,dt){
 
 // ---------- line of sight (walls block, bushes hide unless close) ----------
 function losClear(ax,az,bx,bz){ const d=Math.hypot(bx-ax,bz-az), steps=Math.ceil(d/0.3); for(let i=1;i<steps;i++){ const t=i/steps; if(isWall(ax+(bx-ax)*t,az+(bz-az)*t)) return false; } return true; }
-function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(b) && d>2.5 && !(inBush(a)&&cellAt(a.x,a.z)===cellAt(b.x,b.z)&&d<4)) return false; return losClear(a.x,a.z,b.x,b.z); }
+// smoke goes in the same place as the bush rule. Who is looking matters: a fresh cloud is one-way
+// in favour of the team that threw it, so the viewer's team travels with every sight test.
+function smokeAt(ax,az,bx,bz,team){ return !!(G&&G.smokes) && C.smokeSightBlocked(G.smokes,ax,az,bx,bz,team); }
+function smokeBetween(a,b){ return smokeAt(a.x,a.z,b.x,b.z,a.team); }
+function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(b) && d>2.5 && !(inBush(a)&&cellAt(a.x,a.z)===cellAt(b.x,b.z)&&d<4)) return false; if(smokeBetween(a,b)) return false; return losClear(a.x,a.z,b.x,b.z); }
+// something you cannot see is drawn away entirely: in a bush you have not walked up to, or behind
+// a cloud. A wall is different — you always see the brawler standing on the other side of it.
+function obscured(viewer,e){ return !e.isPlayer && !canSee(viewer,e) && (inBush(e) || smokeBetween(viewer,e)); }
+
+// ---------- smoke grenade ----------
+// The gadget in three parts: the canister in the air, the cloud it becomes, and the ring on the
+// ground telling you where it will land. What the cloud *does* is decided in WBCore; this draws it.
+function throwSmoke(e,aimDist){
+  // nothing is thrown during the 3-2-1: the world is not ticking yet, and a canister would hang
+  // in the air until it does
+  if(!C.SMOKE_READY||!e||!e.alive||G.intro>0||!C.canThrowSmoke(e.gadget)) return false;
+  const l=Math.hypot(e.ax,e.az)||1, ux=e.ax/l, uz=e.az/l;
+  const at=C.smokeLanding(e.x,e.z,ux,uz,aimDist);
+  // never let it bloom inside a wall: walk the throw back until it finds open ground
+  let tx=at.x, tz=at.z;
+  if(isWall(tx,tz)){
+    tx=e.x; tz=e.z;
+    for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(nx,nz)){ tx=nx; tz=nz; break; } }
+  }
+  e.gadget=C.smokeThrown(e.gadget);
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(nadeGeo,nadeMat); g.add(body);
+  const cap=new THREE.Mesh(nadeCapGeo,nadeCapMat); cap.position.y=0.24; g.add(cap);
+  const ol=new THREE.Mesh(nadeGeo,outlineMat); ol.scale.setScalar(1.18); g.add(ol);
+  g.position.set(e.x,0.9,e.z); world.add(g);
+  const marker=new THREE.Mesh(markGeo,markMat.clone()); marker.position.set(tx,0.05,tz); world.add(marker);
+  G.nades.push({x:e.x,z:e.z,tx,tz,t:0,owner:e,mesh:g,marker});
+  if(e.isPlayer){ G.smokeUsed=true; snd('box',0.09); floatText(e,C.smokeCoversThrower(at.dist)?'☁ COVER':'☁ SMOKE','heal'); }
+  return true;
+}
+function nadesUpdate(dt){
+  for(let i=G.nades.length-1;i>=0;i--){
+    const n=G.nades[i]; n.t+=dt;
+    const k=Math.min(1,n.t/C.SMOKE.flight);
+    n.mesh.position.set(n.x+(n.tx-n.x)*k, 0.55+Math.sin(Math.PI*k)*2.4, n.z+(n.tz-n.z)*k);
+    n.mesh.rotation.x+=dt*11; n.mesh.rotation.z+=dt*7;
+    const b=C.SMOKE.radius*(0.55+0.45*k)*(1+Math.sin(G.time*14)*0.05);
+    n.marker.scale.set(b,1,b); n.marker.material.opacity=0.25+0.5*k;
+    if(k>=1){ world.remove(n.mesh); world.remove(n.marker); discard(n.marker); G.nades.splice(i,1); spawnSmoke(n.tx,n.tz,n.owner); }
+  }
+}
+function spawnSmoke(x,z,owner){
+  const g=new THREE.Group(); g.position.set(x,0,z); world.add(g);
+  // the footprint on the ground is drawn from the same radius that decides who can see whom, so
+  // what you read on the floor is exactly the circle that blinds people — never an approximation
+  const floor=new THREE.Mesh(cloudFloorGeo,new THREE.MeshBasicMaterial({color:0xeef4f8,transparent:true,opacity:0.3,depthWrite:false}));
+  floor.position.y=0.05; g.add(floor);
+  const edge=new THREE.Mesh(cloudEdgeGeo,new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.5,side:THREE.DoubleSide,depthWrite:false}));
+  edge.position.y=0.055; g.add(edge);
+  const puffs=[];
+  for(let i=0;i<Q.smoke;i++){
+    const sp=new THREE.Sprite(smokeMat.clone()); g.add(sp);
+    puffs.push({ sp, a:i/Q.smoke*Math.PI*2+Math.random()*0.7, rr:i===0?0:0.30+Math.random()*0.48,
+                 y:0.40+Math.random()*0.85, sc:1.05+Math.random()*0.55, spin:0.2+Math.random()*0.45, ph:Math.random()*6.283 });
+  }
+  const cloud={x,z,age:0,owner,team:owner?owner.team:-1,mesh:g,puffs,floor,edge,op:-1};
+  G.smokes.push(cloud);
+  const d=Math.hypot(x-G.player.x,z-G.player.z);
+  snd('cube',0.10*Math.max(0,1-d/26));
+  return cloud;
+}
+function smokesUpdate(dt){
+  for(let i=G.smokes.length-1;i>=0;i--){
+    const c=G.smokes[i]; c.age+=dt;
+    const r=C.smokeRadius(c.age);
+    // the per-cloud materials exist only to carry its own fade: they go when the cloud goes
+    if(r<=0){ world.remove(c.mesh); discard(c.mesh); G.smokes.splice(i,1); continue; }
+    const k=r/C.SMOKE.radius, thick=Math.min(1,k*1.5);
+    // A cloud that is still yours has to be see-through on your screen, or the rule that you can
+    // see out of it would be a lie the moment the camera hits a wall of white. It thickens back up
+    // over half a second when the window closes, so the loss of the advantage is something you
+    // watch happen rather than something you find out about by being shot.
+    const want=(C.smokeSeeThrough(c,G.player.team)?0.22:0.88)*thick;
+    c.op = c.op<0 ? want : c.op+(want-c.op)*Math.min(1,dt*4);
+    c.floor.scale.set(r,1,r); c.floor.material.opacity=0.30*thick;
+    c.edge.scale.set(r,1,r);  c.edge.material.opacity=0.50*thick;
+    for(const p of c.puffs){
+      const a=p.a+G.time*p.spin*0.4;
+      p.sp.position.set(Math.cos(a)*p.rr*r, p.y*(0.55+0.65*k)+Math.sin(G.time*1.6+p.ph)*0.13, Math.sin(a)*p.rr*r);
+      const s=r*p.sc; p.sp.scale.set(s,s,1);
+      p.sp.material.opacity=c.op;
+    }
+  }
+}
 
 // ---------- projectiles ----------
 function spawnProjectile(owner,dirx,dirz,spec,isSuper,delay,origin){
@@ -2371,7 +2631,7 @@ function zonesUpdate(dt){
   for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
     if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; } G.turrets.splice(i,1); continue; }
     if(tu.flash>0){ tu.flash-=dt; tu.mesh.scale.setScalar(1+tu.flash*1.1); } else if(tu.mesh.scale.x!==1) tu.mesh.scale.setScalar(1);
-    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(tu.x,tu.z,t.x,t.z)&&!(inBush(t)&&d>2.5)){ bd=d; best=t; } }
+    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(tu.x,tu.z,t.x,t.z)&&!(inBush(t)&&d>2.5)&&!smokeAt(tu.x,tu.z,t.x,t.z,tu.owner.team)){ bd=d; best=t; } }
     if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.mesh.rotation.y=Math.atan2(dx,dz)+Math.PI; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
   }
 }
@@ -2427,11 +2687,17 @@ function damage(t,dmg,src){
   else if(src&&src.isPlayer){ snd(critique?'crit':'hit',critique?0.11:0.06); if(critique) critFx(); }
   if(t.hp<=0) kill(t,src,'shot');
 }
-function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(Math.random()<C.HEART.boxChance?'heart':'cube',bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
+function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(C.boxDrop(Math.random),bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
 function spawnPickup(kind,x,z,amount,owner){
   const mesh =
       kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
     : kind==='cube'  ? new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5),cubeMat)
+      // a canister lying in the grass, the same object you see flying when someone throws one
+    : kind==='smoke' ? (()=>{ const g=new THREE.Group();
+        const body=new THREE.Mesh(nadeGeo,nadeMat); body.rotation.z=Math.PI/2; g.add(body);
+        const cap=new THREE.Mesh(nadeCapGeo,nadeCapMat); cap.rotation.z=Math.PI/2; cap.position.x=0.24; g.add(cap);
+        const ol=new THREE.Mesh(nadeGeo,outlineMat); ol.rotation.z=Math.PI/2; ol.scale.setScalar(1.2); g.add(ol);
+        g.scale.setScalar(1.25); return g; })()
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
   let px=x+(Math.random()-0.5)*1.4, pz=z+(Math.random()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
   mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
@@ -2450,7 +2716,13 @@ function removePickup(pk){
 }
 function collect(e,pk){
   if(pk.kind==='heart' && e.hp>=maxHp(e)) return;        // full health: walk over it, leave it there
+  if(pk.kind==='smoke' && !C.smokeRoom(e.gadget)) return;// pouch full: leave it for someone else
   if(!removePickup(pk)) return;
+  if(pk.kind==='smoke'){
+    e.gadget=C.smokePicked(e.gadget);
+    if(e.isPlayer){ snd('cube',0.12); floatText(e,'☁ SMOKE +1','heal'); }
+    return;
+  }
   if(pk.kind==='cube'){
     const before=maxHp(e);
     e.cubes=Math.min(C.CUBE.max,e.cubes+pk.amount);
@@ -2493,6 +2765,9 @@ function kill(victim,killer,cause){
     if(killer.isPlayer&&victim.pouch>0){ snd('cash',0.14); feed(`+${money(victim.pouch)} ${G.modeCfg.cashout?'banked':'taken'} from ${victim.name}`,true); floatText(killer,'+'+money(victim.pouch),'heal'); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
   } else if(victim.pouch>0) spawnPickup('cash',victim.x,victim.z,victim.pouch,victim.name);
   if(C.BOT.dropCubesOnKill) for(let i=0;i<victim.cubes;i++) spawnPickup('cube',victim.x,victim.z,1,null);
+  // grenades are kit, not knowledge: whatever was still in the pouch goes back on the ground
+  for(let i=0;i<((victim.gadget&&victim.gadget.charges)||0);i++) spawnPickup('smoke',victim.x,victim.z,1,null);
+  victim.gadget=C.smokeStart();
   // kill() wipes the pouch, so the end screen would always read zero for a dead player. Keep
   // what they were carrying at the moment they went down.
   if(victim.isPlayer) G.lostPouch=victim.pouch;
@@ -2539,7 +2814,7 @@ function respawn(e){
     if(nearest>best){ best=nearest; x=nx; z=nz; if(nearest>14) break; }
   }
   e.x=x; e.z=z; e.vx=0; e.vz=0; e.alive=true; e.hp=maxHp(e); e.ammo=3; e.ammoT=0; e.super=0;
-  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.lastOp=-1;
+  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.lastOp=-1; e.gadget=C.smokeStart();
   e.mesh.visible=true; e.mesh.position.set(x,0,z);
   if(e.isPlayer){ $('respawn').style.display='none'; floatText(e,'RESPAWN','heal'); G.camT.set(x,0,z); }
 }
@@ -2671,6 +2946,8 @@ function botUpdate(b,dt){
       // contact puis restait planté à regarder sa cible sans jamais rappuyer sur la détente.
       b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
+    // smoke is a way out, not an opening: a losing bot drops it on itself and runs, same as you
+    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&Math.random()<dt*1.7) throwSmoke(b,0);
     const sp=b.brawler.super;
     if(b.super>=sp.cost){
       // A super's reach depends on its shape: a burst or a lob flies `range`, a thrown zone
@@ -2752,7 +3029,7 @@ const keys={}; const mouse={x:0,y:0,down:false,held:0};
 const HOLD_REPEAT=0.35;   // how long you must keep the button down before it starts auto-firing
 // ---------- touch (Brawl-style twin sticks) ----------
 if(isTouch){ document.body.classList.add('touch'); document.querySelectorAll('.touchkeys').forEach(e=>e.style.display='block'); }
-const T={move:null,aim:null,superT:null};
+const T={move:null,aim:null,superT:null,gadgetT:null};
 const STICK_R=62;
 function stickAt(el,x,y){ el.style.display='block'; el.style.left=x+'px'; el.style.top=y+'px'; }
 function knob(el,dx,dy){ el.firstElementChild.style.transform=`translate(${dx}px,${dy}px)`; }
@@ -2779,6 +3056,9 @@ $('pauseBtn').addEventListener('click',()=>{ if(G&&G.running&&!G.paused) pause()
 
 addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==='Escape'){ if(G.paused) resume(); else pause(); return; } if(G.paused) return; keys[e.code]=true;
   if(e.code==='Space'){ e.preventDefault(); useSuper(G.player,G.aimDist); } if(e.code==='KeyQ') autoAim();
+  // G is the panic key: the cloud lands on you, so it always covers your exit. Aiming one over a
+  // lane is the deliberate act, and that is what the ☁ button is for.
+  if(e.code==='KeyG'){ e.preventDefault(); throwSmoke(G.player,0); }
   if(e.code==='KeyC') doCashOut();
   if(e.code==='KeyE'){ e.preventDefault(); openWheel(!wheelOpen); }
   if(/^Digit[1-8]$/.test(e.code)){ e.preventDefault(); sendEmote(G.player, C.EMOTE_WHEEL[+e.code.slice(5)-1]); openWheel(false); }
@@ -2801,6 +3081,18 @@ $('superwrap').addEventListener('touchmove',e=>{ if(!T.superT) return; e.prevent
 $('superwrap').addEventListener('touchend',e=>{ const st=T.superT; if(!st) return; T.superT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
   if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; useSuper(G.player,clamp(a.dist,0.2,1)*(G.player.brawler.super.range||G.player.brawler.attack.range)); }
   else useSuper(G.player,G.aimDist); },{passive:true});
+// The quick input always smokes you where you stand; the deliberate one places the cloud.
+// On a mouse that is G versus a click on the button, which throws at the cursor. On a phone it is
+// a tap versus a drag, exactly like the right thumb taps to shoot and drags to aim.
+let gadgetHover=false;
+$('gadget').addEventListener('mouseenter',()=>{ gadgetHover=true; });
+$('gadget').addEventListener('mouseleave',()=>{ gadgetHover=false; });
+$('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) throwSmoke(G.player,clamp(G.aimDist,0,C.SMOKE.range)); });
+$('gadget').addEventListener('touchstart',e=>{ if(!G||!G.running||G.paused) return; e.preventDefault(); e.stopPropagation(); const t=e.changedTouches[0]; T.gadgetT={id:t.identifier,ox:t.clientX,oy:t.clientY,dx:0,dy:0,moved:false}; },{passive:false});
+$('gadget').addEventListener('touchmove',e=>{ if(!T.gadgetT) return; e.preventDefault(); const t=[...e.changedTouches].find(t=>t.identifier===T.gadgetT.id); if(!t) return; const st=T.gadgetT; st.dx=t.clientX-st.ox; st.dy=t.clientY-st.oy; clampStick(st); if(Math.hypot(st.dx,st.dy)>16) st.moved=true; },{passive:false});
+$('gadget').addEventListener('touchend',e=>{ const st=T.gadgetT; if(!st) return; T.gadgetT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
+  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; throwSmoke(G.player,clamp(a.dist,0.2,1)*C.SMOKE.range); }
+  else throwSmoke(G.player,0); },{passive:true});
 addEventListener('mouseup',e=>{ if(e.button===0){ mouse.down=false; mouse.held=0; } });
 addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('blur',()=>pause());
@@ -2824,7 +3116,7 @@ function buildQualityUI(){
   }
   updateQualityUI();
 }
-function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
+function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
 function mouseWorld(){ raycaster.setFromCamera(mouse,camera); const p=new THREE.Vector3(); return raycaster.ray.intersectPlane(groundPlane,p)?p:null; }
 function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(p,p.ax,p.az,d); } }
 
@@ -2844,8 +3136,8 @@ function playerUpdate(dt){
     $('cashAmt').textContent=money(co.net); }
   if(!p.alive) return;
   G.survivedT=G.time;
-  const aiming=(T.aim&&T.aim.moved)||(T.superT&&T.superT.moved);
-  if(aiming){ const st=(T.superT&&T.superT.moved)?T.superT:T.aim; const a=aimFromStick(st); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
+  const drag=(T.superT&&T.superT.moved)?T.superT:(T.gadgetT&&T.gadgetT.moved)?T.gadgetT:(T.aim&&T.aim.moved)?T.aim:null;
+  if(drag){ const a=aimFromStick(drag); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ p.ax=dx/d; p.az=dz/d; } G.aimDist=d; } }
   p.stealthT-=dt;
   if(dashUpdate(p,dt)){ camFollow(p,dt); return; }
@@ -2862,7 +3154,7 @@ function playerUpdate(dt){
 // in place whenever that function returned early (while dashing, or once you were dead).
 function updateAim(dt){
   const A=G.aim, p=G.player; if(!A) return;
-  if(!p.alive||G.paused){ A.g.visible=A.tip.visible=A.ring.visible=A.blob.visible=false; return; }
+  if(!p.alive||G.paused){ A.g.visible=A.tip.visible=A.ring.visible=A.blob.visible=false; if(A.smoke) A.smoke.ring.visible=A.smoke.blob.visible=false; return; }
   {
     const atk=A.atk, sup=A.sup;
     const dragging=(T.aim&&T.aim.moved)||(T.superT&&T.superT.moved);
@@ -2897,12 +3189,29 @@ function updateAim(dt){
       A.ring.material.color.setHex(col); A.blob.material.color.setHex(col);
       A.ring.material.opacity=0.85*strength; A.blob.material.opacity=0.18*strength;
     }
+    // where the grenade would land if you threw it now. Only while you are reaching for it, so the
+    // ground never carries two competing circles at once.
+    const S=A.smoke;
+    if(S){
+      const gd=p.gadget, gdrag=!!(T.gadgetT&&T.gadgetT.moved);
+      const want=C.SMOKE_READY&&C.canThrowSmoke(gd)&&(gdrag||gadgetHover);
+      S.ring.visible=S.blob.visible=want;
+      if(want){
+        const throwDist=gdrag ? clamp(aimFromStick(T.gadgetT).dist,0.2,1)*C.SMOKE.range : clamp(G.aimDist,1,C.SMOKE.range);
+        const at=C.smokeLanding(p.x,p.z,p.ax,p.az,throwDist);
+        const r=C.SMOKE.radius, puls=0.72+Math.sin(G.time*8)*0.16;
+        S.ring.position.set(at.x,0.078,at.z); S.ring.scale.set(r,r,1);
+        S.blob.position.set(at.x,0.072,at.z); S.blob.scale.set(r,r,1);
+        S.ring.material.opacity=0.9*puls; S.blob.material.opacity=0.18*puls;
+      }
+    }
   }
 }
 function camFollow(p,dt){ const lookX=p.x+p.ax*2.2, lookZ=p.z+p.az*2.2; G.camT.x+=(lookX-G.camT.x)*Math.min(1,dt*6); G.camT.z+=(lookZ-G.camT.z)*Math.min(1,dt*6); camera.position.set(G.camT.x+CAM_OFF.x,CAM_OFF.y,G.camT.z+CAM_OFF.z); camera.lookAt(G.camT.x,0,G.camT.z); }
 function commonUpdate(e,dt){
   if(!e.alive) return;
   if(e.ammo<3){ e.ammoT+=dt; if(e.ammoT>=e.brawler.ammoReload){ e.ammo++; e.ammoT=0; } }
+  if(C.SMOKE_READY) e.gadget=C.smokeTick(e.gadget,dt);
   // out-of-combat regeneration, with a visible tick for the player so it never looks broken
   if(G.time-e.lastDamageT>C.HEAL.delay&&e.hp<maxHp(e)){
     const before=e.hp;
@@ -2917,7 +3226,7 @@ function commonUpdate(e,dt){
   if(e.flash>0){ e.flash-=dt; e.mesh.children[0].material.emissive.setHex(0x661111); } else e.mesh.children[0].material.emissive.setHex(0x000000);
   for(let i=G.pickups.length-1;i>=0;i--){ const pk=G.pickups[i]; if(Math.hypot(pk.x-e.x,pk.z-e.z)<0.9) collect(e,pk); }
   // bush fade
-  const hide=inBush(e)&&!e.isPlayer&&!canSee(G.player,e), op=hide?0:(e.stealthT>0?(e.isPlayer?0.35:0.18):(inBush(e)?0.55:1));
+  const hide=obscured(G.player,e), op=hide?0:(e.stealthT>0?(e.isPlayer?0.35:0.18):(inBush(e)?0.55:1));
   if(e.lastOp!==op){ e.lastOp=op; e.mesh.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
 }
 
@@ -3055,7 +3364,7 @@ function hudFast(){
   G.riche=riche;
   for(const e of G.ents){
     if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':'')+'<span class="mn"></span>'; L.appendChild(e.lbl); }
-    const hidden=!e.alive||(inBush(e)&&!e.isPlayer&&!canSee(p,e)); if(hidden){ e.lbl.style.display='none'; continue; }
+    const hidden=!e.alive||obscured(p,e); if(hidden){ e.lbl.style.display='none'; continue; }
     const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ e.lbl.style.display='none'; continue; }
     e.lbl.style.display='block'; e.lbl.style.left=s.sx+'px'; e.lbl.style.top=s.sy+'px';
     const bub=e.lbl.children[0], showing=e.emoteT>0;
@@ -3167,6 +3476,25 @@ function hud(){
   $('leftAmt').textContent = (!team && remaining>standing) ? remaining+' PLAYERS LEFT' : '';
   $('potAmt2').textContent=G.modeCfg.cashout?'':'BANK UP TO '+money(C.teamPayout(G.stake,G.modeCfg,C.RAKE).winner);
   const sp=p.super/p.brawler.super.cost; $('superRing').style.setProperty('--p',(sp*100)+'%'); $('superRing').className=sp>=1?'ready':''; $('superIn').textContent=sp>=1?'SUPER!':Math.floor(sp*100)+'%';
+  // the gadget slot: how many grenades are left, and the ring filling towards the next throw
+  const gEl=$('gadget');
+  if(!C.SMOKE_READY) gEl.style.display='none';
+  else {
+    const gd=p.gadget||C.smokeStart();
+    // the ring is the throw lock only: nothing refills on its own
+    const prog = gd.cd>0 ? 1-gd.cd/C.SMOKE.cooldown : (gd.charges>0 ? 1 : 0);
+    $('gadgetRing').style.setProperty('--p',(clamp(prog,0,1)*100)+'%');
+    gEl.className=(C.canThrowSmoke(gd)?'ready':'wait')+(G.smokeUsed?'':' new');
+    $('gadgetN').textContent=gd.charges;
+    // and what the cloud you are standing in is doing for you: seeing out, blind, or worse
+    const st=$('smokeState'), cv=p.alive?C.smokeCover(G.smokes,p.x,p.z,p.team):{hidden:false,window:0,exposed:false};
+    if(cv.exposed){ st.style.display='block'; st.className='spotted'; st.textContent='SPOTTED · THEIR SMOKE'; }
+    // the window runs from full size, so it starts a bloom longer than advertised: never count
+    // higher than the number the rules panel promises
+    else if(cv.window>0){ st.style.display='block'; st.className='see'; st.textContent='HIDDEN · SEEING '+Math.min(Math.ceil(cv.window),C.SMOKE.oneWay)+'s'; }
+    else if(cv.hidden){ st.style.display='block'; st.className='blind'; st.textContent='HIDDEN · BLIND'; }
+    else st.style.display='none';
+  }
   const z=G.zone, zt=$('zoneTxt'), ph=phases();
   let chaud=false;
   if(G.time<C.GRACE){ zt.textContent='SPAWN PROTECTION '+Math.ceil(C.GRACE-G.time)+'s'; }
@@ -3210,6 +3538,13 @@ function hud(){
   ctx.restore();
   ctx.strokeStyle='#7BE04A'; ctx.lineWidth=2.8; ctx.beginPath(); ctx.arc(px(z.cx),pz(z.cz),zr,0,Math.PI*2); ctx.stroke();
   if(z.shrinking){ ctx.setLineDash([4,4]); ctx.strokeStyle='#ffffffcc'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(px(z.to.cx),pz(z.to.cz),z.to.r*k,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]); }
+  // les nuages dont tu verrais le panache d'ou tu te tiens — jamais toute la carte
+  for(const c of G.smokes){
+    const r=C.smokeRadius(c.age);
+    if(r<=0||Math.hypot(c.x-p.x,c.z-p.z)>26) continue;
+    ctx.fillStyle='rgba(232,239,245,.5)'; ctx.strokeStyle='rgba(255,255,255,.8)'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.arc(px(c.x),pz(c.z),r*k,0,Math.PI*2); ctx.fill(); ctx.stroke();
+  }
   for(const pk of G.pickups) if(pk.kind==='cash'){
     ctx.fillStyle='#ffd23a'; ctx.strokeStyle='#000'; ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.arc(px(pk.x),pz(pk.z),3.4,0,Math.PI*2); ctx.fill(); ctx.stroke();
@@ -3319,7 +3654,7 @@ function startMatch(stake){
   const tier=C.tierFor(stake);
   const seed=(Date.now()^(Math.random()*1e9))>>>0;
   const mode=C.MODES[selMode];
-  G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],camT:new THREE.Vector3(),
+  G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
        dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
@@ -3357,7 +3692,12 @@ function startMatch(stake){
     ring.rotation.x=-Math.PI/2; ring.position.y=0.07; world.add(ring);
     const blob=new THREE.Mesh(new THREE.CircleGeometry(1,28),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.18,side:THREE.DoubleSide,depthWrite:false}));
     blob.rotation.x=-Math.PI/2; blob.position.y=0.065; world.add(blob);
-    G.aim={g,fill,edge,tip,ring,blob,atk,sup};
+    // and a second, cooler circle: where the smoke grenade would land if you threw it right now
+    const sRing=new THREE.Mesh(new THREE.RingGeometry(0.9,1,30),new THREE.MeshBasicMaterial({color:0xdfe8ef,transparent:true,opacity:0.85,side:THREE.DoubleSide,depthWrite:false}));
+    sRing.rotation.x=-Math.PI/2; sRing.position.y=0.078; sRing.visible=false; world.add(sRing);
+    const sBlob=new THREE.Mesh(new THREE.CircleGeometry(1,30),new THREE.MeshBasicMaterial({color:0xdfe8ef,transparent:true,opacity:0.16,side:THREE.DoubleSide,depthWrite:false}));
+    sBlob.rotation.x=-Math.PI/2; sBlob.position.y=0.072; sBlob.visible=false; world.add(sBlob);
+    G.aim={g,fill,edge,tip,ring,blob,atk,sup,smoke:{ring:sRing,blob:sBlob}};
   for(const e of G.ents) e.lives=C.livesFor(mode);
   }
   G.camT.set(G.player.x,0,G.player.z);
@@ -3476,7 +3816,7 @@ const END_LOOK={
 const endClock=t=>Math.floor(t/60)+':'+String(Math.floor(t%60)).padStart(2,'0');
 function endMatch(won,info){
   if(!G.running) return; G.running=false; G.paused=true; mouse.down=false; musicStop(); $('cashout').className=''; G.intro=0; $('intro').className='';
-  if(G.aim){ G.aim.g.visible=G.aim.tip.visible=G.aim.ring.visible=G.aim.blob.visible=false; }
+  if(G.aim){ G.aim.g.visible=G.aim.tip.visible=G.aim.ring.visible=G.aim.blob.visible=false; if(G.aim.smoke) G.aim.smoke.ring.visible=G.aim.smoke.blob.visible=false; }
   $('respawn').style.display='none';
   profile.stats.matches++; profile.stats.kills+=G.player.kills;
   const p=G.player, mode=G.modeCfg, cash=!!mode.cashout;
@@ -3673,7 +4013,10 @@ function loop(now){
   }
   else if(G.running&&!G.paused){
     // the "GO!" lingers for a beat while the match is already running, then clears
-    if(G.intro){ G.intro-=dt; if(G.intro<=-0.7){ G.intro=0; $('intro').className=''; } }
+    // Nothing on screen said where the grenades come from, and a gadget nobody knows about is a
+    // gadget nobody uses. The line waits for the countdown to clear, or it fades unread behind it.
+    if(G.intro){ G.intro-=dt; if(G.intro<=-0.7){ G.intro=0; $('intro').className='';
+      if(C.SMOKE_READY) feed(`☁ Smoke grenades are in the crates — about one in ${Math.round(1/C.BOX_DROP.smoke)}`); } }
     G.time+=dt;
     playerUpdate(dt);
     updateAim(dt);
@@ -3681,7 +4024,7 @@ function loop(now){
     if(!G.player.alive&&G.player.respawnT>0){ $('respawn').textContent='RESPAWNING IN '+Math.ceil(G.player.respawnT)+'  ·  '+G.player.lives+(G.player.lives>1?' LIVES':' LIFE')+' LEFT'; const ally=G.ents.find(e=>e.team===G.player.team&&e.alive)||G.ents.find(e=>e.alive); if(ally) camFollow(ally,dt); }
     for(const e of G.ents) if(!e.isPlayer&&e.alive) botUpdate(e,dt);
     for(const e of G.ents) commonUpdate(e,dt);
-    projUpdate(dt); zonesUpdate(dt); zoneUpdate(dt);
+    projUpdate(dt); zonesUpdate(dt); nadesUpdate(dt); smokesUpdate(dt); zoneUpdate(dt);
     botChatCd-=dt; idleChatCd-=dt;
     if(idleChatCd<=0){ idleChatCd=C.CHAT.idleEvery*(0.6+Math.random()*0.9);
       const alive=G.ents.filter(e=>e.alive&&!e.isPlayer);
