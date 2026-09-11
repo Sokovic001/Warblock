@@ -305,6 +305,10 @@
   #hud>div{position:absolute}
   #vignette{inset:0;box-shadow:inset 0 0 120px 40px rgba(240,70,60,0)}
   #gasWarn{inset:0;box-shadow:inset 0 0 160px 60px rgba(140,230,80,0)}
+  /* Pris dans un nuage qui n'est pas le sien, ou dans le sien une fois la fenetre fermee :
+     l'ecran se charge. Un peu moins dense juste autour de soi, pour garder ses propres pieds. */
+  #smokeFog{inset:0;opacity:0;transition:opacity .4s ease;
+    background:radial-gradient(circle at 50% 54%,rgba(240,246,250,.26) 0%,rgba(226,235,243,.80) 32%,rgba(203,217,230,.96) 100%)}
   #gasArrow{left:50%;top:calc(var(--hu)*13.5);transform:translateX(-50%);display:none;z-index:7;
     background:linear-gradient(180deg,#E5484D,#8A1622);border:calc(var(--hu)*.39) solid #000;border-radius:calc(var(--hu)*1.2);
     padding:calc(var(--hu)*.25) calc(var(--hu)*1.4) calc(var(--hu)*.45);box-shadow:0 calc(var(--hu)*.5) 0 rgba(0,0,0,.55);font-size:calc(var(--hu)*1.7);
@@ -534,7 +538,7 @@
     background:conic-gradient(#6FC3FF var(--p),#131C40 0);box-shadow:0 calc(var(--hu)*.55) 0 rgba(0,0,0,.55)}
   #gadgetIn{position:relative;width:74%;height:74%;border-radius:50%;border:calc(var(--hu)*.32) solid #000;
     display:grid;place-items:center;background:radial-gradient(circle at 34% 28%,#2B3A6E,#111938)}
-  #gadgetIn .ico{font-size:calc(var(--hu)*4.6);line-height:1}
+  #gadgetIn svg{width:66%;height:66%;display:block}
   #gadgetN{position:absolute;right:calc(var(--hu)*-1);bottom:calc(var(--hu)*-1);min-width:calc(var(--hu)*3.6);height:calc(var(--hu)*3.6);
     border-radius:99px;border:calc(var(--hu)*.32) solid #000;background:#131C40;color:#fff;font-size:calc(var(--hu)*1.9);
     display:grid;place-items:center;padding:0 calc(var(--hu)*.5);box-shadow:0 calc(var(--hu)*.35) 0 rgba(0,0,0,.55)}
@@ -744,7 +748,7 @@
   .touch #panel{right:12px;bottom:12px}
   .touch #superwrap{width:104px;height:104px} .touch #superIn{width:76px;height:76px;font-size:11px}
   /* the super is pinned to a pixel size on touch, so the gadget follows it in the same proportion */
-  .touch #gadget{width:70px;height:70px;margin-bottom:6px} .touch #gadgetIn .ico{font-size:25px}
+  .touch #gadget{width:70px;height:70px;margin-bottom:6px}
   .touch #gadgetN{min-width:20px;height:20px;font-size:11px} .touch #smokeState{bottom:118px;font-size:10px}
   .touch .lbl{font-size:9px} .touch .lbl .bar{width:52px;height:9px} .touch .lbl.you .bar{width:66px;height:11px} .touch .lbl .am{width:66px} .touch .lbl .bar b{font-size:8px;line-height:8px}
   .touch .dmg{font-size:14px}
@@ -815,8 +819,8 @@
     <div class="rsec"><h3>Fighting</h3>
       <p><b>Ammo.</b> Three shots, reloading one at a time. Watch the pips above your head.</p>
       <p><b>Super.</b> Charges as you deal damage. Every brawler has a different one — burst, slam, fire pool, heal, stealth, dash, turret.</p>
-      <p><b>Smoke grenade.</b> <b>You start with none.</b> They come out of crates, about one in five, and you can carry two at a time. Die and whatever is left drops on the ground for whoever gets there first. <kbd>G</kbd> throws one <b>at your own feet</b>: the cloud closes over you, whoever was shooting loses you, and you walk out. The ☁ button next to your super throws one where you are pointing instead, to screen off a lane.</p>
-      <p><b>The first 4 seconds are yours.</b> A fresh cloud is one-way: your team looks straight through it while nobody can look back in. The badge above the ☁ button counts it down. After that the cloud blinds everyone alike for the rest of its 7s, you included. Standing in <i>their</i> fresh smoke is the same trap in reverse, and the badge turns red to say so.</p>
+      <p><b>Smoke grenade.</b> <b>You start with none.</b> They come out of crates, about one in five, and you can carry two at a time. Die and whatever is left drops on the ground for whoever gets there first. <b>Tap <kbd>G</kbd></b> and it drops <b>at your own feet</b>: the cloud closes over you, whoever was shooting loses you, and you walk out. <b>Hold <kbd>G</kbd></b> instead, aim, and release: it flies to where you are pointing, to screen off a lane without hiding yourself. The grenade button next to your super does the same, tap or drag.</p>
+      <p><b>The first 4 seconds are yours.</b> A fresh cloud is one-way: your team looks straight through it while nobody can look back in. The badge above the grenade button counts it down. After that the cloud blinds everyone alike for the rest of its 7s, you included, and your screen fogs over until you walk out of it. Anyone else caught inside sees the same white-out from the first second. Standing in <i>their</i> fresh smoke is the same trap in reverse, and the badge turns red to say so.</p>
       <p>Bullets always fly straight through smoke. It buys sight, a retreat or a flank, never a free kill. Nothing refills on its own: once you have thrown your last one, the only way to get another is to break more crates.</p>
       <p><b>Power cubes.</b> Break boxes for cubes: each gives +10% max health and +10% damage, up to 10. Killers inherit them.</p>
       <p><b>Speed is earned.</b> A brawler is only fast if it is fragile or fights from range: Brick (200 hp, reach 4.6) walks at 5.65 while Ghost (95 hp) runs at 8.10. Tanks trade mobility for the right to stand still and win a brawl.</p>
@@ -824,8 +828,8 @@
       <p><b>The gas</b> shrinks the map and damages a percentage of your health per second. The screen edge flashes green while it burns you, and the safe circle is drawn on the minimap.</p>
     </div>
     <div class="rsec"><h3>Controls</h3>
-      <p class="ctl"><kbd>WASD</kbd> move · mouse to aim · <kbd>LMB</kbd> attack · <kbd>RMB</kbd> or <kbd>Space</kbd> super · <kbd>G</kbd> smoke yourself (☁ button to place one) · <kbd>Q</kbd> auto-aim shot · <kbd>C</kbd> cash out · <kbd>Esc</kbd> pause</p>
-      <p class="ctl"><b>Touch:</b> left thumb moves · right thumb taps for a quick auto-aimed shot, or drags to aim and releases to fire · the orange button fires your super (drag it to aim) · tap the ☁ button to smoke yourself and get out, or drag it to place the cloud elsewhere.</p>
+      <p class="ctl"><kbd>WASD</kbd> move · mouse to aim · <kbd>LMB</kbd> attack · <kbd>RMB</kbd> or <kbd>Space</kbd> super · <kbd>G</kbd> tap to smoke yourself, hold to aim and throw · <kbd>Q</kbd> auto-aim shot · <kbd>C</kbd> cash out · <kbd>Esc</kbd> pause</p>
+      <p class="ctl"><b>Touch:</b> left thumb moves · right thumb taps for a quick auto-aimed shot, or drags to aim and releases to fire · the orange button fires your super (drag it to aim) · tap the grenade button to smoke yourself and get out, or drag it to place the cloud elsewhere.</p>
     </div>
   </div>
 </div></section>
@@ -846,7 +850,7 @@
 <section id="game">
   <canvas id="c"></canvas>
   <div id="hud">
-    <div id="vignette"></div><div id="gasWarn"></div>
+    <div id="vignette"></div><div id="gasWarn"></div><div id="smokeFog"></div>
     <div id="gasArrow">GAS! GET TO THE ZONE<div class="tri"></div></div>
     <div id="respawn">RESPAWNING</div>
     <div id="chat">
@@ -869,7 +873,7 @@
     <div id="feed"></div>
     <div id="panel">
       <div id="smokeState"></div>
-      <div id="gadget" title="Smoke grenade (G) — drops at your feet, hides you, and you keep seeing out for 4s"><div id="gadgetRing" style="--p:0%"></div><div id="gadgetIn"><span class="ico">☁</span><b id="gadgetN">0</b></div></div>
+      <div id="gadget" title="Smoke grenade (G) — drops at your feet, hides you, and you keep seeing out for 4s"><div id="gadgetRing" style="--p:0%"></div><div id="gadgetIn"><b id="gadgetN">0</b></div></div>
       <div id="superwrap" title="Super (Space / right click)"><div id="superRing" style="--p:0%"></div><div id="superIn">SUPER</div></div>
     </div>
     <div id="stickL" class="stick"><div class="knob"></div></div>
@@ -1176,7 +1180,13 @@ const WBCore = (function(){
     life: 7,         // seconds the cloud stands
     fade: 1.2,       // the last seconds of `life`, where it thins out and stops blinding anyone
     near: 2.0,       // nose to nose, smoke hides nobody: you always see who is on top of you
+    tapMax: 0.22,    // au-delà de cette durée d'appui, on ne lâche plus : on vise
   };
+  // Une seule touche pour les deux usages. Un appui bref lâche la grenade sur soi pour décrocher ;
+  // maintenir vise, et relâcher envoie le nuage là où l'on pointe. La règle vit ici plutôt que dans
+  // le gestionnaire clavier, pour que le doigt et la souris puissent la partager telle quelle.
+  function smokeHoldAim(held){ return typeof held === 'number' && isFinite(held) && held >= SMOKE.tapMax; }
+  function smokeHoldDist(held, aimDist){ return smokeHoldAim(held) ? smokeThrowDist(aimDist) : 0; }
   // You spawn empty-handed, every life. Nothing about the gadget refills on its own: the only way
   // to hold one is to break a crate and get lucky, which is what keeps clouds rare on the map.
   function smokeStart(){ return { charges: 0, cd: 0 }; }
@@ -1467,7 +1477,7 @@ const WBCore = (function(){
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
-           SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower,
+           SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
 })();
@@ -3055,15 +3065,20 @@ $('pauseBtn').addEventListener('click',()=>{ if(G&&G.running&&!G.paused) pause()
 
 addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==='Escape'){ if(G.paused) resume(); else pause(); return; } if(G.paused) return; keys[e.code]=true;
   if(e.code==='Space'){ e.preventDefault(); useSuper(G.player,G.aimDist); } if(e.code==='KeyQ') autoAim();
-  // G is the panic key: the cloud lands on you, so it always covers your exit. Aiming one over a
-  // lane is the deliberate act, and that is what the ☁ button is for.
-  if(e.code==='KeyG'){ e.preventDefault(); throwSmoke(G.player,0); }
+  // G porte les deux usages : on relache tot et la grenade tombe a ses pieds pour decrocher, on
+  // maintient et on vise, elle part au loin au relachement. Rien ne part sur l'appui lui-meme.
+  if(e.code==='KeyG'){ e.preventDefault(); if(!e.repeat && gDownAt<0) gDownAt=performance.now(); }
   if(e.code==='KeyC') doCashOut();
   if(e.code==='KeyE'){ e.preventDefault(); openWheel(!wheelOpen); }
   if(/^Digit[1-8]$/.test(e.code)){ e.preventDefault(); sendEmote(G.player, C.EMOTE_WHEEL[+e.code.slice(5)-1]); openWheel(false); }
   if(e.code==='Enter'||e.code==='KeyT'){ e.preventDefault(); if(isTouch){ buildQuickChat(); quickChat(!quickOpen); } else openChat(true); }   // one-shot
   if(['KeyW','KeyA','KeyS','KeyD'].includes(e.code)) e.preventDefault(); });
-addEventListener('keyup',e=>{ keys[e.code]=false; });
+addEventListener('keyup',e=>{ keys[e.code]=false;
+  if(e.code==='KeyG'&&gDownAt>=0){
+    const held=(performance.now()-gDownAt)/1000; gDownAt=-1;
+    if(G&&G.running&&!G.paused&&!typing()) throwSmoke(G.player,C.smokeHoldDist(held,clamp(G.aimDist,1,C.SMOKE.range)));
+  }
+});
 canvas.addEventListener('mousemove',e=>{ if(isTouch) return; mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1; });
 canvas.addEventListener('mousedown',e=>{ if(isTouch||!G||!G.running||G.paused) return;
   if(e.button===0){
@@ -3084,6 +3099,9 @@ $('superwrap').addEventListener('touchend',e=>{ const st=T.superT; if(!st) retur
 // On a mouse that is G versus a click on the button, which throws at the cursor. On a phone it is
 // a tap versus a drag, exactly like the right thumb taps to shoot and drags to aim.
 let gadgetHover=false;
+// -1 tant que la touche n'est pas enfoncee ; sinon l'instant de l'appui, pour mesurer la duree.
+let gDownAt=-1;
+const gHold=()=> gDownAt<0 ? 0 : (performance.now()-gDownAt)/1000;
 $('gadget').addEventListener('mouseenter',()=>{ gadgetHover=true; });
 $('gadget').addEventListener('mouseleave',()=>{ gadgetHover=false; });
 $('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) throwSmoke(G.player,clamp(G.aimDist,0,C.SMOKE.range)); });
@@ -3115,7 +3133,7 @@ function buildQualityUI(){
   }
   updateQualityUI();
 }
-function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
+function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; gDownAt=-1; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
 function mouseWorld(){ raycaster.setFromCamera(mouse,camera); const p=new THREE.Vector3(); return raycaster.ray.intersectPlane(groundPlane,p)?p:null; }
 function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(p,p.ax,p.az,d); } }
 
@@ -3193,7 +3211,7 @@ function updateAim(dt){
     const S=A.smoke;
     if(S){
       const gd=p.gadget, gdrag=!!(T.gadgetT&&T.gadgetT.moved);
-      const want=C.SMOKE_READY&&C.canThrowSmoke(gd)&&(gdrag||gadgetHover);
+      const want=C.SMOKE_READY&&C.canThrowSmoke(gd)&&(gdrag||gadgetHover||C.smokeHoldAim(gHold()));
       S.ring.visible=S.blob.visible=want;
       if(want){
         const throwDist=gdrag ? clamp(aimFromStick(T.gadgetT).dist,0.2,1)*C.SMOKE.range : clamp(G.aimDist,1,C.SMOKE.range);
@@ -3353,6 +3371,10 @@ function hudFast(){
   document.body.classList.toggle('lowhp',bas);
 
   $('gasWarn').style.boxShadow=`inset 0 0 160px 60px rgba(120,220,80,${p.gasHurt?0.5:0})`; p.gasHurt=false;
+  // Ce que la fumee ou l'on se tient fait pour nous. Calcule une fois par image et range sur G :
+  // le voile le lit tout de suite, le badge du HUD le relit a sa propre cadence.
+  G.cover = (C.SMOKE_READY&&p.alive) ? C.smokeCover(G.smokes,p.x,p.z,p.team) : {hidden:false,window:0,exposed:false};
+  $('smokeFog').style.opacity = (G.cover.hidden && G.cover.window<=0) ? '1' : '0';
   // labels over heads
   const L=$('labels');
   // Le porteur de couronne : le plus riche encore en lice, et seulement s'il porte quelque chose.
@@ -3454,6 +3476,18 @@ const hudHeart=(on,i)=>`<svg viewBox="0 0 34 32" xmlns="http://www.w3.org/2000/s
     fill="${on?`url(#hg${i})`:'#1A2346'}" stroke="#0B0F1F" stroke-width="3.4" stroke-linejoin="round"/>
   ${on?'<path d="M9 10 q3.2 -4.2 7.2 -4.2" stroke="#FFB0B0" stroke-width="2.4" fill="none" stroke-linecap="round" opacity=".85"/>':''}
 </svg>`;
+// La grenade elle-même plutôt qu'un nuage : le nuage est ce qu'elle produit, pas l'objet qu'on
+// tient. Même facture que les autres icônes du HUD — aplats, contour sombre, 24×24.
+const HUD_NADE=`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="18.8" cy="4.4" r="2.7" fill="none" stroke="#0B0F1F" stroke-width="1.8"/>
+  <path d="M11.6 6.4 16.4 3.6" stroke="#0B0F1F" stroke-width="4" stroke-linecap="round"/>
+  <path d="M11.6 6.4 16.4 3.6" stroke="#C6D2DE" stroke-width="1.9" stroke-linecap="round"/>
+  <rect x="8" y="4.3" width="6.4" height="3.8" rx="1.2" fill="#9AA7B5" stroke="#0B0F1F" stroke-width="1.7"/>
+  <circle cx="11.2" cy="15.1" r="7" fill="#4F6E40" stroke="#0B0F1F" stroke-width="1.8"/>
+  <path d="M4.6 12.6h13.2M4.6 17.6h13.2" stroke="#0B0F1F" stroke-width="1.1" opacity=".5"/>
+  <path d="M7.4 10.9a5.2 5.2 0 0 1 3.4-2.1" stroke="#A8CE96" stroke-width="1.8" fill="none" stroke-linecap="round" opacity=".85"/>
+</svg>`;
+$('gadgetIn').insertAdjacentHTML('afterbegin',HUD_NADE);
 $('killPill').insertAdjacentHTML('afterbegin',HUD_SKULL);
 $('cubePill').insertAdjacentHTML('afterbegin',HUD_CUBE);
 function hud(){
@@ -3486,7 +3520,7 @@ function hud(){
     gEl.className=(C.canThrowSmoke(gd)?'ready':'wait')+(G.smokeUsed?'':' new');
     $('gadgetN').textContent=gd.charges;
     // and what the cloud you are standing in is doing for you: seeing out, blind, or worse
-    const st=$('smokeState'), cv=p.alive?C.smokeCover(G.smokes,p.x,p.z,p.team):{hidden:false,window:0,exposed:false};
+    const st=$('smokeState'), cv=G.cover||{hidden:false,window:0,exposed:false};
     if(cv.exposed){ st.style.display='block'; st.className='spotted'; st.textContent='SPOTTED · THEIR SMOKE'; }
     // the window runs from full size, so it starts a bloom longer than advertised: never count
     // higher than the number the rules panel promises
@@ -3816,6 +3850,7 @@ const endClock=t=>Math.floor(t/60)+':'+String(Math.floor(t%60)).padStart(2,'0');
 function endMatch(won,info){
   if(!G.running) return; G.running=false; G.paused=true; mouse.down=false; musicStop(); $('cashout').className=''; G.intro=0; $('intro').className='';
   if(G.aim){ G.aim.g.visible=G.aim.tip.visible=G.aim.ring.visible=G.aim.blob.visible=false; if(G.aim.smoke) G.aim.smoke.ring.visible=G.aim.smoke.blob.visible=false; }
+  $('smokeFog').style.opacity='0'; gDownAt=-1;
   $('respawn').style.display='none';
   profile.stats.matches++; profile.stats.kills+=G.player.kills;
   const p=G.player, mode=G.modeCfg, cash=!!mode.cashout;

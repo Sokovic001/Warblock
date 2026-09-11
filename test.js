@@ -978,6 +978,30 @@ test('the aim vector does not have to be normalised', () => {
   assert.ok(Math.abs(a.x-b.x) < 1e-9 && Math.abs(a.z-b.z) < 1e-9);
   assert.strictEqual(Math.round(Math.hypot(a.x-3, a.z-4)*1e9)/1e9, 5);
 });
+test('a tap drops it on you, a held key throws it where you aim', () => {
+  const S = C.SMOKE;
+  assert.strictEqual(C.smokeHoldAim(0), false, 'un appui instantane reste un lacher');
+  assert.strictEqual(C.smokeHoldAim(S.tapMax - 0.001), false, 'juste sous le seuil');
+  assert.strictEqual(C.smokeHoldAim(S.tapMax), true, 'pile au seuil, on vise');
+  assert.strictEqual(C.smokeHoldAim(3), true);
+  // un appui bref ignore la visee : la grenade tombe a ses pieds, quoi que pointe le curseur
+  assert.strictEqual(C.smokeHoldDist(0.05, S.range), 0);
+  assert.strictEqual(C.smokeHoldDist(0.05, 7), 0);
+  // maintenu, elle part a la distance visee, bornee comme n'importe quel jet
+  assert.strictEqual(C.smokeHoldDist(1, 6), 6);
+  assert.strictEqual(C.smokeHoldDist(1, 99), S.range);
+  assert.strictEqual(C.smokeHoldDist(1, -4), 0);
+});
+test('an unusable hold duration is read as a tap, never as a wild throw', () => {
+  for (const junk of [undefined, null, NaN, Infinity, 'x'])
+    assert.strictEqual(C.smokeHoldAim(junk), false, String(junk));
+  assert.strictEqual(C.smokeHoldDist(undefined, C.SMOKE.range), 0);
+});
+test('the tap window is short enough to feel instant, long enough to be reachable', () => {
+  assert.ok(C.SMOKE.tapMax >= 0.12 && C.SMOKE.tapMax <= 0.35, `${C.SMOKE.tapMax}s`);
+  // et elle doit rester bien en dessous du vol, sinon viser couterait plus que le trajet
+  assert.ok(C.SMOKE.tapMax < C.SMOKE.flight, 'viser ne doit pas couter plus que le vol lui-meme');
+});
 test('the throw out-ranges the cloud, so you can smoke a spot without standing in it', () => {
   assert.ok(C.SMOKE.range > C.SMOKE.radius * 1.5, 'a grenade you can only drop at your feet is not a gadget');
 });
