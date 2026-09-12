@@ -4,7 +4,7 @@
 'use strict';
 const assert = require('assert');
 const crypto = require('node:crypto');
-const { createApp, checkProfile, makeLimiter } = require('./app');
+const { createApp, checkProfile, checkMatch, makeLimiter, MATCH_MARGE_S } = require('./app');
 const { parseApiKey, base58Encode, base58Decode, jwksUri } = require('./crossmint-key');
 const { identityFromClaims } = require('./auth-crossmint');
 const C = require('./core');
@@ -23,10 +23,30 @@ function test(nom, fn) {
 // ---------- doublures ----------
 function fakeDb(seed = []) {
   const users = seed.map(u => ({ ...u }));
-  let next = users.length + 1;
+  const matches = [];
+  let next = users.length + 1, nextMatch = 1;
   const statsOf = id => ({ matches: 0, wins: 0, kills: 0, best: 0, ...(users.find(u => u.id === id) || {}).stats });
   return {
     users,
+    matches,
+    // La doublure imite les deux CONTRAINTES de la base, dans l'ordre exact de db-pg.js. Elle ne
+    // regarde jamais si un billet existe avant de décider d'en créer un : elle rejoue ce que la
+    // base répondrait à une insertion refusée. C'est aussi la limite connue de cet exercice — rien
+    // ici ne prouve que Postgres se comporte comme ce code-là.
+    async createMatch(m) {
+      const rejeu = matches.find(x => x.user_id === m.userId && x.client_key === m.clientKey);
+      if (rejeu) return { match: rejeu, repris: true };
+      let ouvert = matches.find(x => x.user_id === m.userId && x.status === 'open');
+      if (ouvert && !(new Date(ouvert.expires_at) > m.openedAt)) { ouvert.status = 'expired'; ouvert = null; }
+      if (ouvert) return { match: ouvert, repris: true };
+      const ligne = {
+        id: nextMatch++, user_id: m.userId, mode: m.mode, stake_cents: m.stakeCents, seats: m.seats,
+        brawler: m.brawler, seed_public: m.seedPublic, seed_secret: m.seedSecret,
+        client_key: m.clientKey, status: 'open', opened_at: m.openedAt, expires_at: m.expiresAt,
+      };
+      matches.push(ligne);
+      return { match: ligne, repris: false };
+    },
     async findOrCreate({ authId, email, name, nameKey }) {
       let u = users.find(x => x.auth_id === authId);
       if (!u) {
@@ -74,6 +94,32 @@ const verifOk = async jeton => {
   return { authId: id, email: `${id}@exemple.test`, name: nom || 'Joueur' };
 };
 const appDe = (db, extra = {}) => createApp({ db, verifyToken: verifOk, origins: [ORIGINE], ...extra });
+
+// ---------- de quoi observer le billet ----------
+// Une horloge et une source de graines qui n'ont rien d'aléatoire : les deux sont injectées, donc
+// tout ce que le serveur en tire est comparable à une valeur écrite dans le test. La source lance
+// quand elle est épuisée, ce qui fixe au passage le nombre de tirages : deux par billet, ni plus.
+const GRAINES = Array.from({ length: 40 }, (_, i) => (i + 1) * 101010101);
+const T0 = Date.parse('2026-01-01T12:00:00Z');
+const BRAWLER = Object.keys(C.BRAWLERS)[0];
+const DEMANDE = { mode: 'solo', stake: 0.5, brawler: BRAWLER, clientKey: 'cle-1' };
+
+function bancDeBillet(extra = {}) {
+  const db = fakeDb();
+  const horloge = { t: T0 };
+  let tire = 0;
+  const app = appDe(db, {
+    randomSeed: () => {
+      if (tire >= GRAINES.length) throw new Error('la source de graines est épuisée : trop de tirages');
+      return GRAINES[tire++];
+    },
+    now: () => horloge.t,
+    ...extra,
+  });
+  return { db, app, horloge, tires: () => tire };
+}
+const demander = (app, corps = DEMANDE, opts = {}) =>
+  appel(app, { method: 'POST', path: '/api/match', token: 'ok:u1:Loic', body: corps, ...opts });
 
 // Une autorité de signature de clés d'API, fabriquée sur place. Les vraies clés publiques de
 // Crossmint vivent dans crossmint-key.js et ne servent qu'à vérifier ; pour éprouver aussi le cas
@@ -249,6 +295,262 @@ await test('le pré-vol répond sans exposer la route aux inconnus', async () =>
   assert.strictEqual(ok.head['access-control-allow-origin'], ORIGINE);
   const non = await appel(app, { method: 'OPTIONS', origin: 'https://pirate.example' });
   assert.strictEqual(non.head['access-control-allow-origin'], undefined);
+});
+
+console.log('Le billet de partie');
+test('un mode inconnu est refusé, et le message dit lesquels existent', () => {
+  const { erreurs, champs } = checkMatch({ ...DEMANDE, mode: 'battleroyale' });
+  assert.strictEqual(champs, null);
+  assert.ok(erreurs.some(e => e.includes('Mode inconnu') && e.includes('resurgence')), erreurs.join(' | '));
+});
+test('un mode hérité du prototype ne passe pas pour un mode connu', () => {
+  // `MODES['constructor']` rend une fonction, donc une valeur vraie : c'est le genre de mode
+  // inventé qu'une lecture directe laisserait entrer.
+  for (const faux of ['constructor', 'toString', '__proto__', 'hasOwnProperty'])
+    assert.ok(checkMatch({ ...DEMANDE, mode: faux }).erreurs.length, faux);
+});
+test('une mise absente des tables est refusée, avec les mises possibles', () => {
+  for (const mise of [0.51, 0, -1, 100, 'gratuit', null, undefined, NaN, Infinity]) {
+    const { erreurs } = checkMatch({ ...DEMANDE, stake: mise });
+    assert.ok(erreurs.some(e => e.includes('Mise inconnue')), `${mise} : ${erreurs.join(' | ')}`);
+  }
+  assert.deepStrictEqual(checkMatch({ ...DEMANDE, stake: 10 }).erreurs, []);
+});
+test('un brawler inconnu est refusé', () => {
+  assert.ok(checkMatch({ ...DEMANDE, brawler: 'godzilla' }).erreurs.some(e => e.includes('Brawler inconnu')));
+  assert.deepStrictEqual(checkMatch({ ...DEMANDE, brawler: 'bolt' }).erreurs, []);
+});
+test('sans clé d\'idempotence, la demande est refusée', () => {
+  for (const cle of [undefined, '', '   ', 42, {}, 'x'.repeat(65)])
+    assert.ok(checkMatch({ ...DEMANDE, clientKey: cle }).erreurs.some(e => e.includes('clientKey')), String(cle));
+});
+test('une demande valide ressort en centimes entiers, avec les sièges de WBCore', () => {
+  const { champs, erreurs } = checkMatch(DEMANDE);
+  assert.deepStrictEqual(erreurs, []);
+  assert.strictEqual(champs.stakeCents, 50);
+  assert.ok(Number.isInteger(champs.stakeCents));
+  assert.strictEqual(champs.seats, C.seatsOf(C.MODES.solo));
+  assert.strictEqual(champs.mode.id, 'solo');
+});
+
+await test('sans jeton, rien n\'est écrit : le refus vient avant la base', async () => {
+  const { db, app, tires } = bancDeBillet();
+  const r = await demander(app, DEMANDE, { token: undefined });
+  assert.strictEqual(r.code, 401);
+  assert.strictEqual(db.matches.length, 0, 'un inconnu ne doit pas ouvrir de billet');
+  assert.strictEqual(tires(), 0, 'ni faire tirer une graine');
+});
+await test('le billet livre la graine publique, jamais la secrète', async () => {
+  const { db, app, tires } = bancDeBillet();
+  const r = await demander(app);
+  assert.strictEqual(r.code, 200);
+  assert.strictEqual(r.corps.seed, GRAINES[0]);
+  assert.strictEqual(db.matches[0].seed_public, GRAINES[0]);
+  assert.strictEqual(db.matches[0].seed_secret, GRAINES[1]);
+  assert.strictEqual(tires(), 2, 'deux graines par billet, et deux seulement');
+  const texte = JSON.stringify(r.corps);
+  assert.ok(!texte.includes(String(GRAINES[1])), 'la graine secrète a fui : ' + texte);
+  assert.ok(!/secret/i.test(texte), texte);
+  assert.deepStrictEqual(Object.keys(r.corps).sort(),
+    ['brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'seats', 'seed', 'stakeCents', 'status'].sort());
+});
+await test('une graine, des sièges, un montant envoyés par le client sont sans effet', async () => {
+  const { db, app } = bancDeBillet();
+  const r = await demander(app, {
+    ...DEMANDE, seed: 7, seats: 999, stakeCents: 1, stake_cents: 1, payout_cents: 999999,
+    user_id: 42, status: 'settled',
+  });
+  assert.strictEqual(r.corps.seed, GRAINES[0], 'la graine vient de la source du serveur');
+  assert.strictEqual(r.corps.seats, C.seatsOf(C.MODES.solo));
+  const ligne = db.matches[0];
+  assert.strictEqual(ligne.seed_public, GRAINES[0]);
+  assert.strictEqual(ligne.seats, C.seatsOf(C.MODES.solo));
+  assert.strictEqual(ligne.stake_cents, 50);
+  assert.strictEqual(ligne.status, 'open');
+  assert.strictEqual(ligne.user_id, db.users[0].id, 'l\'utilisateur vient du jeton, pas du corps');
+});
+await test('un corps chargé écrit exactement la même ligne qu\'un corps minimal', async () => {
+  // Le patron déjà éprouvé sur PATCH /api/me : c'est la formulation mécanique de « aucun montant,
+  // aucune graine, aucun statut ne vient du client ». Deux bancs, mêmes horloge et mêmes graines,
+  // même clé du client : les deux lignes doivent être indiscernables.
+  const nu = bancDeBillet(), charge = bancDeBillet();
+  const a = await demander(nu.app, DEMANDE);
+  const b = await demander(charge.app, {
+    ...DEMANDE, seed: 1, seed_public: 2, seed_secret: 3, seats: 999, stake: 0.5, stake_cents: 999,
+    payout_cents: 999, user_id: 999, status: 'settled', opened_at: 0, expires_at: '2099-01-01T00:00:00Z',
+    id: 999,
+  });
+  assert.deepStrictEqual(charge.db.matches, nu.db.matches);
+  assert.deepStrictEqual(b.corps, a.corps);
+});
+await test('deux demandes d\'affilée rendent le même billet', async () => {
+  const { db, app } = bancDeBillet();
+  const un = await demander(app);
+  const deux = await demander(app, { ...DEMANDE, clientKey: 'cle-2', mode: 'trio', stake: 10 });
+  assert.strictEqual(deux.code, 200, 'un billet déjà ouvert n\'est pas une erreur, sinon un onglet fermé enferme le joueur');
+  assert.deepStrictEqual(deux.corps, un.corps, 'le billet ouvert est rendu tel quel, mode et mise compris');
+  assert.strictEqual(db.matches.length, 1);
+});
+await test('la même clé rejouée rend la même réponse et n\'écrit pas de seconde ligne', async () => {
+  const { db, app } = bancDeBillet();
+  const un = await demander(app);
+  const rejeu = await demander(app);
+  assert.deepStrictEqual(rejeu.corps, un.corps);
+  assert.strictEqual(db.matches.length, 1);
+});
+await test('après expiration, une nouvelle demande rend un nouveau billet et une autre graine', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const un = await demander(app);
+  horloge.t = Date.parse(un.corps.expiresAt) + 1;
+  const deux = await demander(app, { ...DEMANDE, clientKey: 'cle-2' });
+  assert.notStrictEqual(deux.corps.id, un.corps.id);
+  assert.notStrictEqual(deux.corps.seed, un.corps.seed);
+  assert.strictEqual(db.matches.length, 2);
+  assert.strictEqual(db.matches[0].status, 'expired', 'le billet périmé libère la place');
+  // En revanche la clé du premier appel, elle, rend toujours ce qu'elle a rendu la première fois :
+  // une demande rejouée à l'identique doit toujours donner la même réponse. Une nouvelle tentative
+  // tire une nouvelle clé, c'est ce qui les distingue.
+  const vieux = await demander(app);
+  assert.strictEqual(vieux.corps.id, un.corps.id);
+  assert.strictEqual(db.matches.length, 2);
+});
+await test('une clé absorbée par un billet ouvert n\'écrit rien, et rouvre après expiration', async () => {
+  // La limite connue de ce montage, écrite comme un test plutôt que passée sous silence. Une clé
+  // qui arrive pendant qu'un billet est déjà ouvert ne laisse aucune ligne : elle reçoit le billet
+  // en cours. Rejouée APRÈS l'expiration de celui-ci, elle en ouvre donc un nouveau. L'idempotence
+  // est totale tant que le billet est ouvert — c'est-à-dire pendant toute la fenêtre où une réponse
+  // perdue peut être rejouée — et pas au-delà.
+  const { db, app, horloge } = bancDeBillet();
+  const un = await demander(app, { ...DEMANDE, clientKey: 'cle-1' });
+  const absorbee = await demander(app, { ...DEMANDE, clientKey: 'cle-2' });
+  assert.strictEqual(absorbee.corps.id, un.corps.id);
+  assert.strictEqual(db.matches.length, 1, 'la clé absorbée ne laisse aucune ligne');
+  horloge.t = Date.parse(un.corps.expiresAt) + 1;
+  const apres = await demander(app, { ...DEMANDE, clientKey: 'cle-2' });
+  assert.notStrictEqual(apres.corps.id, un.corps.id);
+  assert.strictEqual(db.matches.length, 2);
+});
+await test('la mise d\'une table à 0,50 $ est stockée 50, en entier', async () => {
+  const { db, app } = bancDeBillet();
+  const r = await demander(app, { ...DEMANDE, stake: 0.5 });
+  assert.strictEqual(db.matches[0].stake_cents, 50);
+  assert.strictEqual(r.corps.stakeCents, 50);
+  for (const t of C.TIERS) {
+    const banc = bancDeBillet();
+    const x = await demander(banc.app, { ...DEMANDE, stake: t.stake });
+    assert.strictEqual(x.corps.stakeCents, C.toCents(t.stake), String(t.stake));
+    assert.ok(Number.isInteger(x.corps.stakeCents));
+  }
+});
+await test('les sièges du billet sont ceux de WBCore, mode par mode', async () => {
+  for (const id of Object.keys(C.MODES)) {
+    const { db, app } = bancDeBillet();
+    const r = await demander(app, { ...DEMANDE, mode: id });
+    assert.strictEqual(r.corps.seats, C.seatsOf(C.MODES[id]), id);
+    assert.strictEqual(db.matches[0].seats, C.seatsOf(C.MODES[id]), id);
+    assert.strictEqual(db.matches[0].mode, id);
+  }
+});
+await test('l\'expiration part avec le billet, et couvre le sas et tout le plan de zone', async () => {
+  const { app } = bancDeBillet();
+  const r = await demander(app);
+  const gaz = C.zoneTotalS(C.zonePlan(GRAINES[0], C.MODES.solo));
+  assert.strictEqual(Date.parse(r.corps.openedAt), T0);
+  assert.strictEqual(Date.parse(r.corps.expiresAt) - T0, (C.LOBBY.wait + gaz + MATCH_MARGE_S) * 1000);
+  assert.ok(Date.parse(r.corps.expiresAt) - T0 > (C.LOBBY.wait + gaz) * 1000,
+    'une partie que personne ne gagne doit tenir dans le billet');
+  // Elle est calculée sur le plan de ce mode-là, pas sur un délai rond : le gaz rapide de
+  // Resurgence raccourcit le billet d'autant.
+  const rapide = bancDeBillet();
+  const q = await demander(rapide.app, { ...DEMANDE, mode: 'resurgence' });
+  assert.strictEqual(
+    (Date.parse(r.corps.expiresAt) - Date.parse(q.corps.expiresAt)) / 1000,
+    gaz - C.zoneTotalS(C.zonePlan(GRAINES[0], C.MODES.resurgence)));
+});
+await test('la limitation de débit couvre la route qui écrit, sans bloquer le profil', async () => {
+  const { db, app } = bancDeBillet({ limiter: makeLimiter({ max: 2, windowMs: 60_000 }) });
+  const codes = [];
+  for (let i = 0; i < 4; i++) codes.push((await demander(app, { ...DEMANDE, clientKey: 'cle-' + i })).code);
+  assert.deepStrictEqual(codes, [200, 200, 429, 429], codes.join(','));
+  assert.strictEqual(db.matches.length, 1);
+  // Deux seaux distincts : renommer son personnage ne doit pas empêcher de jouer.
+  const p = await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { name: 'Zoe' } });
+  assert.strictEqual(p.code, 200);
+});
+await test('le pré-vol annonce désormais POST', async () => {
+  const { app } = bancDeBillet();
+  const r = await appel(app, { method: 'OPTIONS' });
+  const methodes = String(r.head['access-control-allow-methods']).split(',');
+  assert.ok(methodes.includes('POST'), r.head['access-control-allow-methods']);
+  for (const m of ['GET', 'PATCH', 'OPTIONS']) assert.ok(methodes.includes(m), m);
+});
+await test('la route du billet n\'accepte que POST', async () => {
+  const { app } = bancDeBillet();
+  for (const m of ['GET', 'PATCH', 'DELETE']) {
+    const r = await appel(app, { method: m, path: '/api/match', token: 'ok:u1:Loic' });
+    assert.strictEqual(r.code, 405, m);
+  }
+});
+await test('une graine rendue en chaîne par la base ressort en nombre', async () => {
+  // Le pilote Postgres rend les colonnes `bigint` sous forme de CHAÎNE. Une graine en chaîne est
+  // refusée par `seedFor`, qui repartirait sur la graine locale : le joueur verrait une autre
+  // carte que celle de son billet, sans le moindre message. La doublure imite donc ici le pilote,
+  // et pas l'idée qu'on s'en fait.
+  const db = fakeDb();
+  const brute = db.createMatch;
+  db.createMatch = async m => {
+    const { match, repris } = await brute(m);
+    return { match: { ...match, id: String(match.id), seed_public: String(match.seed_public) }, repris };
+  };
+  const app = appDe(db, { randomSeed: () => GRAINES[0], now: () => T0 });
+  const r = await demander(app);
+  assert.strictEqual(typeof r.corps.seed, 'number');
+  assert.strictEqual(r.corps.seed, GRAINES[0]);
+  assert.strictEqual(C.seedFor(r.corps, 'graine de secours'), GRAINES[0]);
+});
+await test('sans source injectée, la graine tirée par défaut est acceptée par le jeu', async () => {
+  // La source par défaut est celle du système, et elle n'est pas couverte par les tests qui
+  // l'injectent. Le contrat qu'elle doit tenir est celui de `WBCore.seedFor` : hors du domaine des
+  // entiers 32 bits non signés, le jeu repartirait sur sa propre graine sans rien dire.
+  const db = fakeDb();
+  const app = createApp({ db, verifyToken: verifOk, origins: [ORIGINE] });
+  const r = await demander(app);
+  assert.strictEqual(r.code, 200);
+  assert.strictEqual(C.seedFor(r.corps, 'graine de secours'), r.corps.seed);
+});
+await test('une source de graines hors du domaine de makeRng fait échouer, elle n\'écrit pas', async () => {
+  // Une graine flottante, négative ou au-delà de 32 bits serait refusée par `seedFor` côté client :
+  // le jeu repartirait sur sa propre graine sans que personne ne le remarque, et la ligne en base
+  // décrirait une partie que le joueur n'a pas jouée. Mieux vaut un 500 bruyant.
+  for (const mauvaise of [0.5, -1, 2 ** 32, NaN, '7', null]) {
+    const { db, app } = bancDeBillet({ randomSeed: () => mauvaise });
+    const r = await demander(app);
+    assert.strictEqual(r.code, 500, String(mauvaise));
+    assert.strictEqual(db.matches.length, 0, String(mauvaise));
+  }
+});
+await test('un corps illisible sur le billet ne fait pas tomber le serveur', async () => {
+  const { db, app } = bancDeBillet();
+  const r = await demander(app, '{ pas du json');
+  assert.strictEqual(r.code, 400);
+  assert.strictEqual(db.matches.length, 0);
+});
+test('aucune colonne solde, des montants entiers et positifs, aucun update de montant', () => {
+  // Garde textuelle : la doublure de test ne peut pas prouver ce que fait Postgres, mais elle peut
+  // prouver ce qu'on lui a écrit. Les commentaires sont retirés d'abord — ils parlent justement de
+  // l'absence de colonne solde.
+  const fs = require('node:fs'), path = require('node:path');
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
+  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8');
+  assert.ok(!/\b(solde|balance|wallet)\b/i.test(sql), 'une colonne de solde est apparue dans le schéma');
+  const colonnes = sql.match(/^[ \t]*\w*_cents\b.*$/gm) || [];
+  assert.ok(colonnes.length >= 1, 'le schéma doit porter au moins une colonne en centimes');
+  for (const c of colonnes) {
+    assert.match(c, /\binteger\b/, c);
+    assert.match(c, /check\s*\(\s*\w+_cents\s*>=?\s*0\s*\)/, c);
+  }
+  for (const u of pg.match(/update\s+matches\s+set[\s\S]*?where/gi) || [])
+    assert.ok(!/_cents/.test(u), 'un montant de matches est mis à jour : ' + u);
 });
 
 console.log('Le serveur partage les règles du jeu');

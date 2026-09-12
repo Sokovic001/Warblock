@@ -1,8 +1,9 @@
-# API Warblock — phase 01 : comptes et profils
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
-ajoute à côté un petit serveur qui détient les profils. Les deux communiquent par HTTPS, et le jeu
-ne devient dépendant du serveur que pour le profil.
+ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
+parties**. Les deux communiquent par HTTPS, et le jeu ne devient dépendant du serveur que pour le
+profil : sans compte, sans réseau et sans billet, il se lance et se joue exactement comme avant.
 
 **Aucun argent ne circule dans cette phase.** Il n'y a pas de colonne « solde », volontairement :
 en phase 03 le solde sera la somme d'écritures immuables, et une case qu'on écrase serait
@@ -15,20 +16,90 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `GET /api/health` | Répond `{ ok: true }`. Pour la surveillance. |
 | `GET /api/me` | Rend le profil du joueur connecté. **La première connexion crée le compte.** |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
+| `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, expiration. |
 
-Tout le reste répond 404. `GET` et `PATCH` exigent un jeton de session valide.
+Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
+
+## `POST /api/match` — le billet d'une partie
+
+Le serveur possède l'identité de la partie ; le client ne fait que la demander. Il choisit sa table,
+son mode et son brawler, **et rien d'autre**.
+
+```
+POST /api/match      { mode, stake, brawler, clientKey }
+→ 200                { id, mode, stakeCents, seats, brawler, seed, status, openedAt, expiresAt }
+```
+
+- `mode` est une clé de `WBCore.MODES`, `stake` la mise **en dollars telle qu'elle est affichée** et
+  qui doit figurer dans `WBCore.TIERS`, `brawler` une clé de `WBCore.BRAWLERS`. Un mode inconnu, une
+  mise absente des tables ou un brawler inventé donnent un `400` dont le message dit quoi corriger.
+- `clientKey` est tirée par le client. Sans elle, un `POST` dont la réponse se perd est
+  indistinguable d'un `POST` jamais arrivé.
+- Le corps **ne peut pas** porter de graine, de sièges, de montant, de statut ni d'identifiant
+  d'utilisateur. Ces champs ne sont pas refusés, ils sont sans effet : un corps qui les porte tous
+  écrit exactement la même ligne qu'un corps minimal, et un test le vérifie ligne à ligne.
+- La mise est convertie par `WBCore.toCents()` à partir de la table retrouvée, jamais à partir du
+  nombre reçu : une table à 0,50 $ s'enregistre `50`, entier.
+
+**Deux graines, et une seule sort.** La publique détermine la carte et le gaz, part au client sous le
+nom `seed` — celui que `WBCore.seedFor` lit dans le billet. La **secrète** ne quitte jamais le
+serveur. Elle ne sert à rien aujourd'hui puisque rien n'est simulé, et c'est exactement pourquoi elle
+est créée maintenant : le jour où le serveur décidera du contenu des caisses, il faudra que le client
+ne l'ait jamais reçue, et une colonne ajoutée aujourd'hui coûte zéro migration. Les deux sont tirées
+par une source **injectée** dans `createApp`, comme la base et la vérification du jeton, ce qui les
+rend observables en test ; par défaut, le générateur du système.
+
+**L'expiration part avec le billet, pas après.** Elle vaut `LOBBY.wait` + la durée complète du plan de
+zone de ce mode — la borne haute d'une partie que personne ne gagne — + dix minutes de marge. Elle
+est donc plus courte en Resurgence, dont le gaz est rapide. La marge est un compromis assumé : trop
+courte, elle périme la partie d'un joueur dont l'onglet est passé en arrière-plan ; trop longue, elle
+enferme dans un billet mort celui qui a fermé le sien, puisqu'un joueur n'a qu'un billet ouvert à la
+fois. Aucun argent n'est en jeu en 02a : on préfère perdre une ligne de statistique que bloquer un
+joueur.
+
+**L'idempotence est arbitrée par la base, jamais par un `select` préalable** — même doctrine que
+`name_key`. Deux index : `(user_id, client_key)` et un index **partiel** sur `(user_id)
+where status='open'`. On insère, et c'est l'insertion refusée qui apprend ce qui existait déjà.
+Conséquences, toutes testées :
+
+- un second appel rend le billet ouvert existant, avec un `200` et jamais une erreur ;
+- la clé qui a **créé** un billet rend toujours ce billet, même une fois périmé : la ligne porte la
+  clé, donc la réponse ne change plus ;
+- un billet périmé est clos (`status = 'expired'`) au moment où l'insertion bute dessus, ce qui
+  libère la place. Le seul `update` de cette table, et il ne touche qu'un statut, jamais un montant.
+
+Une limite connue, écrite plutôt que passée sous silence : une clé arrivée **pendant** qu'un billet
+était déjà ouvert n'écrit aucune ligne — elle reçoit ce billet-là. Rejouée après l'expiration de
+celui-ci, elle en ouvrira donc un nouveau. L'idempotence est totale tant que le billet est ouvert,
+c'est-à-dire pendant toute la fenêtre où une réponse perdue peut être rejouée, et pas au-delà.
+L'étendre demanderait une table d'alias, pour un cas que le client ne produit pas : chaque tentative
+tire une clé neuve. Un test porte ce comportement, pour qu'il soit constaté et non découvert.
+
+Le code de réponse est `200` même à la création, et non `201` : un code différent selon que le billet
+vient d'être créé ou qu'il existait déjà rendrait le rejeu distinguable du premier appel.
+
+**Un piège du pilote, à connaître avant d'écrire la route suivante.** `pg` rend les colonnes
+`bigint` sous forme de **chaîne** — il ne peut pas garantir qu'elles tiennent dans un nombre
+JavaScript. Une graine en chaîne est refusée par `seedFor`, qui repartirait sur la graine locale :
+le joueur verrait une autre carte que celle de son billet, sans le moindre message. Les deux graines
+sont donc converties en nombre dans `db-pg.js`, et une seconde fois dans la liste blanche de
+`app.js` — deux lignes, parce que la panne est silencieuse. `id` et `user_id` restent des chaînes,
+volontairement : on ne fait que les recopier.
+
+**Aucune colonne solde, ici comme ailleurs.** `stake_cents` est une mise engagée, pas de l'argent
+détenu. La ligne s'insère puis se règlera **une fois** ; en phase 02a rien ne la règle encore.
 
 ## Les fichiers
 
 ```
-app.js              le routeur. Aucune dépendance, tout lui est injecté.
+app.js              le routeur. Rien hors du cœur de Node, tout le reste lui est injecté.
 core.js             charge WBCore depuis index.html
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
-schema.sql          le schéma. Aucune colonne « solde », volontairement.
-test.js             46 tests sans rien installer, 55 avec jose
+schema.sql          le schéma : users, user_stats, matches. Aucune colonne « solde », volontairement.
+test.js             73 tests sans rien installer, 82 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -119,13 +190,15 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 46 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 55 : les 46, plus la chaîne complète de vérification
+node api/test.js          # 73 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 82 : les 73, plus la chaîne complète de vérification
 ```
 
-La base et la vérification du jeton sont injectées dans `createApp()`. Les tests les remplacent par
-des doublures, ce qui couvre sans rien installer l'authentification, la validation, l'unicité du
-pseudo, la limitation de débit, le CORS, la lecture des clés d'API et chaque refus de jeton.
+La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
+`createApp()`. Les tests les remplacent par des doublures, ce qui couvre sans rien installer
+l'authentification, la validation, l'unicité du pseudo, la limitation de débit, le CORS, la lecture
+des clés d'API, chaque refus de jeton, et tout le billet de partie — graines, idempotence,
+expiration comprises. Une horloge injectée fait vieillir un billet sans attendre.
 
 Les neuf tests supplémentaires font tourner la vraie cryptographie : ils génèrent une paire de clés,
 servent un trousseau public en local, et éprouvent ce qu'on ne peut pas demander à un fournisseur —
@@ -192,8 +265,18 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
 
 ## Limites connues, à traiter avant la production
 
-- **La limitation de débit est en mémoire.** Elle freine un joueur sur une instance. Dès qu'il y en
-  aura deux, elle devra passer en magasin partagé.
+- **La limitation de débit est en mémoire, et elle couvre désormais une route qui ÉCRIT en base.**
+  Elle freine un joueur sur une instance ; dès qu'il y en aura deux, chaque instance aura son propre
+  compteur et la limite vaudra le double, puis le triple. C'était déjà vrai en phase 01, où le pire
+  cas était un pseudo martelé ; depuis `POST /api/match`, le pire cas est une table `matches`
+  remplie par quelqu'un qui répartit ses appels. Elle doit passer en magasin partagé avant la
+  production. Les seaux sont séparés par route : renommer son personnage ne consomme pas le droit de
+  demander une partie, et l'inverse non plus.
+- **Aucune base n'a jamais tourné.** L'index unique partiel sur les billets ouverts, la contrainte
+  `name_key` et le comportement de `insert … on conflict do nothing` n'ont été éprouvés que contre
+  la doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
+  comporte autrement, rien ne le signalera avant le premier déploiement. C'est la dette la plus
+  silencieuse du dossier.
 - **Pas encore de journal d'audit.** Chaque changement de pseudo devra être tracé avant que des
   comptes ne valent de l'argent.
 - **Pas de suppression de compte.** À ajouter, avec ce que la juridiction retenue impose de
