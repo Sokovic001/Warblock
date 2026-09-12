@@ -1164,7 +1164,7 @@ const WBCore = (function(){
         matches: entier(s.matches),
         wins: entier(s.wins),
         kills: entier(s.kills),
-        best: cents(entier(s.best) / 100),
+        best: fromCents(entier(s.best)),
       },
     };
   }
@@ -1648,18 +1648,67 @@ const WBCore = (function(){
   }
   const cents = v => Math.round(v*100)/100;          // money is only ever exact to the cent
   function payout(stake,players,rake){ const pot=cents(stake*players), cut=cents(pot*(rake===undefined?RAKE:rake)); return {pot,rake:cut,winner:cents(pot-cut)}; }
-  function teamPayout(stake,mode,rake){ const tp=mode.teamSize*mode.teams; const p=payout(stake,tp,rake); return {...p, players:tp, split:cents(p.winner/mode.teamSize)}; }
+  function teamPayout(stake,mode,rake){ const tp=seatsOf(mode); const p=payout(stake,tp,rake); return {...p, players:tp, split:cents(p.winner/mode.teamSize)}; }
   function tierFor(stake){ return TIERS.find(t=>t.stake===stake)||null; }
   function maxHp(brawler,cubes){ return Math.round(brawler.hp*(1+CUBE.hpBonus*Math.min(cubes,CUBE.max))); }
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
+  // ---- La couche monétaire, en CENTIMES ENTIERS.
+  // Le jeu continue de compter en dollars flottants : `cents()` est appelé partout dans le rendu
+  // et le HUD, et ce chantier-là n'a rien à voir avec celui-ci. Mais tout ce qui traverse le
+  // réseau ou entre en base se compte en entiers, parce qu'un centime perdu dans un flottant est
+  // un centime que personne ne retrouve. Deux unités coexistent donc, et c'est à la frontière
+  // qu'on se trompe : d'où UN SEUL point de conversion, ici, et le suffixe `Cents` sur tout
+  // identifiant qui porte des centimes. `cents()` n'en fait pas partie : il arrondit des dollars
+  // au centime le plus proche, il ne convertit pas d'unité.
+  function toCents(dollars){
+    // Une chaîne, `undefined`, NaN ou l'infini ne sont pas des montants. On rend `null` plutôt
+    // que zéro : un zéro silencieux se paie, une valeur absente se repère.
+    if (typeof dollars !== 'number' || !Number.isFinite(dollars)) return null;
+    return Math.round(dollars * 100);
+  }
+  function fromCents(cts){
+    if (typeof cts !== 'number' || !Number.isFinite(cts)) return null;
+    return Math.round(cts) / 100;
+  }
+  // Le nombre de sièges d'une table. Le calcul se faisait à la volée dans `teamPayout` ; nommé, il
+  // sert aussi de borne au serveur face à une sacoche déclarée par un client.
+  function seatsOf(mode){ return mode.teamSize * mode.teams; }
+  // 20 % de tout paiement, sans exception, en arithmétique ENTIÈRE : multiplier par 0.2 en
+  // flottant rouvrirait exactement la porte qu'on ferme ici.
+  const RAKE_NUM = 1, RAKE_DEN = 5;
+  // L'arrondi VERS LE HAUT est la décision : lui seul garantit une commission strictement positive
+  // dès que le brut l'est. En dollars, `cashoutPayout(0.01)` rendait une commission nulle sur un
+  // brut non nul — la règle du dépôt ne connaît pas d'exception, pas même à un centime.
+  function feeCents(grossCents){ return Math.ceil(grossCents * RAKE_NUM / RAKE_DEN); }
+  function potCents(stakeCents, seats){ return stakeCents * seats; }
+  function payoutCents(stakeCents, mode){
+    const seats = seatsOf(mode);
+    const pot = potCents(stakeCents, seats);
+    const fee = feeCents(pot);
+    const winnerCents = pot - fee;
+    // Le pot se partage sans reste sur les quatre tables et les cinq modes, un test le tient
+    // depuis longtemps. Le plancher est là pour que le résultat reste entier si un mode futur
+    // cassait la divisibilité : le test tombera avant que l'argent ne parte.
+    return { seats, potCents: pot, feeCents: fee, winnerCents, splitCents: Math.floor(winnerCents / mode.teamSize) };
+  }
+  function cashoutCents(bucketCents){
+    const grossCents = Math.max(0, Math.trunc(Number(bucketCents) || 0));
+    const fee = feeCents(grossCents);
+    return { grossCents, feeCents: fee, netCents: grossCents - fee };
+  }
+  // Ce qu'une sacoche peut valoir, au plus. Ce n'est pas un décret : l'argent se conserve — la
+  // sacoche naît à la mise, se transfère entière au tueur, tombe au sol quand il n'y en a pas, et
+  // l'encaissement la met à zéro. Personne ne peut donc porter plus que tout l'argent de la table.
+  function purseBound(stakeCents, seats){ return { minCents: 0, maxCents: stakeCents * seats }; }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
            authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
-           SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
+           SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
+           toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
 /*CORE-END*/

@@ -237,6 +237,140 @@ test('gross always equals fee + net, fee never exceeds the bucket', () => {
   for (const b of [0,1,5,7,50,99,1000,12345]){ const co = C.cashoutPayout(b); assert.strictEqual(co.fee+co.net, co.gross, String(b)); assert.ok(co.fee>=0 && co.fee<=co.gross); assert.ok(co.net>=0); } });
 test('banking a single $5 stake returns $4', () => { const co = C.cashoutPayout(5); assert.strictEqual(co.fee, 1); assert.strictEqual(co.net, 4); });
 
+console.log('Monnaie en centimes entiers');
+test('toCents est le seul passage des dollars aux centimes, et refuse ce qui n\'est pas un montant', () => {
+  assert.strictEqual(C.toCents(0.5), 50);
+  assert.strictEqual(C.toCents(0.1), 10);
+  assert.strictEqual(C.toCents(10), 1000);
+  assert.strictEqual(C.toCents(0), 0);
+  // Rendre zéro sur une saisie absurde reviendrait à payer zéro sans rien dire. On rend null.
+  for (const v of [NaN, Infinity, -Infinity, '5', '', undefined, null, {}, [], true])
+    assert.strictEqual(C.toCents(v), null, `${JSON.stringify(v)} n'est pas un montant`);
+  for (const d of [0.005, 0.014, 1/3, 7.355, 1234.567])
+    assert.ok(Number.isInteger(C.toCents(d)), `${d} doit rendre un entier, jamais un dollar déguisé`);
+});
+test('fromCents fait le retour, et la conversion tient dans les deux sens', () => {
+  assert.strictEqual(C.fromCents(50), 0.5);
+  assert.strictEqual(C.fromCents(1), 0.01);
+  assert.strictEqual(C.fromCents(123456), 1234.56);
+  for (const c of [0, 1, 7, 50, 99, 1000, 123456]) assert.strictEqual(C.toCents(C.fromCents(c)), c, String(c));
+  assert.strictEqual(C.fromCents('50'), null);
+});
+test('sur 0..1 000 000 centimes : commission + net = brut, et les trois sont entiers', () => {
+  // Un suffixe Cents sur un nom de variable n'attrape pas une fuite d'un centime. Une boucle si.
+  for (let g = 0; g <= 1000000; g++){
+    const co = C.cashoutCents(g);
+    if (co.feeCents + co.netCents !== co.grossCents) assert.fail(`${g} : ${co.feeCents} + ${co.netCents} ≠ ${co.grossCents}`);
+    if (!Number.isInteger(co.grossCents) || !Number.isInteger(co.feeCents) || !Number.isInteger(co.netCents)) assert.fail(`${g} rend un flottant`);
+    if (g > 0 && co.feeCents <= 0) assert.fail(`${g} centimes encaissés sans commission`);
+    if (co.feeCents > co.grossCents || co.netCents < 0) assert.fail(`${g} : la commission dépasse le brut`);
+  }
+});
+test('la commission est strictement positive dès que le brut l\'est — 1, 2, 3 et 4 centimes', () => {
+  // L'historique le dit : un arrondi a déjà effacé la commission sur la table à 0,50 $. En
+  // dollars, cashoutPayout(0.01) rend encore {gross:0.01, fee:0, net:0.01} — 20 % de tout
+  // paiement, sauf celui-là. L'arrondi vers le haut ferme la porte pour de bon.
+  for (const g of [1, 2, 3, 4]){
+    const co = C.cashoutCents(g);
+    assert.strictEqual(co.feeCents, 1, `${g} centime(s) doivent laisser au moins un centime à la maison`);
+    assert.strictEqual(co.netCents, g - 1, `${g} centime(s)`);
+  }
+  assert.strictEqual(C.cashoutCents(5).feeCents, 1);
+  assert.strictEqual(C.cashoutCents(6).feeCents, 2);
+  // Zéro reste zéro : la commission naît du paiement, pas du geste.
+  assert.deepStrictEqual(C.cashoutCents(0), { grossCents: 0, feeCents: 0, netCents: 0 });
+  assert.strictEqual(C.RAKE_NUM / C.RAKE_DEN, C.RAKE, 'le taux entier doit être le même taux');
+});
+test('couture : centimes entiers et dollars donnent le même centime, table par table', () => {
+  // Toute sacoche atteignable est un multiple de la mise, de zéro à tous les sièges de la table.
+  // Tant que ce test passe, les deux mondes ne peuvent pas diverger en silence pendant la phase.
+  for (const m of Object.values(C.MODES)) for (const t of C.TIERS){
+    const stakeCents = C.toCents(t.stake);
+    for (let k = 0; k <= C.seatsOf(m); k++){
+      const ent = C.cashoutCents(stakeCents * k), dol = C.cashoutPayout(C.cents(t.stake * k));
+      const oú = `${m.id} $${t.stake} × ${k}`;
+      assert.strictEqual(ent.grossCents, C.toCents(dol.gross), `${oú} : brut`);
+      assert.strictEqual(ent.feeCents, C.toCents(dol.fee), `${oú} : commission`);
+      assert.strictEqual(ent.netCents, C.toCents(dol.net), `${oú} : net`);
+    }
+  }
+});
+test('seatsOf nomme le calcul que teamPayout faisait à la volée', () => {
+  for (const m of Object.values(C.MODES)) assert.strictEqual(C.seatsOf(m), C.teamPayout(1, m, C.RAKE).players, m.id);
+  assert.strictEqual(C.seatsOf(C.MODES.solo), 20);
+  assert.strictEqual(C.seatsOf(C.MODES.resurgence), 50);
+});
+test('payoutCents est d\'accord avec teamPayout, et le pot se partage sans reste', () => {
+  for (const m of Object.values(C.MODES)) for (const t of C.TIERS){
+    const p = C.payoutCents(C.toCents(t.stake), m), d = C.teamPayout(t.stake, m, C.RAKE);
+    const oú = `${m.id} $${t.stake}`;
+    assert.strictEqual(p.seats, d.players, `${oú} : sièges`);
+    assert.strictEqual(p.potCents, C.toCents(d.pot), `${oú} : pot`);
+    assert.strictEqual(p.feeCents, C.toCents(d.rake), `${oú} : commission`);
+    assert.strictEqual(p.winnerCents, C.toCents(d.winner), `${oú} : gain`);
+    assert.strictEqual(p.splitCents, C.toCents(d.split), `${oú} : part`);
+    assert.strictEqual(p.splitCents * m.teamSize, p.winnerCents, `${oú} : le partage laisse un reste`);
+    for (const v of [p.potCents, p.feeCents, p.winnerCents, p.splitCents]) assert.ok(Number.isInteger(v), `${oú} : ${v} n'est pas entier`);
+  }
+});
+test('l\'argent se conserve à chaque transfert, et c\'est cela qui prouve purseBound', () => {
+  // Modèle pur des quatre transferts du jeu, rejoués sans rien refactorer dedans : la sacoche naît
+  // à la mise, passe entière au tueur, tombe au sol quand il n'y a personne à créditer, et
+  // l'encaissement la remet à zéro. Si la somme tient à chaque étape, alors aucune sacoche ne peut
+  // dépasser tout l'argent de la table — ce que purseBound se contente d'écrire.
+  const mode = C.MODES.resurgence, seats = C.seatsOf(mode), stakeCents = C.toCents(0.5);
+  const totalCents = stakeCents * seats, borne = C.purseBound(stakeCents, seats);
+  assert.deepStrictEqual(borne, { minCents: 0, maxCents: totalCents });
+  const ents = Array.from({ length: seats }, () => ({ pouchCents: stakeCents, alive: true }));
+  let solCents = 0, encaisseCents = 0, maxVue = stakeCents;
+  const verifie = quoi => {
+    const vivantes = ents.reduce((a, e) => a + (e.alive ? e.pouchCents : 0), 0);
+    assert.strictEqual(vivantes + solCents + encaisseCents, totalCents, `${quoi} : de l'argent apparaît ou disparaît`);
+    for (const e of ents){
+      assert.ok(e.pouchCents >= borne.minCents && e.pouchCents <= borne.maxCents, `${quoi} : sacoche hors borne (${e.pouchCents})`);
+      if (e.pouchCents > maxVue) maxVue = e.pouchCents;
+    }
+  };
+  verifie('mise');
+  const rng = C.makeRng(7);
+  for (let tour = 0; tour < 500; tour++){
+    const vivants = ents.filter(e => e.alive);
+    if (vivants.length < 2) break;
+    const geste = rng(), i = Math.floor(rng() * vivants.length), victime = vivants[i];
+    if (geste < 0.55){
+      const tueur = vivants[(i + 1) % vivants.length];
+      tueur.pouchCents += victime.pouchCents;          // bucketAfterKill : la sacoche passe entière
+      victime.pouchCents = 0; victime.alive = false;
+      verifie('kill');
+    } else if (geste < 0.72){
+      solCents += victime.pouchCents;                  // mort par le gaz : personne à créditer
+      victime.pouchCents = 0; victime.alive = false;
+      verifie('gaz');
+    } else if (geste < 0.88){
+      victime.pouchCents += solCents; solCents = 0;    // ramassage : zéro kill, et pourtant riche
+      verifie('ramassage');
+    } else {
+      encaisseCents += victime.pouchCents;             // encaissement : brut, la commission comprise
+      victime.pouchCents = 0; victime.alive = false;
+      verifie('encaissement');
+    }
+  }
+  // Sans cela le test passerait sur une partie où personne ne prend jamais rien à personne.
+  assert.ok(maxVue > stakeCents, 'la simulation n\'a jamais fait grossir une sacoche');
+});
+test('garde textuelle : dans le bloc CORE, seuls toCents et fromCents changent d\'unité', () => {
+  const suspectes = core.split('\n').map(l => l.trim()).filter(l => /[*\/]\s*100\b|\b100\s*[*\/]/.test(l));
+  const autorisees = [
+    'return Math.round(dollars * 100);',                  // toCents
+    'return Math.round(cts) / 100;',                      // fromCents
+    'const cents = v => Math.round(v*100)/100;',          // arrondit des dollars, ne change pas d'unité
+    'const v = SPEED.base - (hp-SPEED.hpRef)/100',        // ce n'est pas de l'argent : c'est la vitesse
+  ];
+  for (const l of suspectes)
+    assert.ok(autorisees.some(a => l.startsWith(a)), `conversion hors de toCents/fromCents : ${l}`);
+  assert.ok(/best: fromCents\(entier\(s\.best\)\)/.test(core), 'applyAccount doit passer par fromCents, pas diviser par 100 à la main');
+});
+
 console.log('Simulated population');
 test('online count follows a day/night curve peaking in the evening', () => {
   const at = h => C.onlineTotal(new Date(2026,7,26,h,0,0));
