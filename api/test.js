@@ -21,6 +21,25 @@ function test(nom, fn) {
 }
 
 // ---------- doublures ----------
+// Les colonnes `integer` de `matches`, et la largeur qu'elles ont vraiment. La doublure était un
+// tableau JS sans types : elle avalait n'importe quelle magnitude, si bien qu'aucun test ne pouvait
+// voir un rapport qui fait déborder Postgres — lequel lève `22003`, rend un 500 et laisse la ligne
+// `open`, enfermant le joueur dans un billet mort. Elle refuse maintenant ce que la base refuserait.
+const PG_INT4_MAX = 2147483647, PG_INT4_MIN = -2147483648;
+const COLONNES_INT4 = ['stake_cents', 'seats', 'team_size', 'gross_cents', 'fee_cents', 'net_cents',
+                       'purse_cents', 'declared_net_cents', 'ecart_cents',
+                       'seconds', 'kills', 'deaths', 'rank', 'cubes', 'damage'];
+function verifierInt4(valeurs) {
+  for (const c of COLONNES_INT4) {
+    const v = valeurs[c];
+    if (v === undefined || v === null) continue;
+    if (!Number.isInteger(v) || v > PG_INT4_MAX || v < PG_INT4_MIN) {
+      const e = new Error(`value "${v}" is out of range for type integer`);
+      e.code = '22003';
+      throw e;
+    }
+  }
+}
 function fakeDb(seed = []) {
   const users = seed.map(u => ({ ...u }));
   const matches = [];
@@ -53,9 +72,11 @@ function fakeDb(seed = []) {
       if (ouvert) return { match: ouvert, repris: true };
       const ligne = {
         id: nextMatch++, user_id: m.userId, mode: m.mode, stake_cents: m.stakeCents, seats: m.seats,
+        team_size: m.teamSize,
         brawler: m.brawler, seed_public: m.seedPublic, seed_secret: m.seedSecret,
         client_key: m.clientKey, status: 'open', opened_at: m.openedAt, expires_at: m.expiresAt,
       };
+      verifierInt4(ligne);
       matches.push(ligne);
       return { match: ligne, repris: false };
     },
@@ -72,13 +93,17 @@ function fakeDb(seed = []) {
       // a été écrite la première fois.
       if (m.status !== 'open' || (m.net_cents !== undefined && m.net_cents !== null))
         return { match: m, deja: true };
-      Object.assign(m, {
+      const ecriture = {
         status: r.status, settled_at: r.settledAt, issue: r.issue, controle: r.controle, motif: r.motif,
         gross_cents: r.grossCents, fee_cents: r.feeCents, net_cents: r.netCents, purse_cents: r.purseCents,
         declared_net_cents: r.declaredNetCents, ecart_cents: r.ecartCents,
         seconds: r.seconds, kills: r.kills, deaths: r.deaths, rank: r.rank,
         cubes: r.cubes, damage: r.damage, cashed_out: r.cashedOut,
-      });
+      };
+      // Vérifié AVANT d'écrire : une ligne à demi réglée par une écriture qui échoue en plein
+      // milieu serait pire que la panne qu'on cherche à reproduire.
+      verifierInt4(ecriture);
+      Object.assign(m, ecriture);
       return { match: m, deja: false };
     },
     async expireMatches({ avant }) {
@@ -356,6 +381,17 @@ test('une mise absente des tables est refusée, avec les mises possibles', () =>
   }
   assert.deepStrictEqual(checkMatch({ ...DEMANDE, stake: 10 }).erreurs, []);
 });
+test('checkMatch délègue la recherche de table à WBCore.tierFor', () => {
+  // L'API recopiait le corps de `tierFor` — `TIERS.find(t => t.stake === mise)`. Comparer le
+  // résultat à `C.TIERS` ne prouverait rien : c'est la FONCTION qu'on ne veut pas voir recopiée,
+  // parce que le jour où la recherche de table change, le lobby affichera une table que le serveur
+  // refusera, sans un mot au joueur.
+  for (const mise of [...C.TIERS.map(t => t.stake), 0, 7, -1, NaN, '10', 'abc', Infinity, null])
+    assert.strictEqual(
+      checkMatch({ ...DEMANDE, stake: mise }).erreurs.some(e => e.includes('Mise inconnue')),
+      C.tierFor(Number(mise)) === null,
+      String(mise));
+});
 test('un brawler inconnu est refusé', () => {
   assert.ok(checkMatch({ ...DEMANDE, brawler: 'godzilla' }).erreurs.some(e => e.includes('Brawler inconnu')));
   assert.deepStrictEqual(checkMatch({ ...DEMANDE, brawler: 'bolt' }).erreurs, []);
@@ -392,7 +428,7 @@ await test('le billet livre la graine publique, jamais la secrète', async () =>
   assert.ok(!texte.includes(String(GRAINES[1])), 'la graine secrète a fui : ' + texte);
   assert.ok(!/secret/i.test(texte), texte);
   assert.deepStrictEqual(Object.keys(r.corps).sort(),
-    ['brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'seats', 'seed', 'stakeCents', 'status'].sort());
+    ['brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'seats', 'teamSize', 'seed', 'stakeCents', 'status'].sort());
 });
 await test('une graine, des sièges, un montant envoyés par le client sont sans effet', async () => {
   const { db, app } = bancDeBillet();
@@ -633,16 +669,21 @@ const rendre = (app, id, rapport, opts = {}) =>
 const CLES_REGLEMENT = ['matchId', 'status', 'issue', 'controle', 'motif', 'grossCents', 'feeCents',
                         'netCents', 'purseCents', 'declaredNetCents', 'ecartCents', 'settledAt'];
 
-await test('le résultat ferme la ligne et rend un net RECALCULÉ, jamais celui du client', async () => {
+await test('le résultat ferme la ligne et rend un net ENCADRÉ, jamais celui du client', async () => {
   const { db, app, horloge } = bancDeBillet();
   const b = await demander(app);
-  const r = RAPPORT({ seconds: 154, rank: 1, kills: 19, declaredNetCents: 9_999_999 });
+  // Sacoche de toute la table, et un net annoncé délirant : le serveur paie la sacoche bornée,
+  // jamais le nombre annoncé. Le plafond atteint est exactement celui que le lobby affiche.
+  const max = C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents;
+  const r = RAPPORT({ seconds: 154, rank: 1, kills: 19, purseCents: max, declaredNetCents: 9_999_999 });
   horloge.t = ARRIVEE(r);
   const rep = await rendre(app, b.corps.id, r);
   assert.strictEqual(rep.code, 200);
   assert.strictEqual(rep.corps.status, 'settled');
   assert.strictEqual(rep.corps.issue, 'victoire');
-  assert.strictEqual(rep.corps.netCents, C.payoutCents(50, C.MODES.solo).splitCents);
+  assert.strictEqual(rep.corps.netCents, C.cashoutCents(max).netCents);
+  assert.strictEqual(rep.corps.netCents, C.payoutCents(50, C.MODES.solo).winnerCents,
+    'le forfait du lobby reste le plafond, et il est atteint exactement');
   assert.ok(rep.corps.feeCents > 0, 'la commission ne tombe jamais à zéro');
   assert.strictEqual(rep.corps.feeCents + rep.corps.netCents, rep.corps.grossCents);
   assert.strictEqual(rep.corps.declaredNetCents, 9_999_999);
@@ -697,7 +738,7 @@ await test('un résultat qui arrive en retard, mais avant expiration, est accept
   // Si couper le wifi effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
   const { db, app, horloge } = bancDeBillet();
   const b = await demander(app);
-  const r = RAPPORT({ seconds: 154, rank: 1 });
+  const r = RAPPORT({ seconds: 154, rank: 1, purseCents: 250 });
   horloge.t = Date.parse(b.corps.expiresAt) - 1000;
   const rep = await rendre(app, b.corps.id, r);
   assert.strictEqual(rep.corps.status, 'settled', rep.corps.motif);
@@ -770,6 +811,106 @@ await test('en Resurgence le montant est encadré, pas recalculé — et l\'éno
   assert.strictEqual(ko.corps.netCents, 0);
   assert.strictEqual(ko.corps.purseCents, C.purseBound(b2.corps.stakeCents, b2.corps.seats).maxCents,
     'la sacoche retenue est ramenée à la borne, même sur un refus');
+});
+await test('un rapport hors du domaine d\'un integer est refusé en 400, et le billet reste réglable', async () => {
+  // LA PANNE, DE BOUT EN BOUT. `deaths`, `damage` et `declaredNetCents` n'avaient aucune borne
+  // haute : un rapport parfaitement « valide » traversait toute la validation jusqu'à des colonnes
+  // `integer`, Postgres levait `22003`, la route rendait 500 — et la ligne restait `open`. Comme un
+  // joueur n'a qu'un billet ouvert à la fois, il était enfermé dans un billet mort pendant les
+  // treize minutes de l'expiration, et sa partie n'était jamais enregistrée.
+  //
+  // Ce n'est pas le 400 qui compte dans ce test, c'est la SECONDE moitié : la ligne n'est pas
+  // piégée, et un rapport honnête la règle juste après.
+  for (const champ of ['deaths', 'damage', 'declaredNetCents']) {
+    const { db, app, horloge } = bancDeBillet();
+    const b = await demander(app);
+    const r = { ...RAPPORT({ seconds: 60, rank: 1, purseCents: 300 }), [champ]: 3_000_000_000 };
+    horloge.t = ARRIVEE(r);
+    const ko = await rendre(app, b.corps.id, r);
+    assert.strictEqual(ko.code, 400, `${champ} : attendu un refus motivé, pas un 500 muet`);
+    assert.ok(ko.corps.erreurs.some(e => e.code === 'borne' && e.field === champ),
+      `${champ} : ${JSON.stringify(ko.corps.erreurs)}`);
+    assert.strictEqual(db.matches[0].status, 'open', `${champ} : la ligne a été close par un refus d'analyse`);
+
+    const bon = RAPPORT({ seconds: 60, rank: 1, purseCents: 300 });
+    horloge.t = ARRIVEE(bon);
+    const ok = await rendre(app, b.corps.id, bon);
+    assert.strictEqual(ok.code, 200, `${champ} : le billet est resté piégé`);
+    assert.strictEqual(ok.corps.status, 'settled', `${champ} : ${ok.corps.motif}`);
+  }
+});
+await test('la doublure refuse désormais ce que Postgres refuserait', async () => {
+  // Sans cette garde, la doublure était plus permissive que la base, et aucun test ne pouvait voir
+  // la classe de bug ci-dessus. On l'éprouve directement : c'est la seule façon de prouver que la
+  // doublure ment comme il faut.
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  await assert.rejects(() => db.settleMatch({
+    matchId: b.corps.id, userId: db.users[0].id, status: 'settled', settledAt: new Date(T0),
+    issue: 'defaite', controle: null, motif: null,
+    grossCents: 0, feeCents: 0, netCents: 0, purseCents: 0,
+    declaredNetCents: 3_000_000_000, ecartCents: 3_000_000_000,
+    seconds: 60, kills: 0, deaths: 0, rank: 5, cubes: 0, damage: 0, cashedOut: false,
+  }), e => e.code === '22003');
+  assert.strictEqual(db.matches[0].status, 'open', 'une écriture refusée ne doit rien laisser derrière');
+  assert.strictEqual(db.matches[0].net_cents, undefined);
+});
+test('tout champ du rapport qui finit dans une colonne integer porte sa borne', () => {
+  // La garde qui attrape la PROCHAINE colonne ajoutée sans borne. Elle relie les deux moitiés du
+  // dossier : le schéma déclare la largeur, WBCore la fait respecter, et rien entre les deux ne
+  // permet d'oublier l'un des deux côtés.
+  const fs = require('node:fs'), path = require('node:path');
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
+  const serpent = n => n.replace(/[A-Z]/g, c => '_' + c.toLowerCase());
+  let vus = 0;
+  for (const [nom, regle] of Object.entries(C.REPORT_FIELDS)) {
+    if (regle.kind !== 'entier') continue;
+    const col = serpent(nom);
+    const decl = (sql.match(new RegExp('^[ \\t]*' + col + '\\b.*$', 'm')) || [])[0];
+    assert.ok(decl, `« ${nom} » part en base mais la colonne ${col} n'existe pas`);
+    assert.match(decl, /\binteger\b/, decl);
+    assert.ok(Number.isInteger(regle.max) && regle.max <= 2147483647,
+      `« ${nom} » écrit dans un integer sans borne haute : max = ${regle.max}`);
+    vus++;
+  }
+  assert.ok(vus >= 8, `seulement ${vus} champs entiers vérifiés`);
+});
+await test('en Duo comme en Trio la ligne s\'équilibre : fee + net = brut, au périmètre du joueur', () => {
+  // `gross_cents` et `fee_cents` décrivaient la TABLE — le pot, la commission de la maison — quand
+  // `net_cents` décrivait le JOUEUR : en Duo la ligne stockée disait 2000 − 400 = 800, et il
+  // manquait 800 c que personne n'écrivait nulle part. Qui réconcilie ces lignes lisait une
+  // commission de 60 %. Depuis que le prix est la sacoche emportée, les trois montants sont au même
+  // périmètre et la ligne se referme sur elle-même, dans les cinq modes.
+  return Promise.all([['duo', 1], ['trio', 1], ['solo', 10], ['resurgence', 5]].map(async ([cle, stake]) => {
+    const { db, app, horloge } = bancDeBillet();
+    const mode = C.MODES[cle];
+    const b = await demander(app, { ...DEMANDE, mode: cle, stake });
+    const max = C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents;
+    const r = RAPPORT({ seconds: 154, rank: 1, kills: 3, cashedOut: !!mode.cashout, purseCents: max });
+    horloge.t = ARRIVEE(r);
+    const rep = await rendre(app, b.corps.id, r);
+    assert.strictEqual(rep.corps.status, 'settled', `${cle} : ${rep.corps.motif}`);
+    assert.strictEqual(rep.corps.feeCents + rep.corps.netCents, rep.corps.grossCents, cle);
+    assert.strictEqual(rep.corps.grossCents, max, `${cle} : le brut est la sacoche`);
+    // Et le plafond reste celui que le lobby promet, jamais dépassé.
+    assert.strictEqual(rep.corps.netCents, C.payoutCents(b.corps.stakeCents, mode).winnerCents, cle);
+    const ligne = db.matches[0];
+    assert.strictEqual(ligne.fee_cents + ligne.net_cents, ligne.gross_cents, `${cle} : la ligne ne s'équilibre pas`);
+  }));
+});
+await test('la table du billet est FIGÉE : seats et teamSize sont recopiés dans la ligne', async () => {
+  // Un résultat est accepté jusqu'à l'expiration du billet. Un serveur redémarré entre-temps avec
+  // un `teams` corrigé jugerait la partie contre une table que personne n'a achetée : c'est la
+  // seule raison d'être de ces deux colonnes, et `teamSize` manquait alors que le verdict borne
+  // les kills et le rang avec lui.
+  for (const cle of Object.keys(C.MODES)) {
+    const { db, app } = bancDeBillet();
+    const r = await demander(app, { ...DEMANDE, mode: cle });
+    assert.strictEqual(r.corps.seats, C.seatsOf(C.MODES[cle]), cle);
+    assert.strictEqual(r.corps.teamSize, C.MODES[cle].teamSize, cle);
+    assert.strictEqual(db.matches[0].seats, C.seatsOf(C.MODES[cle]), cle);
+    assert.strictEqual(db.matches[0].team_size, C.MODES[cle].teamSize, cle);
+  }
 });
 await test('le billet d\'un autre joueur est introuvable, et un billet inconnu aussi', async () => {
   const { db, app, horloge } = bancDeBillet();
@@ -888,7 +1029,7 @@ await test('les statistiques rendues sont exactement la somme des parties régl�
   assert.deepStrictEqual(await mesStats(app), { matches: 0, wins: 0, kills: 0, best: 0 },
     'un compte neuf n\'a rien à initialiser : la somme d\'un ensemble vide vaut zéro');
 
-  const gagnee = await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, kills: 7 }));
+  const gagnee = await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, kills: 7, purseCents: 400 }));
   assert.strictEqual(gagnee.corps.status, 'settled');
   const perdue = await jouer(app, horloge, 'p2', RAPPORT({ seconds: 60, rank: 5, kills: 2 }));
   assert.strictEqual(perdue.corps.issue, 'defaite');
@@ -896,7 +1037,7 @@ await test('les statistiques rendues sont exactement la somme des parties régl�
   const s = await mesStats(app);
   assert.deepStrictEqual(s, {
     matches: 2, wins: 1, kills: 9,
-    best: C.payoutCents(50, C.MODES.solo).splitCents,
+    best: C.cashoutCents(400).netCents,
   });
   // Et rien nulle part ne ressemble à un compteur : la somme se refait à l'identique depuis les
   // lignes, ce qui est précisément la propriété qu'un double envoi ne peut pas casser.
@@ -928,15 +1069,17 @@ await test('une partie refusée ou restée ouverte ne compte pour rien', async (
 });
 await test('best est le plus grand net en centimes, jamais le dernier ni une somme', async () => {
   const { app, horloge } = bancDeBillet();
-  const grosse = C.payoutCents(C.toCents(10), C.MODES.solo).splitCents;
-  const petite = C.payoutCents(50, C.MODES.solo).splitCents;
+  // Le prix est la sacoche emportée : une rafle complète sur la table SHARK contre une victoire
+  // les poches à peine remplies sur la table STREET.
+  const grosse = C.cashoutCents(C.toCents(10) * 20).netCents;
+  const petite = C.cashoutCents(100).netCents;
   assert.ok(grosse > petite);
 
-  await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1 }), { ...DEMANDE, stake: 10 });
+  await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, purseCents: C.toCents(10) * 20 }), { ...DEMANDE, stake: 10 });
   assert.strictEqual((await mesStats(app)).best, grosse);
   // Une victoire plus modeste ensuite ne doit RIEN changer : c'est un maximum, pas un dernier
   // résultat, et surtout pas un cumul.
-  await jouer(app, horloge, 'p2', RAPPORT({ seconds: 154, rank: 1 }), { ...DEMANDE, stake: 0.5 });
+  await jouer(app, horloge, 'p2', RAPPORT({ seconds: 154, rank: 1, purseCents: 100 }), { ...DEMANDE, stake: 0.5 });
   const s = await mesStats(app);
   assert.strictEqual(s.best, grosse);
   assert.notStrictEqual(s.best, grosse + petite);
@@ -1038,6 +1181,23 @@ test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées
 });
 
 console.log('Le serveur partage les règles du jeu');
+test('la garde de démarrage couvre TOUS les noms de WBCore qu\'app.js appelle', () => {
+  // La garde ne listait que les quatre noms de la phase 01. La disparition de `zonePlan` ou de
+  // `matchVerdict` — appelés seulement dans les gestionnaires — ne cassait donc plus au démarrage
+  // mais à la première requête d'un joueur, en 500 : très exactement la panne que cette garde
+  // existe pour empêcher. Même doctrine que les gardes textuelles sur schema.sql et db-pg.js, et
+  // même mode de défaillance qu'elles attrapent — la dérive par oubli.
+  const fs = require('node:fs'), path = require('node:path');
+  const lire = f => fs.readFileSync(path.join(__dirname, f), 'utf8');
+  const app = lire('app.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const noyau = lire('core.js');
+  const liste = noyau.slice(noyau.indexOf('const ATTENDUS'), noyau.indexOf('for (const nom of ATTENDUS)'));
+  assert.ok(liste.length > 100, 'la liste de la garde n\'a pas été retrouvée dans core.js');
+  const utilises = [...new Set((app.match(/\bC\.([A-Za-z_$][\w$]*)/g) || []).map(x => x.slice(2)))];
+  assert.ok(utilises.length >= 12, `seulement ${utilises.length} noms de WBCore retrouvés dans app.js`);
+  for (const nom of utilises)
+    assert.ok(liste.includes(`'${nom}'`), `app.js appelle C.${nom}, que la garde de core.js ne couvre pas`);
+});
 test('WBCore est chargé depuis index.html, pas recopié', () => {
   assert.strictEqual(typeof C.nameKey, 'function');
   assert.strictEqual(C.nameKey('Loïc'), C.nameKey('LOIC'));

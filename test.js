@@ -1,5 +1,5 @@
 // Run: node test.js — extracts the CORE block from index.html and tests it in isolation.
-const fs = require('fs'), assert = require('assert'), path = require('path');
+const fs = require('fs'), assert = require('assert'), path = require('path'), vm = require('vm');
 // the game lives in index.html so GitHub Pages can serve it directly
 const GAME = process.env.WARBLOCK_FILE || 'index.html';
 const html = fs.readFileSync(path.join(__dirname, GAME), 'utf8');
@@ -8,6 +8,33 @@ const mod = { exports: {} }; new Function('module', 'exports', core)(mod, mod.ex
 let passed = 0;
 const eff = b => b.attack.n * (b.attack.dmgFar ? (b.attack.dmg+b.attack.dmgFar)/2 : b.attack.dmg); // hex: mean over range
 function test(name, fn){ try { fn(); passed++; console.log('  ✓', name); } catch (e) { console.log('  ✗', name, '\n    ', e.message); process.exitCode = 1; } }
+// Une poignée de tests font tourner du VRAI code asynchrone — le module `Match`, extrait
+// d'index.html et exécuté. Ils s'enregistrent ici et le décompte final les attend ; tout le reste
+// du fichier reste synchrone, comme il l'a toujours été.
+const enVol = [];
+function testAsync(name, fn){
+  enVol.push(Promise.resolve().then(fn).then(
+    () => { passed++; console.log('  ✓', name); },
+    e => { console.log('  ✗', name, '\n    ', e && e.message || e); process.exitCode = 1; }));
+}
+
+console.log('Le fichier unique');
+test('chaque bloc <script> du fichier est du JavaScript valide', () => {
+  // L'INVARIANT DU FICHIER UNIQUE SE TESTE ICI ET NULLE PART AILLEURS. docs/HISTORIQUE.md recense
+  // cinq bugs dont la cause unique est une édition par remplacement de texte dans le bloc `Game` —
+  // un écran noir, une erreur de syntaxe — et rien n'exécutait ni ne parsait jamais ce bloc : ni
+  // `node test.js`, qui ne charge que CORE, ni `node api/test.js`, ni l'intégration continue. La
+  // discipline « extraire les blocs puis node --check après chaque édition » n'était tenue que par
+  // un humain. `new vm.Script` parse sans exécuter — ni DOM, ni Three.js, ni sous-processus, ni
+  // dépendance — donc la faute tombe ici, et du même coup dans `npm test` et dans le workflow qui
+  // PUBLIE le fichier.
+  const re = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g;
+  let m, n = 0;
+  while ((m = re.exec(html))) { new vm.Script(m[1], { filename: `bloc${n}.js` }); n++; }
+  // Le compte vaut d'être gardé : il attrape aussi une balise `</script>` cassée, qui ferait
+  // disparaître un bloc entier de la recherche et passer pour « rien à vérifier ».
+  assert.strictEqual(n, 2, 'index.html doit contenir exactement deux blocs <script> internes : WBCore et Game');
+});
 
 console.log('Economy');
 test('four tables: $0.50 / $1 / $5 / $10', () => assert.deepStrictEqual(C.TIERS.map(t=>t.stake), [0.5,1,5,10]));
@@ -1461,8 +1488,14 @@ test('matchFlow suit sa table, transition par transition', () => {
   const table = [
     ['hors-ligne', 'sas-en-ligne', 'demande'],
     ['fini', 'sas-en-ligne', 'demande'],
+    // Une partie finie est une partie finie, que son rapport ait reçu sa réponse ou non. Sans
+    // cette sortie, un règlement qui ne revenait jamais — serveur muet, wifi basculé, téléphone
+    // endormi — confisquait TOUTES les parties suivantes : plus aucun billet demandé, et la vieille
+    // graine rejouée carte pour carte.
+    ['rapport', 'sas-en-ligne', 'demande'],
     ['hors-ligne', 'sas-hors-ligne', 'hors-ligne'],
     ['fini', 'sas-hors-ligne', 'hors-ligne'],
+    ['rapport', 'sas-hors-ligne', 'hors-ligne'],
     ['demande', 'billet', 'billet'],
     ['demande', 'echec', 'hors-ligne'],
     ['demande', 'delai', 'hors-ligne'],
@@ -1486,7 +1519,10 @@ test('tout événement inconnu laisse l\'état où il est, et un double clic ne 
   assert.strictEqual(C.matchFlow('demande', 'sas-en-ligne'), 'demande');
   assert.strictEqual(C.matchFlow('billet', 'sas-en-ligne'), 'billet', 'un billet reçu ne se jette pas sur un clic');
   assert.strictEqual(C.matchFlow('partie', 'sas-en-ligne'), 'partie');
-  assert.strictEqual(C.matchFlow('rapport', 'fin-en-ligne'), 'rapport', 'une fin envoyée deux fois ne rend pas deux rapports');
+  // `rapport` ne réagit pas à une seconde fin — mais que le rapport ne parte pas deux fois n'est
+  // PAS l'affaire de cette table : c'est l'appelant qui le tient, en vidant `enJeu` dès la
+  // première. L'écrire autrement laissait croire à une protection qui n'existait pas.
+  assert.strictEqual(C.matchFlow('rapport', 'fin-en-ligne'), 'rapport');
   assert.strictEqual(C.matchFlow('fini', 'reglement'), 'fini');
   // Un état inventé — sauvegarde d'une version précédente, console du navigateur — repart de zéro.
   for (const faux of ['nimporte', '', undefined, null, 42]) assert.strictEqual(C.matchFlow(faux, 'coup-denvoi'), 'partie', String(faux));
@@ -1559,6 +1595,16 @@ test('checkReport vérifie les types, les bornes et les absences, et dit quoi co
     [{ purseCents: Number.MAX_SAFE_INTEGER + 2 }, 'purseCents', 'type'],
     [{ declaredNetCents: -1 }, 'declaredNetCents', 'borne'],
     [{ rank: 0 }, 'rank', 'borne'],
+    // LES TROIS CHAMPS QUI N'AVAIENT AUCUNE BORNE HAUTE. Ils traversaient toute la validation
+    // jusqu'à des colonnes `integer` de Postgres, qui s'arrêtent à 2 147 483 647 : l'`update`
+    // levait `22003`, la route rendait 500, et la ligne restait `open` — le joueur enfermé dans un
+    // billet mort jusqu'à l'expiration, puisqu'il n'en a qu'un à la fois. Aucun test ne pouvait le
+    // voir : la doublure d'api/test.js est un tableau JS, elle n'a pas de largeur de colonne.
+    [{ deaths: 2147483648 }, 'deaths', 'borne'],
+    [{ damage: 2147483648 }, 'damage', 'borne'],
+    [{ declaredNetCents: 2147483648 }, 'declaredNetCents', 'borne'],
+    [{ purseCents: 2147483648 }, 'purseCents', 'borne'],
+    [{ seconds: 2147483648 }, 'seconds', 'borne'],
     [{ cashedOut: 'oui' }, 'cashedOut', 'type'],
     [{ cubes: undefined }, 'cubes', 'manquant'],
     [{ purseCents: null }, 'purseCents', 'manquant'],
@@ -1571,6 +1617,15 @@ test('checkReport vérifie les types, les bornes et les absences, et dit quoi co
     assert.strictEqual(erreurs[0].code, code, JSON.stringify(patch));
     assert.ok(erreurs[0].message.includes(champ) && /[.]$/.test(erreurs[0].message), erreurs[0].message);
   }
+  // La borne elle-même passe : on refuse ce que la colonne ne peut pas écrire, pas un de moins.
+  for (const nom of ['deaths', 'damage', 'declaredNetCents', 'purseCents', 'seconds', 'kills', 'cubes', 'rank'])
+    assert.deepStrictEqual(C.checkReport({ ...bon, [nom]: C.PG_INT4_MAX }).erreurs, [], nom);
+  // Et la garde qui compte pour la suite : tout champ entier du rapport a une borne haute, parce
+  // que tout champ entier du rapport finit dans une colonne `integer` de `matches`. Le prochain
+  // champ ajouté sans `max` tombe ici, pas devant un joueur.
+  for (const [nom, regle] of Object.entries(C.REPORT_FIELDS))
+    if (regle.kind === 'entier')
+      assert.strictEqual(regle.max, C.PG_INT4_MAX, `« ${nom} » n'a pas de borne haute`);
   // Un corps qui n'est pas un objet ne rend pas neuf erreurs, il en rend une, claire.
   for (const pas of [null, undefined, 'rapport', 42, []]) {
     const { rapport, erreurs } = C.checkReport(pas);
@@ -1829,16 +1884,18 @@ test('le règlement ne lit jamais un montant du rapport : une sacoche énorme es
   assert.strictEqual(v.netCents, 0);
   assert.ok(v.netCents <= C.cashoutCents(max).netCents, 'aucun chemin ne doit payer plus que la table');
 });
-test('un rapport sans aucun montant se règle quand même : le pot ne vient pas du client', () => {
-  // Sacoche à zéro, net annoncé à zéro : une victoire MAXWIN paie tout de même le pot entier,
-  // parce que le serveur le recalcule depuis la seule mise du billet.
+test('un rapport sans aucun montant se règle quand même, et ne paie rien : le prix est la sacoche', () => {
+  // Sacoche à zéro, net annoncé à zéro : la partie se règle sans broncher — c'est ce qui fait
+  // qu'un client qui n'annonce rien n'est jamais bloqué. Mais elle ne paie rien, parce que le
+  // prix MAXWIN est la sacoche emportée et qu'il n'y en a pas. Le pot forfaitaire, lui, n'est
+  // qu'un plafond d'affichage : il ne sort plus de la caisse.
   const b = V_BILLET();
   const r = V_RAPPORT({ seconds: 154, rank: 1, kills: 0, purseCents: 0, declaredNetCents: 0 });
   const v = verdict(b, r, V_RENDU(r));
   assert.strictEqual(v.ok, true);
   assert.strictEqual(v.issue, 'victoire');
-  assert.strictEqual(v.netCents, C.payoutCents(50, C.MODES.solo).splitCents);
-  assert.ok(v.netCents > 0);
+  assert.strictEqual(v.netCents, 0, 'une victoire les poches vides ne se paie pas le pot entier');
+  assert.strictEqual(v.ecartCents, 0, 'et elle ne produit aucun écart : le jeu a versé zéro aussi');
 });
 test('mensonge refusé : plus de kills que adversaires × vies', () => {
   for (const mode of Object.values(C.MODES)) {
@@ -1954,35 +2011,37 @@ test('joueur honnête accepté : éliminé en Duo pendant que son équipe se bat
   assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'rang');
 });
 test('le net d\'un carton plein retombe au centime sur teamPayout(...).winner', () => {
-  // Le carton plein, c'est toute la table dans les poches d'un seul joueur : le pot en MAXWIN, la
-  // sacoche entière en Resurgence. Les deux chemins doivent retomber sur le même centime que la
-  // fonction de paiement en dollars que le jeu affiche depuis toujours.
+  // Le carton plein, c'est toute la table dans les poches d'un seul joueur. Dans les deux jeux le
+  // prix est la sacoche, donc le même chemin les traite tous les cinq — et il retombe au centime
+  // sur la fonction de paiement en dollars que le lobby affiche depuis toujours. C'est ce qui
+  // garde le « WIN UP TO » honnête : le pot forfaitaire reste exactement le PLAFOND atteignable,
+  // jamais un versement.
   for (const t of C.TIERS) {
     const stakeCents = C.toCents(t.stake);
     for (const mode of Object.values(C.MODES)) {
       const seats = C.seatsOf(mode), tp = C.teamPayout(t.stake, mode, C.RAKE);
-      const b = V_BILLET({ mode: mode.id, seats, stakeCents });
+      const max = C.purseBound(stakeCents, seats).maxCents;
+      const b = V_BILLET({ mode: mode.id, seats, teamSize: mode.teamSize, stakeCents });
       const r = V_RAPPORT({
         seconds: 80, rank: 1, kills: (seats - mode.teamSize) * C.livesFor(mode),
-        cashedOut: !!mode.cashout, purseCents: C.purseBound(stakeCents, seats).maxCents,
+        cashedOut: !!mode.cashout, purseCents: max,
       });
       const v = verdict(b, r, V_RENDU(r));
       assert.strictEqual(v.ok, true, `${mode.id} à ${t.stake} : ${v.motif}`);
-      if (mode.cashout) {
-        // Un seul joueur qui banque toute la table : pas de partage, il emporte le pot net.
-        assert.strictEqual(v.netCents, C.toCents(tp.winner), `${mode.id} à ${t.stake}`);
-      } else {
-        assert.strictEqual(v.winnerCents, C.toCents(tp.winner), `${mode.id} à ${t.stake}`);
-        assert.strictEqual(v.netCents, C.toCents(tp.split), `${mode.id} à ${t.stake}`);
-        assert.strictEqual(v.netCents * mode.teamSize, v.winnerCents, 'le pot se partage sans reste');
-      }
-      assert.strictEqual(v.grossCents - v.feeCents, mode.cashout ? v.netCents : v.winnerCents);
+      assert.strictEqual(v.netCents, C.toCents(tp.winner), `${mode.id} à ${t.stake}`);
+      // Le plafond de la table — ce que `payoutCents` annonce au lobby — est atteint exactement,
+      // jamais dépassé : c'est là toute la valeur qui reste à ce forfait.
+      assert.strictEqual(v.netCents, C.payoutCents(stakeCents, mode).winnerCents, `${mode.id} à ${t.stake}`);
+      assert.strictEqual(v.feeCents + v.netCents, v.grossCents, `${mode.id} à ${t.stake}`);
+      assert.strictEqual(v.grossCents, max, 'le brut est la sacoche, dans les cinq modes');
     }
   }
 });
 test('la commission ne tombe jamais à zéro sur une table à 0,50 $', () => {
   const b = V_BILLET();
-  const gagne = V_RAPPORT({ seconds: 154, rank: 1 });
+  // La sacoche est le brut, donc une victoire les poches vides n'a rien à taxer : le gagnant de
+  // cette table repart au minimum avec sa propre mise, et c'est sur elle que la commission tombe.
+  const gagne = V_RAPPORT({ seconds: 154, rank: 1, purseCents: b.stakeCents });
   const v = verdict(b, gagne, V_RENDU(gagne));
   assert.ok(v.feeCents > 0, 'une victoire à 0,50 $ sans commission');
   assert.strictEqual(v.feeCents + v.netCents, v.grossCents);
@@ -2022,25 +2081,34 @@ test('un rapport honnête au bord de la tolérance est accepté', () => {
   assert.ok(C.ENVELOPPE.margeVictoireS > C.LOBBY.wait,
     'une marge de victoire plus courte que le sas refuserait des victoires honnêtes');
 });
-test('en Resurgence le montant est encadré, pas recalculé', () => {
-  // L'invariant « aucun montant ne vient du client » ne vaut PAS ici, et le test le dit au lieu de
-  // le laisser croire : le net suit la sacoche déclarée, sur tout l'intervalle de la borne.
+test('dans les DEUX jeux le montant est encadré, pas recalculé', () => {
+  // L'invariant « aucun montant ne vient du client » ne vaut nulle part, et le test le dit au lieu
+  // de le laisser croire : le net suit la sacoche déclarée, sur tout l'intervalle de la borne, en
+  // Resurgence comme en MAXWIN. C'est faible, c'est honnête, et c'est une raison de plus pour
+  // qu'aucun euro n'entre avant la phase 02b.
   const b = V_BILLET({ mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence) });
   const max = C.purseBound(b.stakeCents, b.seats).maxCents;
-  assert.strictEqual(max, b.stakeCents * 50, 'l\'intervalle va de 0 à 50 mises');
+  assert.strictEqual(max, b.stakeCents * 50, 'l\'intervalle va de 0 à 50 mises en Resurgence');
   const nets = [0, 1, 50, 500, max].map(sacoche => {
     const r = V_RAPPORT({ seconds: 40, kills: 1, cashedOut: true, purseCents: sacoche });
     return verdict(b, r, V_RENDU(r)).netCents;
   });
   assert.deepStrictEqual(nets, [0, 1, 50, 500, max].map(s => C.cashoutCents(s).netCents));
-  assert.ok(nets[4] > nets[0], 'le montant déclaré décide bel et bien du net en Resurgence');
-  // En MAXWIN, la même sacoche n'a aucune voix : le net ne dépend que de la mise et du mode.
+  assert.ok(nets[4] > nets[0], 'le montant déclaré décide bel et bien du net');
+  // En MAXWIN, la même mécanique, sur un intervalle de 0 à 20 mises. Le serveur recalculait ici un
+  // pot forfaitaire que le jeu ne versait pas : quatre fois le montant affiché au joueur sur une
+  // table STREET, et un `ecart_cents` qui mesurait ce désaccord au lieu d'un mensonge.
   const m = V_BILLET();
-  const nuls = [0, 42, C.purseBound(m.stakeCents, m.seats).maxCents].map(sacoche => {
+  const plafond = C.purseBound(m.stakeCents, m.seats).maxCents;
+  assert.strictEqual(plafond, m.stakeCents * 20, 'l\'intervalle va de 0 à 20 mises en MAXWIN');
+  const maxwin = [0, 42, plafond].map(sacoche => {
     const r = V_RAPPORT({ seconds: 154, rank: 1, purseCents: sacoche });
     return verdict(m, r, V_RENDU(r)).netCents;
   });
-  assert.deepStrictEqual(nuls, [0, 1, 2].map(() => C.payoutCents(m.stakeCents, C.MODES.solo).splitCents));
+  assert.deepStrictEqual(maxwin, [0, 42, plafond].map(s => C.cashoutCents(s).netCents));
+  // Et le forfait n'est plus qu'un plafond : il borne le net, il ne le fixe plus.
+  assert.strictEqual(maxwin[2], C.payoutCents(m.stakeCents, C.MODES.solo).winnerCents);
+  for (const n of maxwin) assert.ok(n <= C.payoutCents(m.stakeCents, C.MODES.solo).winnerCents);
 });
 test('en MAXWIN, `cashedOut` n\'ouvre aucune caisse : c\'est le mode qui décide du paiement', () => {
   // Il n'y a pas de bouton d'encaissement en MAXWIN. Un rapport qui le prétend ne doit surtout pas
@@ -2050,8 +2118,10 @@ test('en MAXWIN, `cashedOut` n\'ouvre aucune caisse : c\'est le mode qui décide
   const max = C.purseBound(b.stakeCents, b.seats).maxCents;
   const gagnee = V_RAPPORT({ seconds: 154, rank: 1, cashedOut: true, purseCents: max });
   const v = verdict(b, gagnee, V_RENDU(gagnee));
-  assert.strictEqual(v.issue, 'victoire');
-  assert.strictEqual(v.netCents, C.payoutCents(b.stakeCents, C.MODES.solo).splitCents);
+  assert.strictEqual(v.issue, 'victoire', 'un MAXWIN ne s\'encaisse pas, il se gagne');
+  assert.strictEqual(v.netCents, C.cashoutCents(max).netCents);
+  // Et surtout : une DÉFAITE reste une défaite. C'est le seul chemin par lequel un client MAXWIN
+  // pourrait se payer sa sacoche sans gagner, et il est fermé.
   const perdue = V_RAPPORT({ seconds: 154, rank: 6, cashedOut: true, purseCents: max });
   const w = verdict(b, perdue, V_RENDU(perdue));
   assert.strictEqual(w.issue, 'defaite');
@@ -2059,9 +2129,10 @@ test('en MAXWIN, `cashedOut` n\'ouvre aucune caisse : c\'est le mode qui décide
 });
 test('l\'écart entre le net annoncé et le net compté est mesuré, jamais payé', () => {
   const b = V_BILLET();
-  const attendu = C.payoutCents(50, C.MODES.solo).splitCents;
+  const sacoche = 350;
+  const attendu = C.cashoutCents(sacoche).netCents;
   for (const annonce of [0, 1, attendu, attendu + 1, 9_999_999]) {
-    const r = V_RAPPORT({ seconds: 154, rank: 1, declaredNetCents: annonce });
+    const r = V_RAPPORT({ seconds: 154, rank: 1, purseCents: sacoche, declaredNetCents: annonce });
     const v = verdict(b, r, V_RENDU(r));
     assert.strictEqual(v.netCents, attendu, 'le net annoncé n\'est jamais payé');
     assert.strictEqual(v.declaredNetCents, annonce);
@@ -2082,7 +2153,10 @@ test('une défaite ne paie rien, dans les cinq modes', () => {
     const v = verdict(b, r, V_RENDU(r));
     assert.strictEqual(v.ok, true, mode.id);
     assert.strictEqual(v.issue, 'defaite', mode.id);
-    assert.deepStrictEqual([v.grossCents, v.feeCents, v.netCents, v.winnerCents], [0, 0, 0, 0], mode.id);
+    assert.deepStrictEqual([v.grossCents, v.feeCents, v.netCents], [0, 0, 0], mode.id);
+    // Et la sacoche déclarée, elle, est retenue quand même : une défaite ne la paie pas, elle la
+    // mesure. C'est ce qui permettra de comparer plus tard ce qui a été porté et ce qui a été dit.
+    assert.strictEqual(v.sacocheCents, C.purseBound(b.stakeCents, seats).maxCents, mode.id);
   }
 });
 test('un billet expiré ne se règle plus, et le dit avec son propre statut', () => {
@@ -2114,6 +2188,118 @@ test('un billet ou un rapport illisible est refusé, jamais réglé, et ne lance
   for (const t of [undefined, null, NaN, Infinity, 'maintenant'])
     assert.strictEqual(verdict(V_BILLET(), bon, t).controle, 'billet', String(t));
 });
+test('mensonge refusé : plus de morts que de vies', () => {
+  // Démontrable depuis les règles, exactement comme le plafond de kills : `endMatch` rend
+  // `livesFor(mode) - lives`, et les vies ne descendent pas sous zéro. C'est le seul des trois
+  // champs sans borne — deaths, damage, declaredNetCents — qui en admette une venue du jeu ;
+  // les deux autres n'ont que la capacité de leur colonne, et le prétendre serait inventer.
+  for (const mode of Object.values(C.MODES)) {
+    const vies = C.livesFor(mode);
+    const b = V_BILLET({ mode: mode.id, seats: C.seatsOf(mode), teamSize: mode.teamSize });
+    const bord = V_RAPPORT({ seconds: 60, rank: 2, deaths: vies });
+    assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true, `${mode.id} : mourir ${vies} fois est possible`);
+    const trop = V_RAPPORT({ seconds: 60, rank: 2, deaths: vies + 1 });
+    const v = verdict(b, trop, V_RENDU(trop));
+    assert.strictEqual(v.controle, 'morts', mode.id);
+    assert.strictEqual(v.limites.mortsMax, vies, mode.id);
+  }
+});
+test('une victoire MAXWIN honnête ne produit JAMAIS d\'écart', () => {
+  // LE TEST QUI MANQUAIT, ET QUI EST TOUT LE SUJET. Le jeu paie `cashoutPayout(pouch).net` et le
+  // serveur réglait `payoutCents(mise, mode).splitCents` : deux règles pour le même gain, que rien
+  // ne confrontait parce que les tests n'exerçaient que la rafle complète — le seul point où les
+  // deux formules coïncident. Résultat : sur une table à 0,50 $, une victoire parfaitement honnête
+  // écrivait `ecart_cents = -600`, et `GET /api/me` annonçait un BEST quatre fois supérieur à ce
+  // que le portefeuille venait d'encaisser.
+  //
+  // Le rapport est construit ICI comme `endMatch` le construit : sacoche portée, et net annoncé
+  // par la fonction que le jeu appelle pour créditer le portefeuille. Rien d'autre.
+  for (const t of C.TIERS)
+    for (const mode of V_MAXWIN)
+      for (const kills of [0, 1, 4, 9, 19]) {
+        const seats = C.seatsOf(mode), stakeCents = C.toCents(t.stake);
+        if (kills > (seats - mode.teamSize) * C.livesFor(mode)) continue;
+        // La sacoche naît à la mise et absorbe celle de chaque victime : le cas le plus simple, et
+        // celui qu'un joueur atteint vraiment.
+        const pouch = t.stake * (1 + kills);
+        const rapport = C.reportFrom({
+          seconds: 154, kills, deaths: 0, rank: 1, cubes: 0, damage: 1000, cashedOut: false,
+          purseCents: C.toCents(pouch),
+          declaredNetCents: C.toCents(C.cashoutPayout(pouch).net),
+        });
+        const b = V_BILLET({ mode: mode.id, seats, teamSize: mode.teamSize, stakeCents });
+        const v = verdict(b, rapport, V_RENDU(rapport));
+        const quoi = `${mode.id} à ${t.stake} avec ${kills} kills`;
+        assert.strictEqual(v.ok, true, `${quoi} : ${v.controle} — ${v.motif}`);
+        assert.strictEqual(v.issue, 'victoire', quoi);
+        assert.strictEqual(v.netCents, rapport.declaredNetCents, `${quoi} : le serveur paie autre chose que l'écran`);
+        assert.strictEqual(v.ecartCents, 0, `${quoi} : une partie honnête ne doit produire aucun écart`);
+        assert.strictEqual(v.feeCents + v.netCents, v.grossCents, quoi);
+      }
+});
+test('survivre jusqu\'au bout en Resurgence paie comme un encaissement, sans avoir appuyé sur le bouton', () => {
+  // Ce chemin-là n'était atteint par aucun test des deux suites, alors que le jeu l'emprunte à
+  // chaque partie de Resurgence qui va à son terme : `endMatch(true, {})` rend `rank: 1` et
+  // `cashedOut: false` quand la dernière équipe debout est celle du joueur. C'est le SEUL cas où
+  // un mode cashout se règle sans encaissement, et remplacer `victoire` par `defaite` dans cette
+  // branche laissait toute la suite verte pendant que chaque survivant était payé zéro.
+  for (const mode of [C.MODES.resurgence, C.MODES.resurgenceDuo]) {
+    const seats = C.seatsOf(mode), b = V_BILLET({ mode: mode.id, seats, teamSize: mode.teamSize });
+    const sacoche = 700;
+    const r = V_RAPPORT({ seconds: 120, kills: 3, rank: 1, cashedOut: false, purseCents: sacoche });
+    const v = verdict(b, r, V_RENDU(r));
+    assert.strictEqual(v.ok, true, `${mode.id} : ${v.controle} — ${v.motif}`);
+    assert.strictEqual(v.issue, 'victoire', `${mode.id} : ni encaissement, ni défaite`);
+    assert.strictEqual(v.netCents, C.cashoutCents(sacoche).netCents, mode.id);
+    assert.strictEqual(v.feeCents + v.netCents, v.grossCents, mode.id);
+    // Et le survivant à sacoche vide reste une VICTOIRE payée zéro. C'est ce qui distingue une
+    // défaite réelle d'une victoire sans butin, et `wins` compte la seconde.
+    const nu = V_RAPPORT({ seconds: 120, kills: 0, rank: 1, cashedOut: false, purseCents: 0 });
+    const w = verdict(b, nu, V_RENDU(nu));
+    assert.strictEqual(w.issue, 'victoire', mode.id);
+    assert.strictEqual(w.netCents, 0, mode.id);
+  }
+});
+test('aucun montant rendu par le verdict ne sort du domaine d\'un integer Postgres', () => {
+  // `declared_net_cents` et `ecart_cents` sont des `integer`, donc 2 147 483 647 au plus. Un
+  // rapport qui dépasse est refusé par `checkReport` en amont — mais le verdict clampe quand même,
+  // parce que le jour où ce contrôle sautera, l'écriture doit échouer sur une règle et non sur un
+  // `22003` qui rend 500 et laisse le billet ouvert : le joueur est alors enfermé dans un billet
+  // mort jusqu'à l'expiration, puisqu'il n'en a qu'un à la fois.
+  const b = V_BILLET();
+  for (const annonce of [0, 1, C.PG_INT4_MAX, C.PG_INT4_MAX + 1, Number.MAX_SAFE_INTEGER]) {
+    // Le rapport est forgé à la main : `checkReport` refuserait les deux derniers, et c'est bien
+    // le chemin d'après qu'on éprouve ici.
+    const r = { ...V_RAPPORT({ seconds: 154, rank: 1, purseCents: 500 }), declaredNetCents: annonce };
+    const v = C.matchVerdict(b, r, V_RENDU(r));
+    for (const [nom, x] of [['declaredNetCents', v.declaredNetCents], ['ecartCents', v.ecartCents],
+                            ['grossCents', v.grossCents], ['feeCents', v.feeCents], ['netCents', v.netCents]])
+      assert.ok(Number.isSafeInteger(x) && x >= -2147483648 && x <= C.PG_INT4_MAX,
+        `${nom} vaut ${x} pour un net annoncé de ${annonce}`);
+  }
+});
+test('les bornes du verdict viennent du billet, pas du mode d\'aujourd\'hui', () => {
+  // `seats` et `teamSize` sont recopiés dans la ligne pour une raison précise : un résultat est
+  // accepté jusqu'à l'expiration du billet, soit une bonne dizaine de minutes, et un serveur qui
+  // redémarre entre-temps avec un `teams` corrigé jugerait la partie contre une table que
+  // personne n'a achetée. Le billet ci-dessous décrit un Trio à 30 sièges ; `MODES.trio` en
+  // annonce 30 aujourd'hui, mais le verdict ne doit pas avoir besoin de le savoir.
+  const b = V_BILLET({ mode: 'trio', stakeCents: 100, seats: 24, teamSize: 4 });
+  const r = V_RAPPORT({ seconds: 60, rank: 2 });
+  const v = verdict(b, r, V_RENDU(r));
+  assert.strictEqual(v.limites.killsMax, (24 - 4) * C.livesFor(C.MODES.trio), 'killsMax lit le billet');
+  assert.strictEqual(v.limites.rangMax, 24 / 4 + 1, 'rangMax lit le billet');
+  assert.strictEqual(v.limites.sacocheMaxCents, 100 * 24, 'la borne de sacoche lit le billet');
+  // Et un billet sans `teamSize` — une ligne écrite avant que la colonne n'existe — retombe sur le
+  // mode plutôt que de refuser une partie honnête.
+  const vieux = V_BILLET({ mode: 'trio', stakeCents: 100, seats: 30 });
+  const w = verdict(vieux, r, V_RENDU(r));
+  assert.strictEqual(w.limites.killsMax, (30 - C.MODES.trio.teamSize) * C.livesFor(C.MODES.trio));
+  // Enfin, le chemin de l'ARGENT ne lit plus le mode du tout : il ne connaît que la sacoche et la
+  // borne du billet. C'est ce qui ferme définitivement ce trou-là.
+  const paye = V_RAPPORT({ seconds: 154, rank: 1, purseCents: 1200 });
+  assert.strictEqual(verdict(b, paye, V_RENDU(paye)).netCents, C.cashoutCents(1200).netCents);
+});
 test('le verdict ne rend aucun motif absent d\'ENVELOPPE, et aucune ligne d\'ENVELOPPE n\'est morte', () => {
   // Ce test est le seul qui relie la liste écrite au code qui l'applique. Ajouter un contrôle sans
   // l'inscrire dans ENVELOPPE, ou laisser une ligne qui ne refuse plus rien, le fait tomber.
@@ -2130,9 +2316,14 @@ test('le verdict est nommé pour ce qu\'il est : une enveloppe de plausibilité,
   assert.ok(bloc.length > 2000, 'le bloc du verdict n\'a pas été retrouvé dans CORE');
   const entete = bloc.slice(0, bloc.indexOf('const ENVELOPPE'));
   assert.match(entete, /ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE/);
-  assert.match(entete, /RECALCULÉ/, 'l\'en-tête doit dire que MAXWIN est recalculé');
-  assert.match(entete, /ENCADRÉ, pas recalculé/, 'et que Resurgence ne l\'est pas');
-  assert.match(entete, /0 à 50 mises/, 'l\'intervalle de la borne Resurgence doit être écrit');
+  // L'aveu a DURCI et il ne doit plus pouvoir s'adoucir : le net dépend d'un nombre déclaré par le
+  // client dans les DEUX jeux, pas seulement en Resurgence. Écrire « MAXWIN est recalculé » était
+  // vrai du code et faux du jeu ; c'est ce mensonge-là que ce test interdit de réécrire.
+  assert.match(entete, /EST FAUX, DANS LES DEUX JEUX/, 'l\'en-tête doit dire que l\'invariant ne vaut nulle part');
+  assert.match(entete, /ENCADRÉ, pas recalculé/, 'et que le net est encadré');
+  assert.ok(!/le net est RECALCULÉ/.test(entete), 'plus aucun net n\'est recalculé depuis la seule mise');
+  assert.match(entete, /0 à 20 mises en MAXWIN et de 0 à 50 en Resurgence/, 'les deux intervalles doivent être écrits');
+  assert.match(entete, /PLAFOND/, 'le sort de payoutCents doit être écrit : un plafond, pas un versement');
   assert.match(entete, /JAMAIS payé ni cru/, 'le sort de declaredNetCents doit être écrit');
   assert.strictEqual(typeof C.ENVELOPPE.controles, 'object');
   const nomsDeTests = fs.readFileSync(path.join(__dirname, 'test.js'), 'utf8');
@@ -2251,6 +2442,170 @@ test('le branchement ne décide rien : tout passe par une fonction de WBCore', (
   for (const interdit of ['wallet', 'START_WALLET', 'balance', 'solde'])
     assert.ok(!module.includes(interdit), `${interdit} n'a rien à faire dans le module du billet`);
 });
+test('le gaz est lu par zoneAt, jamais recalculé à côté', () => {
+  // `zoneAt` avait quinze assertions et aucun appelant : le vrai consommateur du plan, `zoneUpdate`,
+  // refaisait le décompte et l'interpolation à la main. La copie testée était la morte, et une
+  // mutation qui doublait la durée d'un resserrement laissait toute la suite verte. C'est le patron
+  // « respawn() définie deux fois » de docs/HISTORIQUE.md, à l'envers.
+  const zu = JEU.slice(JEU.indexOf('function zoneUpdate('), JEU.indexOf('// ---------- input ----------'));
+  assert.ok(zu.length > 500, 'zoneUpdate n\'a pas été retrouvée');
+  assert.match(zu, /C\.zoneAt\(G\.zonePlan,G\.time\)/, 'zoneUpdate doit LIRE le plan par zoneAt');
+  // Et la seconde implémentation ne doit pas repousser : ni compteur local, ni interpolation.
+  for (const interdit of ['z.timer-=dt', 'z.from', 'shrinkS', 'waitS', 'z.phase++'])
+    assert.ok(!zu.includes(interdit), `zoneUpdate recalcule le plan au lieu de le lire : ${interdit}`);
+});
+test('le délai d\'attente du réseau vient de WBCore, pas d\'un nombre écrit dans le DOM', () => {
+  // `fetch` n'a pas de délai. Un serveur qui accepte la connexion et ne répond plus laissait la
+  // promesse en vol pour toujours, donc l'événement `delai` que la table de matchFlow prévoit
+  // depuis le premier jour n'était jamais produit. La valeur est large exprès : elle vaut aussi
+  // pour le rafraîchissement du jeton, et couper un joueur sur un lien lent coûte plus cher que
+  // d'attendre quelques secondes de plus celui dont le serveur est mort.
+  assert.ok(Number.isInteger(C.NET.timeoutMs) && C.NET.timeoutMs >= 10000 && C.NET.timeoutMs <= 30000,
+    `NET.timeoutMs vaut ${C.NET.timeoutMs}`);
+  const appel = JEU.slice(JEU.indexOf('  async function call(url,opts){'), JEU.indexOf('const cmHead='));
+  assert.ok(appel.length > 200, 'call n\'a pas été retrouvée');
+  assert.match(appel, /C\.NET\.timeoutMs/, 'le délai doit venir de WBCore');
+  assert.match(appel, /AbortController/);
+  assert.match(appel, /clearTimeout/, 'un minuteur qu\'on n\'annule pas retient le processus');
+});
+
+// ---- Le module `Match` lui-même, EXÉCUTÉ. ----
+// Les quatre cas « hors ligne » plus haut testent la TABLE de matchFlow ; ils réimplémentent `sas`
+// et `coupDenvoi`, donc ils ne disent rien du branchement. Ce qui suit extrait le vrai module entre
+// ses marqueurs — comme api/core.js extrait WBCore — et le fait tourner avec le vrai `C` et un
+// `Auth` en doublure dont chaque promesse se résout à la demande. Aucun DOM : le module n'en touche
+// pas, et c'est précisément ce qu'on lui demande.
+const MATCH_SRC = html.slice(html.indexOf('/*MATCH-START*/'), html.indexOf('/*MATCH-END*/'));
+function bancMatch({ online = true } = {}) {
+  const envois = [];
+  let syncs = 0;
+  const Auth = {
+    online: () => online,
+    sync: () => { syncs++; },
+    send(path, body) {
+      let repondre;
+      const p = new Promise(r => { repondre = r; });
+      envois.push({ path, body, repondre });
+      return p;
+    },
+  };
+  const Match = new Function('C', 'Auth', MATCH_SRC + '\nreturn Match;')(C, Auth);
+  return { Match, envois, syncs: () => syncs };
+}
+// Laisser tourner les promesses déjà résolues : le module enchaîne deux `await` au plus.
+const souffler = () => new Promise(r => setImmediate(r));
+const BILLET = (id, seed) => ({ id, mode: 'solo', stakeCents: 50, seats: 20, teamSize: 1,
+                                brawler: 'bolt', seed, status: 'open' });
+const FIN = { seconds: 154, kills: 3, deaths: 0, rank: 1, cubes: 0, damage: 900,
+              cashedOut: false, purseCents: 200, declaredNetCents: 160 };
+
+testAsync('un règlement qui ne revient jamais ne confisque pas les parties suivantes', () => {
+  // LE SCÉNARIO, DE BOUT EN BOUT. Le module restait bloqué sur `rapport` tant que le POST du
+  // résultat n'avait pas répondu — et `fetch` n'ayant pas de délai, un serveur muet le bloquait
+  // pour de bon. La partie suivante ne demandait aucun billet, ressortait le billet périmé, et
+  // rejouait donc EXACTEMENT la même carte et le même gaz ; puis son propre résultat était réémis
+  // sur le vieux billet, déjà réglé, et perdu en silence.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      assert.strictEqual(envois.length, 1, 'le sas demande son billet');
+      assert.strictEqual(envois[0].path, '/api/match');
+      envois[0].repondre({ ok: true, status: 200, data: BILLET('42', 777) });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 777, 'la partie 1 joue la graine du billet');
+      // Fin de partie : le rapport part, et le serveur ne répondra jamais.
+      Match.fin(FIN);
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2);
+      assert.strictEqual(envois[1].path, '/api/match/42/result');
+      // Partie 2, alors que le rapport est toujours en vol.
+      Match.sas('solo', 0.5, 'bolt');
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 3, 'la partie suivante doit demander SON billet');
+      assert.strictEqual(envois[2].path, '/api/match');
+      // Le serveur reste muet sur les deux : la partie 2 part hors ligne, sur SA graine locale.
+      const billet2 = Match.coupDenvoi('solo', 50);
+      assert.strictEqual(billet2, null, 'le vieux billet ne doit jamais resservir');
+      assert.strictEqual(C.seedFor(billet2, 111111), 111111, 'deux parties de suite sur la même carte');
+      // Et la fin de la partie 2 ne réémet pas un rapport sur le billet 42.
+      Match.fin(FIN);
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 3, 'aucun second rapport sur un billet déjà rendu');
+    });
+});
+testAsync('un règlement en retard n\'écrase pas l\'état de la partie suivante', () => {
+  // `rendre` peut désormais résoudre alors que l'état a avancé. Sans la garde de génération, un
+  // `echec` tardif ferait `demande → hors-ligne` et tuerait la demande de billet de la partie
+  // suivante — le joueur repartirait hors ligne sans le savoir.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('7', 12345) }); return souffler(); })
+    .then(() => {
+      Match.coupDenvoi('solo', 50);
+      Match.fin(FIN);
+      return souffler();
+    })
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      // Le règlement de la partie 1 échoue MAINTENANT, pendant que la demande de la 2 est en vol.
+      envois[1].repondre({ ok: false, status: 500, data: null });
+      return souffler();
+    })
+    .then(() => {
+      // La demande de la partie 2 arrive après, et doit être encaissée : si l'échec tardif avait
+      // écrit `hors-ligne`, ce billet-là serait jeté.
+      envois[2].repondre({ ok: true, status: 200, data: BILLET('8', 999) });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 999,
+        'la partie 2 doit jouer SON billet, pas retomber hors ligne');
+    });
+});
+testAsync('un billet qui décrit une autre table n\'est jamais rendu par le coup d\'envoi', () => {
+  // Le serveur n'ouvre qu'un billet à la fois : quitter le sas puis revenir sur une autre table
+  // laisse en main un billet qui parle d'ailleurs. `ticketFor` tranche, et le module ne l'invente
+  // pas — mais il faut qu'il l'appelle vraiment, ce que seul un test d'exécution montre.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('3', 4242) }); return souffler(); })
+    .then(() => {
+      assert.strictEqual(Match.coupDenvoi('duo', 50), null, 'un autre mode');
+      // La partie se joue donc hors ligne, et la fin n'a rien à rendre — mais le billet, lui,
+      // reste en main : il est toujours ouvert côté serveur pour la table qu'il décrit, et le
+      // jeter ici obligerait le joueur à en redemander un pour rien.
+      Match.fin(FIN);
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 1, 'aucun rapport sur un billet qu\'on n\'a pas joué');
+      assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 4242,
+        'le billet garde sa table, et la retrouve');
+    });
+});
+testAsync('sans compte ni serveur, le module ne parle à personne', () => {
+  const { Match, envois } = bancMatch({ online: false });
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      assert.deepStrictEqual(envois, [], 'hors ligne, aucun appel ne part');
+      assert.strictEqual(Match.coupDenvoi('solo', 50), null);
+      Match.fin(FIN);
+      return souffler();
+    })
+    .then(() => assert.deepStrictEqual(envois, [], 'et aucun rapport non plus'));
+});
 test('les statistiques venues du serveur passent par applyAccount, jamais par une écriture directe', () => {
   // Le seul endroit qui écrit `profile.stats` sans passer par applyAccount est endMatch, et il
   // écrit ce que la partie VIENT de produire en local — c'est ce qui fait que le jeu hors ligne
@@ -2265,4 +2620,4 @@ test('les statistiques venues du serveur passent par applyAccount, jamais par un
   assert.ok(module.includes('Auth.sync()'), 'après un règlement, le profil se redemande au serveur');
 });
 
-console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
+Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

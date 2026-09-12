@@ -1806,6 +1806,13 @@ const WBCore = (function(){
   // ne touche au DOM, au réseau, à l'horloge ni au hasard — l'heure et la graine de secours sont
   // des arguments.
 
+  // Combien de temps on attend une réponse avant de considérer le serveur muet. La table de
+  // `matchFlow` prévoit l'événement `delai` depuis le premier jour, mais rien ne le produisait :
+  // `fetch` ne rejette que sur une connexion refusée, jamais sur un serveur qui accepte la
+  // connexion et ne répond plus. Une valeur LARGE, parce que ce délai vaut pour tous les appels, y
+  // compris le rafraîchissement du jeton : couper un joueur sur un lien lent coûte plus cher
+  // qu'attendre douze secondes de plus celui dont le serveur est mort.
+  const NET = { timeoutMs: 15000 };
   // La graine d'une partie : celle du billet si elle est utilisable, celle du navigateur sinon.
   // C'est cette fonction qui tient la promesse du fichier unique. `ACCOUNT.api` vide, pas de
   // session, serveur muet, réponse illisible : dans les quatre cas le billet est absent ou
@@ -1848,8 +1855,10 @@ const WBCore = (function(){
   //   état         événement        vers         pourquoi
   //   hors-ligne   sas-en-ligne     demande      compte ET API : on peut demander un billet
   //   fini         sas-en-ligne     demande      la partie suivante repart du même endroit
+  //   rapport      sas-en-ligne     demande      relancer abandonne le rapport en vol
   //   hors-ligne   sas-hors-ligne   hors-ligne   il manque l'un des deux : on ne demande rien
   //   fini         sas-hors-ligne   hors-ligne   idem, après une partie
+  //   rapport      sas-hors-ligne   hors-ligne   idem, sans compte ni serveur
   //   demande      billet           billet       le serveur a répondu, et sa réponse se lit
   //   demande      echec            hors-ligne   refus, panne, réseau coupé
   //   demande      delai            hors-ligne   serveur muet : on ne l'attend pas
@@ -1863,8 +1872,14 @@ const WBCore = (function(){
   //   rapport      echec            fini         il n'a pas jugé, et la partie est finie quand même
   //
   // Trois points de ce tableau sont le contrat, pas des détails d'écriture :
-  // — l'entrée dans le sas ne part que de `hors-ligne` et de `fini`. Depuis `demande` ou
-  //   `billet`, un second clic ne relance pas la demande et ne jette pas le billet déjà reçu.
+  // — l'entrée dans le sas part de `hors-ligne`, de `fini` ET de `rapport`. Depuis `demande` ou
+  //   `billet`, un second clic ne relance pas la demande et ne jette pas le billet déjà reçu ;
+  //   depuis `rapport`, en revanche, elle DOIT repartir : une partie finie est une partie finie,
+  //   que son rapport ait reçu sa réponse ou non. Sans cette sortie, un règlement qui ne revient
+  //   jamais — serveur muet, wifi basculé, téléphone endormi — enfermait toutes les parties
+  //   suivantes : plus aucun billet demandé, et la vieille graine rejouée carte pour carte.
+  //   C'est le même choix que celui déjà fait pour le billet en vol au coup d'envoi : une réponse
+  //   arrivée trop tard est jetée, jamais attendue.
   // — le coup d'envoi qui arrive pendant une demande fait DEUX choses : il lâche la demande, puis
   //   il lance la partie. L'enchaînement les sépare, `demande` → `hors-ligne` → `partie`, et
   //   l'appelant réapplique donc l'événement jusqu'à ce que l'état ne bouge plus. C'est sans
@@ -1878,7 +1893,9 @@ const WBCore = (function(){
     switch (from + ':' + event) {
       case 'hors-ligne:sas-en-ligne':   return 'demande';
       case 'fini:sas-en-ligne':         return 'demande';
+      case 'rapport:sas-en-ligne':      return 'demande';
       case 'fini:sas-hors-ligne':       return 'hors-ligne';
+      case 'rapport:sas-hors-ligne':    return 'hors-ligne';
       case 'demande:billet':            return 'billet';
       case 'demande:echec':             return 'hors-ligne';
       case 'demande:delai':             return 'hors-ligne';
@@ -1903,16 +1920,25 @@ const WBCore = (function(){
   //   l'écart avec le calcul du serveur, jamais pour payer. Le jeter perdrait les mesures sur
   //   lesquelles un seuil se fixera plus tard.
   // Tout le reste est un fait : une durée, des comptes, un rang, un booléen.
+  //
+  // CHAQUE ENTIER PORTE UNE BORNE HAUTE, ET ELLE VIENT DU SCHÉMA, PAS DU JEU. Ces neuf champs
+  // finissent tous dans une colonne `integer` de `matches`, et l'`integer` de Postgres est signé :
+  // il s'arrête à 2 147 483 647. C'est déjà la raison écrite dans `api/schema.sql` pour les
+  // graines. Un rapport qui dépasse n'est pas un rapport faux — c'est une ÉCRITURE qui échoue :
+  // Postgres lève `22003`, la route rend 500, et la ligne reste `open`. Comme un joueur n'a qu'un
+  // billet ouvert à la fois, il est alors enfermé dans un billet mort jusqu'à l'expiration. Le
+  // refus doit donc sortir ici, en 400 et avec le code `borne`, pas en 500 muet plus tard.
+  const PG_INT4_MAX = 2147483647;
   const REPORT_FIELDS = {
-    seconds:          { kind: 'entier', min: 0 },
-    kills:            { kind: 'entier', min: 0 },
-    deaths:           { kind: 'entier', min: 0 },
-    rank:             { kind: 'entier', min: 1 },
-    cubes:            { kind: 'entier', min: 0 },
-    damage:           { kind: 'entier', min: 0 },
+    seconds:          { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    kills:            { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    deaths:           { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    rank:             { kind: 'entier', min: 1, max: PG_INT4_MAX },
+    cubes:            { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    damage:           { kind: 'entier', min: 0, max: PG_INT4_MAX },
     cashedOut:        { kind: 'booleen' },
-    purseCents:       { kind: 'entier', min: 0 },
-    declaredNetCents: { kind: 'entier', min: 0 },
+    purseCents:       { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    declaredNetCents: { kind: 'entier', min: 0, max: PG_INT4_MAX },
   };
   // Construit le rapport à partir de l'état de fin de partie. La liste blanche est la seule
   // porte : un état de jeu porte la mise, le pot, le portefeuille et bien d'autres montants, et
@@ -1971,6 +1997,11 @@ const WBCore = (function(){
         erreurs.push({ field: nom, code: 'type', message: '« ' + nom +' » doit être un entier exact, reçu ' + JSON.stringify(v) + '.' });
       } else if (v < regle.min) {
         erreurs.push({ field: nom, code: 'borne', message: '« ' + nom + ' » doit valoir au moins ' + regle.min + ', reçu ' + v + '.' });
+      } else if (regle.max !== undefined && v > regle.max) {
+        // La symétrique de la borne basse, et elle protège l'ÉCRITURE plutôt que le calcul : au
+        // delà de l'`integer` de Postgres, ce n'est pas le rapport qui est faux, c'est l'`update`
+        // qui échoue et laisse le billet ouvert. Un refus motivé vaut mieux qu'un 500 muet.
+        erreurs.push({ field: nom, code: 'borne', message: '« ' + nom + ' » doit valoir au plus ' + regle.max + ', reçu ' + v + '.' });
       } else {
         propre[nom] = v;
       }
@@ -1999,14 +2030,23 @@ const WBCore = (function(){
   // — « plus de kills que d'adversaires ». Non : chacun a plusieurs vies — trois, deux en
   //   Resurgence. Le plafond est adversaires × vies.
   //
-  // L'INVARIANT « AUCUN MONTANT NE VIENT DU CLIENT » NE VAUT PAS PARTOUT, ET LE DIRE ENTIER LE
-  // RENDRAIT FAUX :
-  // — MAXWIN : le net est RECALCULÉ. Le billet porte la mise et le mode, `payoutCents` fait le
-  //   reste, le client n'a aucune voix.
-  // — Resurgence : le net est ENCADRÉ, pas recalculé. La sacoche est précisément le nombre que le
-  //   serveur ne sait pas refaire ; il applique `cashoutCents` à un montant DÉCLARÉ par le client
-  //   et seulement borné à [0, mise × sièges] — un intervalle qui va de 0 à 50 mises. C'est
-  //   faible, c'est honnête, et c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+  // L'INVARIANT « AUCUN MONTANT NE VIENT DU CLIENT » EST FAUX, DANS LES DEUX JEUX, ET LE DIRE
+  // ENTIER SERAIT UN MENSONGE CONFORTABLE :
+  // — Dans les deux jeux le net est ENCADRÉ, pas recalculé : il vaut `cashoutCents(sacoche)`, et
+  //   la sacoche est précisément le nombre que le serveur ne sait pas refaire. Il applique donc
+  //   une fonction à un montant DÉCLARÉ par le client, seulement borné à [0, mise × sièges] — un
+  //   intervalle qui va de 0 à 20 mises en MAXWIN et de 0 à 50 en Resurgence. C'est faible, c'est
+  //   honnête, et c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+  // — Le pot forfaitaire de `payoutCents` n'est PLUS un montant payé nulle part : depuis que le
+  //   prix MAXWIN est la sacoche emportée (« CARRIED OUT », test.js : `the prize is what you
+  //   carry out`), il n'est que le PLAFOND affiché au lobby, le « WIN UP TO ». Le serveur le
+  //   recalculait quand même et écrivait un net quatre fois supérieur à ce que l'écran venait de
+  //   verser : `ecart_cents`, la colonne censée mesurer la malhonnêteté du client, mesurait en
+  //   réalité ce désaccord de conception. La règle du jeu a été retenue, le forfait supprimé.
+  // — La borne n'est pas un décret : l'argent se conserve. La sacoche naît à la mise, se transfère
+  //   entière au tueur, tombe au sol sinon, et l'encaissement la met à zéro. Toute la table dans
+  //   une seule sacoche est donc atteignable, et `cashoutCents(mise × sièges)` retombe au centime
+  //   sur `payoutCents(...).winnerCents` — c'est ce qui garde le « WIN UP TO » honnête.
   //
   // `declaredNetCents` n'est JAMAIS payé ni cru. Le verdict calcule l'ÉCART entre ce que le client
   // annonce et ce que le serveur compte, et le rend pour qu'il soit stocké. On mesure, on ne punit
@@ -2021,13 +2061,17 @@ const WBCore = (function(){
       rapport:      'un rapport que `checkReport` refuse',
       expire:       'un billet expiré : ce n\'est plus la partie dont on parle',
       kills:        'plus de kills que adversaires × vies',
+      morts:        'plus de morts que de vies',
       duree:        'une partie plus longue que tout le plan de zone',
       chronometre:  'une durée que l\'horloge du serveur n\'a pas eu le temps de contenir',
       victoire:     'une victoire annoncée avant que l\'horloge du serveur ne l\'autorise',
       encaissement: 'un encaissement Resurgence avant la fin du verrou de CASHOUT.lock',
       cubes:        'plus de cubes que CUBE.max',
       rang:         'un rang au-delà du nombre d\'équipes de la table, le joueur éliminé compris',
-      sacoche:      'une sacoche au-delà de mise × sièges',
+      // Cette borne-là ne sert plus seulement à refuser : depuis que le net est la sacoche dans
+      // les deux jeux, c'est elle qui PLAFONNE le paiement. Le dire ici, sinon la table des
+      // motifs ment sur son propre rôle — elle annoncerait un refus là où elle tient l'argent.
+      sacoche:      'une sacoche au-delà de mise × sièges, qui plafonne aussi le paiement',
     },
     // LES TOLÉRANCES SONT LARGES, ET C'EST UNE DÉCISION, pas un oubli. Aucun argent n'est en jeu
     // en phase 02a : accepter une partie douteuse coûte une ligne de statistique qui ne vaut rien,
@@ -2051,32 +2095,48 @@ const WBCore = (function(){
     return null;
   }
   // Le verdict lui-même. Fonction PURE : le billet, le rapport et l'heure entrent, un refus motivé
-  // ou un règlement sort. Le billet attendu porte `mode`, `stakeCents`, `seats`, `seed`,
-  // `openedAt` et `expiresAt` ; `seats` vient de la ligne en base et non du mode, pour qu'un mode
-  // rééquilibré demain ne réécrive pas le passé d'une partie déjà jouée.
+  // ou un règlement sort. Le billet attendu porte `mode`, `stakeCents`, `seats`, `teamSize`,
+  // `seed`, `openedAt` et `expiresAt`.
+  //
+  // `seats` ET `teamSize` viennent de la ligne en base, pas du mode d'aujourd'hui, pour qu'un mode
+  // rééquilibré demain ne réécrive pas le passé d'une partie déjà jouée. Les relire dans `MODES`
+  // annulerait la seule raison d'être de ces colonnes : un résultat est accepté jusqu'à
+  // l'expiration du billet, soit une bonne dizaine de minutes, et un serveur qui redémarre
+  // entre-temps avec un `teams` corrigé jugerait la partie contre une table que personne n'a achetée.
+  //
+  // Ce qui n'est PAS figé, et qu'il faut savoir : les vies, le plan de zone, `CUBE.max` et le sas
+  // restent lus dans les règles courantes. Ce sont des règles du JEU, pas des propriétés de la
+  // table vendue ; les figer demanderait de recopier tout l'équilibrage dans chaque billet. Les
+  // rééquilibrer déplacerait donc quelques bornes de plausibilité, jamais un montant.
   function matchVerdict(billet, rapport, maintenantMs){
     const b = (billet && typeof billet === 'object') ? billet : {};
     const cle = (typeof b.mode === 'string') ? b.mode : (b.mode && typeof b.mode === 'object' ? b.mode.id : '');
     const mode = (typeof cle === 'string' && Object.prototype.hasOwnProperty.call(MODES, cle)) ? MODES[cle] : null;
     const stakeCents = (Number.isSafeInteger(b.stakeCents) && b.stakeCents > 0) ? b.stakeCents : 0;
     const seats = (Number.isSafeInteger(b.seats) && b.seats > 0) ? b.seats : (mode ? seatsOf(mode) : 0);
+    const teamSize = (Number.isSafeInteger(b.teamSize) && b.teamSize > 0) ? b.teamSize : (mode ? mode.teamSize : 0);
     // Ces trois-là se remplissent au fur et à mesure, parce qu'un refus prononcé avant d'avoir lu
     // le billet ne peut pas les connaître. Ils sortent quand même : une ligne refusée doit pouvoir
     // dire contre quoi elle a été mesurée.
     let sacocheCents = 0, declaredNetCents = 0;
-    let limites = { killsMax: 0, dureeMaxS: 0, rangMax: 0, sacocheMaxCents: 0 };
-    const rendre = (statut, issue, controle, motif, grossCents, feeCents, netCents, winnerCents) => ({
+    let limites = { killsMax: 0, mortsMax: 0, dureeMaxS: 0, rangMax: 0, sacocheMaxCents: 0 };
+    // Toute valeur rendue ici finit dans une colonne `integer` de `matches`. Le ramener au domaine
+    // de la colonne est une ceinture qui ne coûte qu'une ligne : `checkReport` refuse déjà ce qui
+    // dépasse, mais le jour où ce contrôle sautera, l'écriture doit échouer sur une règle et non
+    // sur un `22003` qui laisse le billet ouvert.
+    const int4 = v => Math.max(-2147483648, Math.min(PG_INT4_MAX, v));
+    const rendre = (statut, issue, controle, motif, grossCents, feeCents, netCents) => ({
       ok: statut === 'settled', statut, issue, controle: controle || null, motif: motif || null,
-      grossCents, feeCents, netCents, winnerCents,
+      grossCents, feeCents, netCents,
       sacocheCents, declaredNetCents,
       // L'écart est mesuré même sur un refus, et il peut être négatif : le client peut annoncer
       // moins que ce que le serveur compte. C'est une observation, jamais une sanction.
-      ecartCents: declaredNetCents - netCents,
+      ecartCents: int4(declaredNetCents - netCents),
       limites,
     });
-    const refus = (controle, motif, statut) => rendre(statut || 'rejected', 'refus', controle, motif, 0, 0, 0, 0);
-    const regle = (issue, grossCents, feeCents, netCents, winnerCents) =>
-      rendre('settled', issue, null, null, grossCents, feeCents, netCents, winnerCents);
+    const refus = (controle, motif, statut) => rendre(statut || 'rejected', 'refus', controle, motif, 0, 0, 0);
+    const regle = (issue, grossCents, feeCents, netCents) =>
+      rendre('settled', issue, null, null, grossCents, feeCents, netCents);
 
     if (!mode || !stakeCents || !seats)
       return refus('billet', 'Billet illisible : il faut un mode connu, une mise en centimes et des sièges.');
@@ -2088,7 +2148,13 @@ const WBCore = (function(){
     limites = {
       // Le plafond est adversaires × vies, et les adversaires sont tout le monde SAUF sa propre
       // équipe : on ne tue pas ses coéquipiers.
-      killsMax: Math.max(0, seats - mode.teamSize) * vies,
+      killsMax: Math.max(0, seats - teamSize) * vies,
+      // On ne meurt pas plus de fois qu'on n'a de vies : `endMatch` rend `livesFor(mode) - lives`,
+      // et les vies ne descendent pas sous zéro. Démontrable depuis les règles, exactement comme
+      // le plafond de kills — donc c'est un vrai contrôle d'enveloppe et pas une borne technique.
+      // `damage`, lui, n'a aucun plafond démontrable depuis le billet : il n'a que la borne de sa
+      // colonne, et s'en tenir là est la lecture honnête.
+      mortsMax: vies,
       // La borne haute d'une partie que personne ne gagne : tout le plan de zone, la protection au
       // réapparition initiale, et la marge.
       dureeMaxS: zoneTotalS(zonePlan(b.seed, mode)) + GRACE + ENVELOPPE.margeDureeS,
@@ -2097,7 +2163,7 @@ const WBCore = (function(){
       // comme en Trio l'équipe du joueur peut être encore debout au moment où lui est éliminé —
       // elle compte alors dans les équipes debout, et le rang annoncé vaut le nombre d'équipes
       // plus un. Ce joueur-là est honnête : borner au nombre d'équipes le refusait.
-      rangMax: Math.max(1, Math.round(seats / mode.teamSize)) + 1,
+      rangMax: Math.max(1, Math.round(seats / teamSize)) + 1,
       sacocheMaxCents: purseBound(stakeCents, seats).maxCents,
     };
 
@@ -2109,7 +2175,10 @@ const WBCore = (function(){
     // La sacoche est BORNÉE tout de suite, avant même les refus. Aucun chemin de ce code ne doit
     // pouvoir porter plus que tout l'argent de la table, même le jour où un contrôle sautera.
     sacocheCents = Math.min(limites.sacocheMaxCents, Math.max(0, r.purseCents));
-    declaredNetCents = r.declaredNetCents;
+    // Le net annoncé est CLAMPÉ comme la sacoche, pour la même raison et une de plus : il part
+    // tel quel dans une colonne `integer`. Aucun chemin de cette fonction ne doit pouvoir porter
+    // un nombre que la base refusera d'écrire.
+    declaredNetCents = Math.min(PG_INT4_MAX, Math.max(0, r.declaredNetCents));
 
     const expireMs = instantMs(b.expiresAt);
     if (expireMs !== null && tMs > expireMs)
@@ -2118,7 +2187,9 @@ const WBCore = (function(){
     // Les faits, un par un. Les bornes basses — durée >= 0, rang >= 1 — sont déjà tenues par
     // `checkReport` : les réécrire ici ferait deux sources de vérité pour la même règle.
     if (r.kills > limites.killsMax)
-      return refus('kills', `${r.kills} kills pour ${limites.killsMax} possibles (${Math.max(0, seats - mode.teamSize)} adversaires × ${vies} vies).`);
+      return refus('kills', `${r.kills} kills pour ${limites.killsMax} possibles (${Math.max(0, seats - teamSize)} adversaires × ${vies} vies).`);
+    if (r.deaths > limites.mortsMax)
+      return refus('morts', `${r.deaths} morts pour ${limites.mortsMax} vies : on ne meurt pas plus de fois qu'on n'a de vies.`);
     if (r.cubes > CUBE.max)
       return refus('cubes', `${r.cubes} cubes de puissance pour ${CUBE.max} au maximum.`);
     if (r.rank > limites.rangMax)
@@ -2157,18 +2228,26 @@ const WBCore = (function(){
     if (encaissement && sacocheCents > stakeCents && r.seconds < CASHOUT.lock)
       return refus('encaissement', `Encaissement au bout de ${r.seconds} s alors que le verrou dure ${CASHOUT.lock} s après le dernier kill.`);
 
-    if (mode.cashout) {
-      // Resurgence : encaisser et survivre paient la même chose, la sacoche. Le montant est
-      // ENCADRÉ, pas recalculé — c'est le seul endroit où un nombre du client décide d'un net.
-      if (!encaissement && !victoire) return regle('defaite', 0, 0, 0, 0);
-      const p = cashoutCents(sacocheCents);
-      return regle(encaissement ? 'encaissement' : 'victoire', p.grossCents, p.feeCents, p.netCents, p.netCents);
-    }
-    // MAXWIN : le pot, recalculé depuis la seule mise du billet. `netCents` est la part de CE
-    // joueur, `winnerCents` ce que l'équipe emporte — ils ne diffèrent qu'en Duo et en Trio.
-    if (!victoire) return regle('defaite', 0, 0, 0, 0);
-    const p = payoutCents(stakeCents, mode);
-    return regle('victoire', p.potCents, p.feeCents, p.splitCents, p.winnerCents);
+    // LE PRIX EST LA SACOCHE, DANS LES DEUX JEUX, ET C'EST LA RÈGLE DU JEU LUI-MÊME. Elle est
+    // écrite dans `docs/GAME-DESIGN.md`, verrouillée par le test « the prize is what you carry
+    // out », et appliquée par `endMatch` qui verse `cashoutPayout(pouch).net` sans jamais regarder
+    // le mode. Le serveur recalculait pourtant un pot forfaitaire en MAXWIN, ce qui écrivait en
+    // base un net sans rapport avec ce que l'écran venait d'afficher — jusqu'à quatre fois plus —
+    // et faisait de `ecart_cents` la mesure d'un désaccord de conception plutôt que d'un mensonge
+    // de client. Une seule des deux règles pouvait être vraie : c'est celle du jeu.
+    //
+    // Ce que le serveur peut encore tenir, et qu'il tient : la sacoche est bornée à
+    // `mise × sièges` (ligne plus haut, avant tout refus), donc le net ne peut jamais dépasser
+    // `payoutCents(...).winnerCents` — le « WIN UP TO » annoncé au lobby. Ce forfait redevient ce
+    // qu'il est partout ailleurs dans le jeu : un PLAFOND D'AFFICHAGE, jamais un montant payé.
+    //
+    // Les trois montants rendus sont donc au périmètre du JOUEUR, dans les cinq modes, et
+    // `feeCents + netCents = grossCents` sans exception. Ce que l'équipe emporte, lui, est la
+    // somme des sacoches de ses membres : le serveur ne la connaît pas, il ne prétend plus la
+    // rendre.
+    if (!encaissement && !victoire) return regle('defaite', 0, 0, 0);
+    const p = cashoutCents(sacocheCents);
+    return regle(encaissement ? 'encaissement' : 'victoire', p.grossCents, p.feeCents, p.netCents);
   }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
@@ -2177,7 +2256,7 @@ const WBCore = (function(){
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           seedFor, ticketFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
+           NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -2429,13 +2508,23 @@ const Auth=(function(){
   }
   // Un seul point de passage vers le reseau : il ne lance jamais, il rend toujours un etat lisible.
   // Un `fetch` qui echoue rend status 0, ce que WBCore traduit en « verifie ton reseau ».
+  //
+  // ET IL A UN DELAI, parce que `fetch` n'en a pas. Un serveur qui accepte la connexion puis ne
+  // repond plus — proxy qui avale, bascule wifi/cellulaire, telephone endormi — laissait la
+  // promesse en vol pour toujours : l'evenement `delai` que la table de `matchFlow` prevoit depuis
+  // le premier jour n'etait jamais produit, et le module du billet restait coince sur `rapport`.
+  // L'`AbortError` retombe dans le `catch` ci-dessous et rend status 0, le chemin de secours etait
+  // donc deja ecrit ; il manquait l'horloge. La valeur vit dans WBCore, avec son test.
   async function call(url,opts){
     if(!url) return {ok:false,status:0,data:null};
+    const ctrl=typeof AbortController!=='undefined'?new AbortController():null;
+    const t=ctrl?setTimeout(()=>ctrl.abort(),C.NET.timeoutMs):0;
     try{
-      const r=await fetch(url,opts);
+      const r=await fetch(url,ctrl?{...opts,signal:ctrl.signal}:opts);
       let data=null; try{ data=await r.json(); }catch(e){}
       return {ok:r.ok,status:r.status,data};
     }catch(e){ return {ok:false,status:0,data:null}; }
+    finally{ if(t) clearTimeout(t); }
   }
   const cmHead={'content-type':'application/json','x-api-key':ACCOUNT.key};
   const cmCall=(route,opts)=>call(C.authUrl(ACCOUNT.key,route),opts);
@@ -2609,6 +2698,12 @@ Auth.wire(); Auth.restore();
 // table : dans tous ces cas la partie part sur la graine du navigateur et se comporte exactement
 // comme avant la phase. Et le sas d'attente ne regarde jamais le reseau pour lancer la partie :
 // un billet qui tarde ne retarde JAMAIS le coup d'envoi, c'est le chronometre du sas qui tranche.
+//
+// Les marqueurs ci-dessous ne sont pas decoratifs : test.js EXECUTE ce module, avec le vrai `C` et
+// un `Auth` en doublure, pour eprouver le branchement lui-meme et pas une copie reecrite dans le
+// test. Un decoupage par recherche de texte se serait casse a la premiere retouche, comme
+// /*CORE-START*/ existe pour la meme raison.
+/*MATCH-START*/
 const Match=(function(){
   let step='hors-ligne';          // l'etat vient de matchFlow, jamais d'un drapeau improvise
   let ticket=null;                // le dernier billet recu, ou null
@@ -2657,17 +2752,33 @@ const Match=(function(){
   // personne n'attend rien et l'enchainement se termine sur place.
   function fin(etat){
     const billet=enJeu; enJeu=null;
+    // UN BILLET DONT LE RAPPORT EST PARTI NE RESSERVIRA JAMAIS, quoi que reponde le serveur. Il
+    // etait efface a l'arrivee du reglement ; un reglement qui ne revient pas le laissait donc en
+    // main, et `coupDenvoi` le ressortait a la partie suivante : meme graine, donc meme carte et
+    // meme gaz, puis un second rapport emis sur un billet deja regle dont le resultat etait perdu
+    // en silence. C'est ce seul deplacement qui supprime le rejeu.
+    //
+    // Seulement si ce billet a bien ete JOUE : un billet qui decrit une autre table n'a servi a
+    // rien, il reste ouvert cote serveur pour la table qu'il decrit, et le jeter ici contredirait
+    // ce que le README promet.
+    if(billet) ticket=null;
     step=C.matchFlow(step,billet?'fin-en-ligne':'fin-hors-ligne');
-    if(step!=='rapport') return;
+    // `!billet` en plus de l'etat : `rendre(null, …)` lancerait sur `billet.id`, et un rejet non
+    // gere ne se voit nulle part.
+    if(step!=='rapport'||!billet) return;
     rendre(billet,C.reportFrom(etat));
   }
   async function rendre(billet,rapport){
+    // La meme garde de generation que `demander`, et pour la meme raison — aggravee : depuis que
+    // le sas peut repartir alors que le rapport est encore en vol, une reponse tardive ecrirait
+    // `step` par-dessus l'etat de la partie SUIVANTE, et un `echec` ferait `demande → hors-ligne`,
+    // tuant sa demande de billet. Le POST part et son resultat est encaisse dans tous les cas ;
+    // c'est l'ecriture de l'etat qu'on abandonne.
+    const n=gen;
     const r=await Auth.send('/api/match/'+encodeURIComponent(billet.id)+'/result',rapport);
     const regle=!!(r.ok&&r.data&&typeof r.data==='object');
-    step=C.matchFlow(step,regle?'reglement':'echec');
+    if(n===gen) step=C.matchFlow(step,regle?'reglement':'echec');
     if(!regle) return;
-    // Le billet est clos cote serveur : on ne le rejouera pas.
-    ticket=null;
     // LES STATISTIQUES SONT ADOPTEES, JAMAIS RECOPIEES. Le reglement ne porte aucune statistique —
     // il porte le verdict d'UNE partie — et le lire comme un compte remettrait le profil a zero.
     // On redemande donc le profil, et c'est `applyAccount` qui arbitre : centimes vers dollars,
@@ -2676,6 +2787,7 @@ const Match=(function(){
   }
   return { sas, coupDenvoi, fin };
 })();
+/*MATCH-END*/
 const rulesEl=$('rules');
 function showRules(v){ rulesEl.classList.toggle('on',v); rulesEl.setAttribute('aria-hidden',String(!v)); }
 $('rulesBtn').onclick=()=>showRules(true);
@@ -4026,16 +4138,23 @@ function botUpdate(b,dt){
 
 // ---------- zone ----------
 function zoneUpdate(dt){
-  // Le plan est tire une fois pour toutes au coup d'envoi, a partir de la seule graine. Ce bloc
-  // ne decide donc plus rien : il LIT le cercle suivant au lieu de le tirer sur Math.random().
+  // Le plan est tire une fois pour toutes au coup d'envoi, a partir de la seule graine, et c'est
+  // `C.zoneAt` qui le LIT — la fonction testee, et desormais la seule. Ce bloc refaisait le
+  // decompte et l'interpolation a la main : deux implementations de la meme regle, dont la testee
+  // etait la morte. C'est mot pour mot le patron « respawn() definie deux fois » que
+  // docs/HISTORIQUE.md recense, et il laissait passer une mutation qui doublait la duree du gaz
+  // sans faire tomber un seul test.
   // Attention a ce que ca ne veut pas dire : seul le GAZ est reproductible, le reste de la partie
   // (reapparitions, bots, identifiants) tire toujours sur Math.random().
-  const z=G.zone, ph=G.zonePlan.phases; z.timer-=dt;
+  const z=G.zone, ph=G.zonePlan.phases, avantShrink=z.shrinking;
+  const a=C.zoneAt(G.zonePlan,G.time);
+  z.cx=a.cx; z.cz=a.cz; z.r=a.r; z.phase=a.phase; z.shrinking=a.shrinking; z.timer=a.timer; z.dps=a.dps; z.to=a.to;
+  // Ne reste ici que ce qui est EFFET DE BORD — son, vibration, journal — et il se declenche
+  // desormais sur les transitions du plan plutot que sur un compteur local.
+  if(z.shrinking&&!avantShrink){ z.warned=false; rumble(true); feed('Poison gas is closing in'); }
+  else if(!z.shrinking&&avantShrink){ rumble(false); }
   // three seconds of warning before it starts moving, then a rolling rumble while it does
   if(!z.shrinking && z.phase<ph.length && !z.warned && z.timer<=3){ z.warned=true; zoneAlarm(); }
-  if(!z.shrinking){ if(z.phase<ph.length&&z.timer<=0){ z.shrinking=true; z.warned=false; rumble(true); z.from={cx:z.cx,cz:z.cz,r:z.r}; const p=ph[z.phase]; z.to={cx:p.cx,cz:p.cz,r:p.r}; z.timer=p.shrinkS; feed('Poison gas is closing in'); } }
-  else { const k=1-clamp(z.timer/ph[z.phase].shrinkS,0,1); z.cx=z.from.cx+(z.to.cx-z.from.cx)*k; z.cz=z.from.cz+(z.to.cz-z.from.cz)*k; z.r=z.from.r+(z.to.r-z.from.r)*k; if(z.timer<=0){ z.shrinking=false; rumble(false); z.phase++; z.timer=z.phase<ph.length?ph[z.phase].waitS:Infinity; } }
-  z.dps=ph[Math.min(z.phase,ph.length-1)].dps;
   G.zoneMesh.position.x=z.cx; G.zoneMesh.position.z=z.cz; G.zoneMesh.scale.set(z.r,1,z.r); G.gasFloor.position.x=z.cx; G.gasFloor.position.z=z.cz; G.gasFloor.scale.set(z.r,z.r,1);
   for(let i=0;i<G.gasParts.length;i++){ const gp=G.gasParts[i]; if(!gp.mesh.visible) continue; gp.a+=gp.sp*dt; const R=z.r+gp.off; gp.mesh.position.set(z.cx+Math.cos(gp.a)*R, 0.8+Math.sin(G.time*1.6+gp.ph)*0.5, z.cz+Math.sin(gp.a)*R); gp.mesh.rotation.y+=dt*0.6; }
   for(const e of G.ents){ if(e.alive&&!inZone(e.x,e.z,0)){ e.hp-=z.dps*maxHp(e)*dt; e.lastDamageT=G.time; e.gasT=(e.gasT||0)-dt;
@@ -4648,7 +4767,7 @@ function buildMapImage(){
 let W=null;
 function enterWaiting(stake){
   lobbyStop();
-  const mode=C.MODES[selMode], seats=mode.teams*mode.teamSize, tier=C.tierFor(stake);
+  const mode=C.MODES[selMode], seats=C.seatsOf(mode), tier=C.tierFor(stake);
   wallet-=stake; lastStake=stake;                                   // charged on entry, refunded if you leave
   const queue=C.queueFor(C.onlineTotal(),selMode,stake), rate=C.joinRate(queue,seats);
   W={stake,mode,seats,rate,t:0,seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,names:BOT_NAMES.slice().sort(()=>Math.random()-0.5),ni:0};
@@ -5043,7 +5162,7 @@ function refreshOnline(snap){
     const inMode=C.TIERS.reduce((a,t)=>a+C.queueFor(shownOnline,id,t.stake),0);
     n.innerHTML=`<i></i><b>${fmt(inMode)}</b> playing`; });
   const mode=C.MODES[selMode];
-  document.querySelectorAll('.chip .queue').forEach(n=>{ const q=C.queueFor(shownOnline,selMode,+n.dataset.stake), seats=mode.teams*mode.teamSize;
+  document.querySelectorAll('.chip .queue').forEach(n=>{ const q=C.queueFor(shownOnline,selMode,+n.dataset.stake), seats=C.seatsOf(mode);
     n.innerHTML=`<i></i><b>${fmt(q)}</b> queuing · ~${C.waitEstimate(q,seats)}s`; });
   clearTimeout(onlineTimer);
   if($('lobby').style.display!=='none') onlineTimer=setTimeout(refreshOnline,2200);

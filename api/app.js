@@ -93,8 +93,12 @@ function checkMatch(corps) {
 
   // La mise arrive telle qu'elle est affichée, en dollars. On ne la convertit pas : on cherche la
   // table qui porte exactement ce montant, et c'est SA mise qui sera convertie en centimes.
+  // La recherche de table est une RÈGLE DU JEU : elle vit dans WBCore, l'API l'appelle. La
+  // recopier ici — `TIERS.find(...)`, c'est-à-dire le corps même de `tierFor` — rouvrait la
+  // divergence silencieuse que `api/core.js` existe pour fermer : le jour où le jeu accepte une
+  // table de plus, le lobby l'affiche et le serveur répond « Mise inconnue ».
   const mise = Number(corps.stake);
-  const table = Number.isFinite(mise) ? C.TIERS.find(t => t.stake === mise) : null;
+  const table = C.tierFor(mise);
   if (!table) erreurs.push(`Mise inconnue. Mises possibles : ${C.TIERS.map(t => t.stake).join(', ')}.`);
 
   const brawler = connu(C.BRAWLERS, corps.brawler) ? corps.brawler : null;
@@ -108,7 +112,11 @@ function checkMatch(corps) {
 
   if (erreurs.length) return { champs: null, erreurs };
   return {
-    champs: { mode, stakeCents: C.toCents(table.stake), seats: C.seatsOf(mode), brawler, clientKey },
+    // `seats` ET `teamSize` sont recopiés dans la ligne pour la même raison : un mode rééquilibré
+    // demain ne doit pas réécrire le passé d'une partie déjà jouée, et le résultat d'une partie
+    // est accepté jusqu'à l'expiration de son billet.
+    champs: { mode, stakeCents: C.toCents(table.stake), seats: C.seatsOf(mode),
+              teamSize: mode.teamSize, brawler, clientKey },
     erreurs,
   };
 }
@@ -158,6 +166,7 @@ const billet = m => ({
   mode: m.mode,
   stakeCents: m.stake_cents,
   seats: m.seats,
+  teamSize: m.team_size,
   brawler: m.brawler,
   // `seed` tout court : c'est le nom que `WBCore.seedFor` lit dans le billet. Et `Number`, parce
   // que le pilote Postgres rend les colonnes `bigint` sous forme de CHAÎNE : une graine en chaîne
@@ -291,6 +300,7 @@ function createApp({
       mode: champs.mode.id,
       stakeCents: champs.stakeCents,
       seats: champs.seats,
+      teamSize: champs.teamSize,
       brawler: champs.brawler,
       seedPublic, seedSecret,
       clientKey: champs.clientKey,
@@ -340,6 +350,7 @@ function createApp({
       mode: ligne.mode,
       stakeCents: ligne.stake_cents,
       seats: ligne.seats,
+      teamSize: ligne.team_size,
       seed: ligne.seed_public,
       openedAt: ligne.opened_at,
       expiresAt: ligne.expires_at,

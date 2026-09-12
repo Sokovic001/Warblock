@@ -17,7 +17,7 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `GET /api/me` | Rend le profil du joueur connecté, **statistiques agrégées** comprises. La première connexion crée le compte. |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
 | `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, expiration. |
-| `POST /api/match/:id/result` | Juge le rapport rendu, recalcule les montants et **clôt** la ligne. |
+| `POST /api/match/:id/result` | Juge le rapport rendu, encadre les montants et **clôt** la ligne. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
 
@@ -28,7 +28,7 @@ son mode et son brawler, **et rien d'autre**.
 
 ```
 POST /api/match      { mode, stake, brawler, clientKey }
-→ 200                { id, mode, stakeCents, seats, brawler, seed, status, openedAt, expiresAt }
+→ 200                { id, mode, stakeCents, seats, teamSize, brawler, seed, status, openedAt, expiresAt }
 ```
 
 - `mode` est une clé de `WBCore.MODES`, `stake` la mise **en dollars telle qu'elle est affichée** et
@@ -101,20 +101,29 @@ POST /api/match/12/result   le rapport, tel que WBCore.reportFrom() le produit
 
 Le corps **est** le rapport, sans enveloppe : `seconds`, `kills`, `deaths`, `rank`, `cubes`,
 `damage`, `cashedOut`, `purseCents`, `declaredNetCents`. `WBCore.checkReport()` le lit et **refuse
-tout champ inconnu, avec un code** (`inconnu`, `manquant`, `type`, `borne`, `corps`) : `PATCH
+tout champ inconnu, avec un code** (`inconnu`, `manquant`, `type`, `borne`, `corps`). Chaque entier
+y porte aussi une **borne haute**, et elle vient du schéma et non du jeu : ces neuf champs finissent
+dans des colonnes `integer`, qui s'arrêtent à 2 147 483 647. Sans elle, un rapport « valide » à
+3 000 000 000 faisait lever `22003` à Postgres, répondre 500 à la route, et **laissait la ligne
+ouverte** — le joueur enfermé dans un billet mort jusqu'à l'expiration, puisqu'il n'en a qu'un à la
+fois. Un refus motivé en 400 vaut mieux qu'un 500 muet : `PATCH
 /api/me` ignore les champs en trop et c'est bien pour un profil, mais sur un rapport qui décide
 d'un montant le silence est la mauvaise valeur par défaut.
 
 ### Le verdict est une **enveloppe de plausibilité**, pas de l'anti-triche
 
 `WBCore.matchVerdict()` est une fonction pure qui reçoit le billet, le rapport et **une horloge en
-argument**. Le serveur ne rejoue pas la partie — il ne le fera pas avant la phase 02b. Il refuse ce
+argument**. Le billet porte `seats` **et** `team_size`, figés à l'ouverture : un résultat est
+accepté jusqu'à l'expiration, et un serveur redémarré entre-temps avec un mode rééquilibré jugerait
+la partie contre une table que personne n'a achetée. Le serveur ne rejoue pas la partie — il ne le fera pas avant la phase 02b. Il refuse ce
 qui est **impossible**, et rien d'autre. La liste des contrôles vit dans la constante `ENVELOPPE`,
 à côté de la fonction : plus de kills que adversaires × vies, une partie plus longue que tout le
 plan de zone, une durée que son propre chronomètre n'a pas eu le temps de contenir, une victoire
 annoncée avant que son horloge ne l'autorise, un encaissement Resurgence avant la fin du verrou de
-`CASHOUT.lock`, plus de cubes que `CUBE.max`, un rang hors de la table, une sacoche au-delà de
-`mise × sièges`, un billet expiré.
+`CASHOUT.lock`, plus de cubes que `CUBE.max`, un rang hors de la table, plus de morts que de vies, une sacoche au-delà de
+`mise × sièges`, un billet expiré. La borne de sacoche joue depuis peu un second rôle, écrit dans
+`ENVELOPPE.controles` pour que la table ne mente pas sur elle-même : elle **plafonne le paiement**,
+puisque c'est la sacoche qui décide du net.
 
 **Deux contrôles « évidents » sont faux et ne sont pas écrits.** « La sacoche vaut exactement la
 mise quand on n'a tué personne » : non, une mort par gaz lâche la sacoche au sol et n'importe qui
@@ -126,17 +135,33 @@ endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheu
 n'est en jeu en 02a, donc accepter une partie douteuse coûte une ligne de statistique qui ne vaut
 rien, tandis que refuser une partie honnête coûte un joueur.
 
-### L'invariant « aucun montant ne vient du client » se scinde en deux
+### L'invariant « aucun montant ne vient du client » est FAUX, dans les deux jeux
 
-- **MAXWIN : le net est recalculé.** Le billet porte la mise et le mode, `payoutCents()` fait le
-  reste. Le client n'a aucune voix, et un rapport qui n'annonce aucun montant se règle quand même.
-- **Resurgence : le net est encadré, pas recalculé.** Le net d'un encaissement est
-  `cashoutCents(sacoche)`, et la sacoche est précisément le nombre que le serveur ne sait pas
-  refaire. Il applique donc une fonction à un montant **déclaré par le client**, borné à
-  `[0, mise × sièges]` — un intervalle de 0 à 50 mises. C'est faible, c'est honnête, et c'est une
-  raison de plus pour qu'aucun euro n'entre avant la phase 02b.
+C'était écrit comme une scission — MAXWIN recalculé, Resurgence encadré — et la moitié rassurante
+était fausse. **Le net est encadré, jamais recalculé, dans les cinq modes.** Il vaut
+`cashoutCents(sacoche)`, et la sacoche est précisément le nombre que le serveur ne sait pas
+refaire : il applique une fonction à un montant **déclaré par le client**, borné à
+`[0, mise × sièges]` — un intervalle de 0 à 20 mises en MAXWIN, de 0 à 50 en Resurgence. C'est
+faible, c'est honnête, et **c'est une raison de plus pour qu'aucun euro n'entre avant la phase
+02b**. L'aveu a durci, il ne s'est pas adouci.
 
-Dans les deux cas, l'API **ne recalcule jamais la commission elle-même** : le net ne sort que des
+Pourquoi le serveur recalculait un pot MAXWIN, et pourquoi il ne le fait plus : le jeu a cessé de
+verser un forfait au dernier survivant il y a longtemps — **le prix est la sacoche qu'on emporte**,
+c'est ce que `endMatch` crédite (`cashoutPayout(pouch).net`), ce que l'écran affiche
+(« CARRIED OUT »), ce que `docs/GAME-DESIGN.md` documente et ce que `test.js` verrouille
+(« the prize is what you carry out »). Le verdict, écrit six commits plus tard, a ressuscité le
+forfait. Sur une table à 0,50 $, une victoire parfaitement honnête faisait donc créditer $2,80 au
+joueur et écrire `net_cents = 800` en base : un `ecart_cents` de −520 centimes qui ne mesurait
+aucun mensonge, et un `best` affiché quatre fois trop grand au lobby. `payoutCents()` redevient ce
+qu'il est partout ailleurs — **le plafond « WIN UP TO », jamais un versement**. Il reste exact :
+`cashoutCents(mise × sièges)` retombe au centime sur `payoutCents(...).winnerCents`.
+
+Les trois montants d'une ligne réglée sont donc au **périmètre du joueur**, dans les cinq modes, et
+`fee_cents + net_cents = gross_cents` sans exception — la ligne se réconcilie seule. Ce que
+l'**équipe** emporte n'est écrit nulle part, volontairement : c'est la somme des sacoches de ses
+membres, et le serveur ne la connaît pas.
+
+Dans tous les cas, l'API **ne recalcule jamais la commission elle-même** : le net ne sort que des
 fonctions de paiement de `WBCore`.
 
 **`declaredNetCents` n'est jamais payé ni cru.** Le verdict calcule l'**écart** entre ce que le
@@ -230,14 +255,21 @@ auth-crossmint.js   vérifie les jetons de session                  ← touche l
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
 schema.sql          le schéma : users, matches. Deux tables, et aucune colonne « solde ».
-test.js             97 tests sans rien installer, 106 avec jose
+test.js             104 tests sans rien installer, 113 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
 
 `api/core.js` charge le bloc `WBCore` **depuis `index.html`**, le même que le navigateur exécute.
 Le pseudo est validé côté serveur par `sanitizeName()` et `validName()`, les mêmes fonctions qui
-tournent dans le jeu, et l'unicité s'appuie sur `nameKey()`.
+tournent dans le jeu, l'unicité s'appuie sur `nameKey()`, et la recherche de table sur `tierFor()` —
+l'API ne refait pas le `TIERS.find` elle-même, sans quoi une table ajoutée au jeu s'afficherait au
+lobby et se ferait refuser par le serveur.
+
+La garde de chargement liste **tous** les noms qu'`app.js` appelle, pas seulement ceux de la phase
+01 : `zonePlan`, `matchVerdict` ou `toCents` ne vivent que dans les gestionnaires, et une garde qui
+ne les couvre pas déplace la panne du démarrage vers la première requête d'un joueur — exactement ce
+qu'elle existe pour empêcher. Un test compare la liste au texte d'`app.js`.
 
 C'est ce qui rendra la phase 02 possible sans réécriture : le jour où le serveur simulera les
 parties, il aura déjà les vraies règles, avec les tests qui vont avec.
@@ -321,8 +353,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 97 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 106 : les 97, plus la chaîne complète de vérification
+node api/test.js          # 104 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 113 : les 104, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
@@ -435,9 +467,11 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
 - **Le verdict est une ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE, et il n'arrête presque
   rien.** Une enveloppe volontairement large, des tolérances d'horloge généreuses, et le parti pris
   de ne jamais refuser à tort : un client modifié ment à l'intérieur de l'enveloppe sans être
-  inquiété. Il ne peut pas se faire payer un montant MAXWIN de son choix, il peut annoncer une
-  sacoche Resurgence quelconque entre zéro et cinquante mises, et il peut mentir sur tous les faits
-  — durée, kills, cubes, dégâts, rang. Ce n'est pas un premier étage d'anti-triche et il ne faut
+  inquiété. **Il choisit son montant dans les deux jeux** — une sacoche quelconque entre zéro et
+  vingt mises en MAXWIN, entre zéro et cinquante en Resurgence — et il peut mentir sur tous les faits
+  — durée, kills, cubes, dégâts, rang. Cette phrase disait le contraire pour MAXWIN, parce que le
+  serveur y recalculait un forfait ; le forfait a disparu, l'aveu s'est donc aggravé et il faut le
+  lire ainsi. Ce n'est pas un premier étage d'anti-triche et il ne faut
   jamais le présenter comme tel : c'est une borne sur l'impossible, rien de plus. C'est précisément
   pour cela qu'**aucun euro n'entre avant que le serveur ne simule** (phase 02b). La valeur réelle
   de ce module en phase 02a est la répétition générale du grand livre.

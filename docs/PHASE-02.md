@@ -150,20 +150,36 @@ l'anti-triche.** Un client modifié ment à l'intérieur de l'enveloppe sans êt
 tolérances d'horloge volontairement larges, l'enveloppe arrête peu de choses en pratique. Sa valeur
 réelle en phase 02a est la répétition générale du schéma du grand livre.
 
-### Aucun montant n'est lu dans le rapport — mais l'invariant se scinde en deux
+### Le montant est ENCADRÉ, jamais recalculé — dans les deux jeux
 
-- **MAXWIN : le montant est recalculé.** Le billet porte la mise et le mode, `payoutCents()` fait le
-  reste. Le client n'a aucune voix.
-- **Resurgence : le montant est encadré, pas recalculé.** Le net d'un encaissement est
-  `cashoutCents(sacoche)`, et la sacoche est précisément le nombre que le serveur ne sait pas
-  refaire. Il applique donc une fonction à un nombre **déclaré par le client**, borné à
-  `[0, mise × sièges]` — un intervalle de 0 à 50 mises en Resurgence. C'est faible, c'est honnête, et
-  c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+Cette section disait que l'invariant « aucun montant ne vient du client » se scindait en deux :
+recalculé en MAXWIN, encadré en Resurgence. **La moitié rassurante était fausse**, et la correction
+est un durcissement de l'aveu, pas un adoucissement.
+
+Le net vaut `cashoutCents(sacoche)` dans les cinq modes. La sacoche est précisément le nombre que le
+serveur ne sait pas refaire : il applique donc une fonction à un nombre **déclaré par le client**,
+borné à `[0, mise × sièges]` — 0 à 20 mises en MAXWIN, 0 à 50 en Resurgence. C'est faible, c'est
+honnête, et c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+
+Pourquoi ce n'était pas vrai : le jeu ne verse plus de forfait au dernier survivant depuis
+longtemps. **Le prix est la sacoche qu'on emporte** — `endMatch` crédite `cashoutPayout(pouch).net`,
+l'écran affiche « CARRIED OUT », `docs/GAME-DESIGN.md` le documente et `test.js` le verrouille. Le
+verdict, écrit ensuite, a ressuscité le forfait : sur une table à 0,50 $, une victoire honnête
+créditait $2,80 au joueur et écrivait `net_cents = 800`, soit un `ecart_cents` de −520 centimes qui
+ne mesurait aucun mensonge mais un désaccord de conception — et la colonne dont cette phase dit
+qu'elle servira à fixer un seuil en phase 06 en devenait inexploitable. `payoutCents()` redevient ce
+qu'il est partout ailleurs : le **plafond « WIN UP TO »**, jamais un versement.
 
 La borne n'est pas un décret : elle vient de la conservation de l'argent, vraie dans le code actuel —
 la sacoche naît à la mise, se transfère entière au tueur, tombe au sol sinon, et l'encaissement la
 met à zéro. Somme des sacoches vivantes + butin au sol + encaissé = mise × sièges, à tout instant.
-Cette conservation se teste dans `test.js` sur un modèle pur des transferts.
+Cette conservation se teste dans `test.js` sur un modèle pur des transferts, et c'est elle qui fait
+que le plafond reste exact : `cashoutCents(mise × sièges)` retombe au centime sur
+`payoutCents(...).winnerCents`.
+
+Conséquence de schéma : les trois montants d'une ligne réglée sont au **périmètre du joueur**, dans
+les cinq modes, et `fee_cents + net_cents = gross_cents` sans exception. Ce que l'équipe emporte est
+la somme des sacoches de ses membres ; le serveur ne la connaît pas et ne prétend plus l'écrire.
 
 ### L'API ne recalcule jamais la commission elle-même
 
@@ -237,12 +253,14 @@ verdict sont purs. Tout se vérifie sur un portable hors ligne.
 
 | Invariant | Comment il se teste |
 |---|---|
-| `index.html` reste un seul fichier statique, sans build, sans bundler, sans React | rien à installer pour ouvrir le fichier ; extraction des blocs `<script>` puis `node --check` après chaque édition |
+| `index.html` reste un seul fichier statique, sans build, sans bundler, sans React | rien à installer pour ouvrir le fichier ; `npm test` extrait les blocs `<script>` et les fait parser par `vm.Script` — la vérification est tenue par les tests et l'intégration continue, plus par une discipline manuelle |
 | Le jeu reste jouable sans compte et sans serveur, graine comprise | quatre cas nommés — `ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible — testés comme cas normaux sur `seedFor` et `matchFlow` |
 | Un billet qui tarde ne retarde jamais le coup d'envoi | le chemin de secours a son propre test, écrit avant le reste du module |
 | Aucune règle n'est recopiée côté serveur | `api/core.js` charge `WBCore` depuis `index.html` ; `zonePlan`, `matchVerdict` et la couche monétaire y vivent ; garde bruyante au démarrage sur les noms exportés |
-| Aucun montant MAXWIN ne vient du client | patron déjà éprouvé sur `PATCH /api/me` : un corps portant `seed`, `stake_cents`, `payout_cents`, `user_id`, `status` écrit une ligne **identique** à celle d'un corps vide |
-| En Resurgence le montant est encadré, pas recalculé | test nommé qui le dit, et borne `[0, mise × sièges]` prouvée par la conservation de l'argent |
+| Aucune GRAINE, aucun siège, aucun statut ne vient du client | patron déjà éprouvé sur `PATCH /api/me` : un corps portant `seed`, `stake_cents`, `payout_cents`, `user_id`, `status` écrit une ligne **identique** à celle d'un corps vide |
+| Dans les deux jeux le montant est encadré, pas recalculé | test nommé qui le dit, borne `[0, mise × sièges]` prouvée par la conservation de l'argent, et un test qui joue le VRAI chemin — `cashoutPayout` → `reportFrom` → `matchVerdict` — et exige `ecartCents === 0` sur les quatre tables et les trois modes MAXWIN |
+| Tout ce qui part en base tient dans sa colonne | chaque entier de `REPORT_FIELDS` porte un `max` à 2 147 483 647 ; garde qui relie chaque champ à sa colonne `integer` du schéma ; la doublure d'`api/test.js` lève `22003` comme Postgres |
+| Le plan de zone n'a qu'un seul lecteur | `zoneUpdate` appelle `C.zoneAt` ; garde textuelle contre la réapparition d'un second décompte |
 | La commission n'est jamais nulle sur un paiement non nul | `fee + net = brut` et `fee > 0` sur 0..1 000 000 centimes, et nommément sur 1, 2, 3 et 4 centimes |
 | Tout argent qui traverse le réseau ou entre en base est en centimes entiers | `Number.isInteger` partout dans la couche monétaire ; un seul point de conversion ; tout identifiant en centimes porte le suffixe `Cents` |
 | Aucune colonne solde ; `matches` est en insertion puis règlement unique | garde textuelle : lecture de `api/schema.sql` et de `api/db-pg.js`, aucune colonne nommée solde ou balance, colonnes d'argent entières et contraintes positives, aucun `update` visant un montant de `matches` |

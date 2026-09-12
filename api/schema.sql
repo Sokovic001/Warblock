@@ -56,6 +56,12 @@ create table if not exists matches (
   -- WBCore.seatsOf(mode) : le nombre de mises dans le pot. Recopié ici parce qu'un mode dont
   -- l'équilibrage changerait ne doit pas réécrire le passé d'une partie déjà jouée.
   seats        integer      not null check (seats > 0),
+  -- mode.teamSize, recopié pour exactement la même raison que `seats`, et il le fallait : le
+  -- verdict borne les kills à (seats − teamSize) × vies et le rang à seats / teamSize. Relire
+  -- `MODES` au moment du règlement — jusqu'à une dizaine de minutes après l'ouverture du billet,
+  -- et donc après un redémarrage de serveur — jugeait la partie contre une table que personne
+  -- n'avait achetée.
+  team_size    integer      not null check (team_size > 0),
   brawler      text         not null,
   -- Deux graines 32 bits non signées — le domaine de WBCore.makeRng. La publique décide de la
   -- carte et du gaz et part au client ; la SECRÈTE ne sort jamais du serveur. Elle ne sert à rien
@@ -89,12 +95,18 @@ create table if not exists matches (
   controle           text,
   motif              text,
   -- Les trois montants du règlement, en CENTIMES entiers, tous produits par les fonctions de
-  -- paiement de WBCore : l'API ne recalcule jamais la commission elle-même.
+  -- paiement de WBCore : l'API ne recalcule jamais la commission elle-même. Ils sont tous les
+  -- trois au périmètre du JOUEUR, dans les cinq modes, et `fee_cents + net_cents = gross_cents`
+  -- sans exception — c'est ce qui rend la ligne réconciliable seule. Ce que l'ÉQUIPE emporte
+  -- n'est écrit nulle part, et c'est volontaire : le prix est la sacoche qu'on emporte, donc la
+  -- part d'une équipe est la somme des sacoches de ses membres, que le serveur ne connaît pas.
+  -- Le pot forfaitaire de `payoutCents` n'est qu'un plafond d'affichage, jamais un versement.
   gross_cents        integer  check (gross_cents >= 0),
   fee_cents          integer  check (fee_cents   >= 0),
   net_cents          integer  check (net_cents   >= 0),
-  -- La sacoche retenue : DÉCLARÉE par le client en Resurgence, et seulement bornée à
-  -- [0, stake_cents × seats]. En MAXWIN elle n'entre dans aucun calcul.
+  -- La sacoche retenue : DÉCLARÉE par le client, et seulement bornée à [0, stake_cents × seats].
+  -- C'est elle qui décide du brut dans les deux jeux, donc du net : la borne ci-dessus est le
+  -- seul plafond de paiement qui existe.
   purse_cents        integer  check (purse_cents >= 0),
   -- Ce que le client CROIT avoir gagné. Conservé pour être comparé, jamais pour être payé.
   declared_net_cents integer  check (declared_net_cents >= 0),
@@ -102,10 +114,16 @@ create table if not exists matches (
   -- NÉGATIVE, et c'est voulu : le client peut annoncer moins que le serveur ne compte, et cette
   -- mesure-là intéresse autant que l'autre. Ce n'est pas de l'argent dû, c'est une observation :
   -- on mesure, on ne punit pas. Le seuil est une affaire de phase 06, sur des données réelles.
+  -- Elle tient dans un `integer` PAR CONSTRUCTION : declared_net_cents est borné à 2 147 483 647
+  -- par WBCore.REPORT_FIELDS et net_cents est positif. Relever cette borne-là rouvrirait la panne
+  -- ici, en silence.
   ecart_cents        integer,
-  -- Les faits DÉCLARÉS par le client, tels quels. Ils sont bornés par l'enveloppe de plausibilité,
-  -- ils ne sont pas vérifiés : borner n'est pas vérifier. Ils sont là pour que les statistiques de
-  -- la phase 02a soient une somme sur des lignes immuables plutôt qu'un compteur qu'on incrémente.
+  -- Les faits DÉCLARÉS par le client, tels quels. Ils sont bornés, ils ne sont pas vérifiés :
+  -- borner n'est pas vérifier. Deux bornes, et elles ne disent pas la même chose — `deaths` est
+  -- tenu par l'enveloppe de plausibilité (on ne meurt pas plus de fois qu'on n'a de vies) ;
+  -- `damage` n'a aucun plafond démontrable depuis le billet et n'est borné que par la CAPACITÉ de
+  -- sa colonne, 2 147 483 647, refusée en amont par WBCore.checkReport. Ils sont là pour que les
+  -- statistiques de la phase 02a soient une somme sur des lignes immuables plutôt qu'un compteur.
   seconds            integer  check (seconds >= 0),
   kills              integer  check (kills   >= 0),
   deaths             integer  check (deaths  >= 0),

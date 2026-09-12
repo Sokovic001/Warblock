@@ -29,13 +29,16 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 278 tests sur le jeu (`node test.js`) et
-  97 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 290 tests sur le jeu (`node test.js`) et
+  104 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
-- **Vérifier la syntaxe des blocs `<script>`** après une édition automatisée : une regex qui
-  extrait les blocs puis `node --check` attrape les erreurs avant d'ouvrir le navigateur.
+- **La syntaxe des blocs `<script>` est vérifiée par `npm test`** : un test extrait les deux blocs
+  d'`index.html` et les fait parser par `vm.Script`. Une erreur de syntaxe dans le bloc `Game` — le
+  mode de défaillance le plus fréquent de ce dépôt — tombe donc avant d'ouvrir le navigateur, et
+  avant que le workflow de publication ne serve le fichier. Le faire à la main reste utile en cours
+  d'édition, ce n'est plus la seule protection.
 - **Ne jamais mettre un commentaire `//` en fin d'une ligne existante** lors d'une édition par
   remplacement de texte : si du code suit sur la même ligne, il est avalé silencieusement. Ce
   piège a cassé le jeu deux fois. Un commentaire va sur sa propre ligne.

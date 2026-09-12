@@ -72,10 +72,11 @@ elles seraient oubliées exactement le jour où elles compteraient.
 ### La maison est la contrepartie de chaque pot
 
 Tant que les dix-neuf adversaires sont des bots, **leurs mises ne sont payées par personne.** Le jeu
-affiche « $0,50 × 20 sièges = $10 dans le pot », prélève 20 % et verse $8 au survivant — mais un seul
-joueur a misé $0,50. Les $9,50 restants sont une écriture, pas de l'argent. Le jour où les mises
-seront réelles, chaque partie gagnée coûtera donc à la maison la différence entre le pot promis et ce
-qui a réellement été misé, commission comprise.
+affiche « $0,50 × 20 sièges = $10 dans le pot » et promet jusqu'à $8 au survivant — mais un seul
+joueur a misé $0,50. Les $9,50 restants sont une écriture, pas de l'argent. Le survivant ne touche
+d'ailleurs ce plafond que s'il a ramassé toute la table : le prix est la sacoche qu'on emporte, pas
+un forfait. Le jour où les mises seront réelles, chaque partie gagnée coûtera donc à la maison la
+différence entre ce qui sort de la caisse et ce qui a réellement été misé, commission comprise.
 
 Trois issues, toutes légitimes, aucune choisie : payer un pot calculé sur les seuls joueurs réels
 (ce qui change l'affichage, donc la promesse) ; garder le pot affiché et le traiter comme un coût
@@ -175,10 +176,30 @@ Ces cinq-là ont tous la même origine : une **édition automatisée par remplac
 **Leçon transversale :** après toute édition automatisée, extraire les blocs `<script>` et lancer
 `node --check` dessus, puis `node test.js`. Les trois quarts de ces bugs auraient été attrapés.
 
+Cette leçon n'était tenue que par la discipline de celui qui édite : ni `npm test` ni l'intégration
+continue ne regardaient le bloc `Game`, et le workflow qui **publie** le fichier ne lançait qu'un
+`node test.js` qui ne charge que `WBCore`. Un test le fait désormais — il extrait les blocs et les
+passe à `vm.Script`, qui parse sans exécuter. Le corollaire vaut aussi : un bloc que rien n'exécute
+finit par contenir une seconde copie d'une règle testée ailleurs. `zoneUpdate` refaisait ainsi
+l'interpolation du gaz à la main pendant que `zoneAt`, testée par quinze assertions, n'avait aucun
+appelant — le patron du `respawn()` défini deux fois, avec la copie vivante du côté non testé.
+
 ---
 
 ## Bugs de conception, plus intéressants que les bugs de code
 
+- **Le pot forfaitaire ressuscité par la couche monétaire.** MAXWIN a cessé de verser un forfait au
+  dernier survivant quand le prix est devenu « la sacoche qu'on emporte » : `endMatch` crédite
+  `cashoutPayout(pouch).net`, l'écran affiche « CARRIED OUT », et un test verrouille la règle. Six
+  commits plus tard, `matchVerdict` a recalculé le pot entier par `payoutCents()` — la vieille règle,
+  réécrite de bonne foi par quelqu'un qui lisait la fonction de paiement et non le jeu. Résultat :
+  sur une table à 0,50 $, une victoire parfaitement honnête créditait $2,80 au joueur et écrivait
+  `net_cents = 800` en base, donc un `ecart_cents` de −520 centimes, et un BEST affiché quatre fois
+  trop grand au lobby. **Aucun test ne les a mis face à face parce que les tests n'exerçaient que la
+  rafle complète — le seul point où les deux formules coïncident**, puisque c'est précisément ce qui
+  fait du pot un plafond exact. La leçon n'est pas « écrire plus de tests » : c'est que deux règles
+  qui décident du même nombre doivent être confrontées SUR TOUT LEUR DOMAINE, ou réduites à une
+  seule. Ici, l'une des deux a été supprimée.
 - **Le compteur « 20 ALIVE » figé.** Avec 3 vies, un joueur tué reste en lice : le compteur ne
   bougeait qu'à la troisième mort. Corrigé en séparant **ALIVE** (debout maintenant) et **LEFT**
   (encore en lice).

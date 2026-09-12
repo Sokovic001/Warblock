@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const COLS = 'id, auth_id, email, name, name_key, avatar, country, created_at';
 // La graine secrète est LUE ici — c'est la seule colonne de cette liste qui ne doit jamais
 // traverser le réseau. C'est `app.js` qui la retire, par sa liste blanche `billet()`.
-const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, brawler, seed_public, seed_secret, ' +
+const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret, ' +
                    'client_key, status, opened_at, expires_at, ' +
                    // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
                    'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
@@ -145,13 +145,13 @@ function pgDb(connectionString) {
         for (let tour = 0; tour < 2; tour++) {
           const ins = await client.query(
             `insert into matches
-               (user_id, mode, stake_cents, seats, brawler, seed_public, seed_secret,
+               (user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret,
                 client_key, status, opened_at, expires_at)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'open',$10,$11)
              on conflict do nothing
              returning ${MATCH_COLS}`,
-            [m.userId, m.mode, m.stakeCents, m.seats, m.brawler, m.seedPublic, m.seedSecret,
-             m.clientKey, m.openedAt, m.expiresAt]);
+            [m.userId, m.mode, m.stakeCents, m.seats, m.teamSize, m.brawler, m.seedPublic,
+             m.seedSecret, m.clientKey, m.openedAt, m.expiresAt]);
           if (ins.rows[0]) return { match: ligneMatch(ins.rows[0]), repris: false };
 
           // L'insertion a buté sur l'une des deux contraintes. La clé du client d'abord : la même
