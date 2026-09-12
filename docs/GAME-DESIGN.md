@@ -171,7 +171,10 @@ Le badge porte un `title` explicite (« Simulated population — every opponent 
 Le lobby propose deux jeux distincts, chacun avec son thème visuel.
 
 ### MAXWIN (bleu) — le mode d'origine
-Survivre jusqu'au bout. Le pot va au dernier debout, en Solo, Duo ou Trio (voir ci-dessous).
+Survivre jusqu'au bout, en Solo, Duo ou Trio (voir ci-dessous). **Le prix est la sacoche qu'on
+emporte**, pas un forfait : tuer quelqu'un verse sa sacoche dans la tienne, et sortir dernier
+debout crédite ce que tu portes, commission déduite. Le pot — mise × sièges — n'est donc que le
+**plafond** affiché « WIN UP TO », atteint seulement par une rafle complète de la table.
 
 ### RESURGENCE (rouge) — le mode rapide
 
@@ -233,9 +236,9 @@ Détails :
 
 ## Modes MAXWIN
 
-- **SOLO** — 20 joueurs, chacun pour soi. Le dernier debout prend tout le pot.
-- **DUO** — 10 équipes de 2 (toi + 1 coéquipier IA). **Respawn en 5 s tant que ton partenaire est en vie** (tu observes en attendant) ; ta mise et tes cubes tombent au sol à chaque mort, récupérables par n'importe qui. Les vainqueurs se partagent le pot à parts égales.
-- **TRIO** — 10 équipes de 3, donc 30 mises dans le pot. Même règles ; ta part = pot ÷ 3.
+- **SOLO** — 20 joueurs, chacun pour soi. Le dernier debout emporte sa sacoche, qui vaut le pot entier s'il a tué tout le monde lui-même.
+- **DUO** — 10 équipes de 2 (toi + 1 coéquipier IA). **Respawn en 5 s tant que ton partenaire est en vie** (tu observes en attendant) ; ta mise et tes cubes tombent au sol à chaque mort, récupérables par n'importe qui. Chacun emporte **sa propre** sacoche : il n'y a pas de partage à la fin, c'est la façon dont les kills se sont répartis pendant la partie qui décide.
+- **TRIO** — 10 équipes de 3, donc 30 mises dans le pot. Mêmes règles, et même conséquence : ta part est ce que tu portes, pas pot ÷ 3.
 
 Pas de tir allié (balles, supers, flaques, tourelles, dash — rien ne touche ton équipe). Les coéquipiers IA restent groupés avec toi et défendent. Barres de vie alliées en cyan, ennemies en rouge. Le compteur en haut affiche les **équipes restantes** en Duo/Trio.
 
@@ -256,7 +259,7 @@ Pas de tir allié (balles, supers, flaques, tourelles, dash — rien ne touche t
 
 ## Réglages
 
-Tout est dans `WBCore` en tête de fichier (bloc testé) : `TIERS`, `BRAWLERS`, `CUBE`, `BOX_HP`, `HEAL`, `BOT`, `GRACE`, `RAKE`, `START_WALLET`, `MAP`, `BOXES`. Les phases de gaz sont `ZONE_PHASES` juste en dessous.
+Tout est dans `WBCore` en tête de fichier (bloc testé) : `TIERS`, `BRAWLERS`, `CUBE`, `BOX_HP`, `HEAL`, `BOT`, `GRACE`, `RAKE`, `START_WALLET`, `MAP`, `BOXES`. Les phases de gaz — `ZONE_PHASES`, `ZONE_PHASES_FAST`, `ZONE_START_R` — sont entrées dans le bloc testé en phase 02a, avec `zonePlan()` et `zoneAt()` : le resserrement tirait ses centres sur `Math.random()`, donc une règle qui décide de la fin d'une partie vivait hors des tests.
 
 ## Architecture
 

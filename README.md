@@ -40,11 +40,13 @@ index.html              le jeu entier
   ├── <script> WBCore   règles pures, testables      ← la partie couverte par les tests
   └── <script> Game     rendu Three.js, entrées, IA, audio
 test.js                 harnais Node du jeu
-api/                    comptes et profils (phase 01) — serveur Node, testable sans base
+api/                    serveur Node, testable sans base : comptes et profils (phase 01),
+                        billet et verdict de partie (phase 02a)
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage
 docs/HISTORIQUE.md      journal de développement : décisions, pistes abandonnées, bugs
+docs/PHASE-02.md        la phase 02a : billet, verdict, statistiques par agrégat
 docs/DEMANDES.md        les demandes d'origine, dans l'ordre
 docs/DEPLOY.md          mise en ligne
 docs/ICONS-PROMPTS.md   prompts de génération d'icônes
@@ -57,7 +59,7 @@ docs/ICONS-PROMPTS.md   prompts de génération d'icônes
 | Joueurs | 20 à 30 | 50 |
 | Modes | Solo · Duo · Trio | Solo · Duo |
 | Vies | 3 | 2 |
-| Gain | le pot au dernier debout | ton bucket, encaissable à tout moment |
+| Gain | la sacoche que tu emportes en sortant | ton bucket, encaissable à tout moment |
 | Rythme | ~2 min 30 | ~1 min 20 |
 
 Commission de la maison : **20 % de tout paiement**, dans les deux jeux.

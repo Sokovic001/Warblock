@@ -66,6 +66,20 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - Le sens unique de la fumée est borné : la fenêtre appartient à l'équipe qui a lancé et se ferme
   avant que le nuage ne commence à se dissiper. Passé la fenêtre, le nuage aveugle les deux côtés.
 - La fumée n'arrête jamais un projectile, et ne cache jamais quelqu'un collé à soi.
+- La commission n'est jamais nulle sur un paiement non nul : sur 0 à 1 000 000 centimes,
+  `fee + net = brut` et `fee > 0` dès que le brut l'est.
+- `toCents` et `fromCents` sont le **seul** passage entre dollars et centimes, et une garde
+  textuelle vérifie que rien d'autre dans le bloc `CORE` ne change d'unité.
+- Même graine, même plan de zone — deux fois de suite et dans deux processus. `zonePlan` tourne
+  avec `Math.random` remplacé par une fonction qui lance. Attention à ce que cela ne dit pas :
+  seul le **gaz** est reproductible, pas la partie.
+- Le plan de zone n'a qu'un seul lecteur, `zoneAt` : une garde interdit la réapparition d'un
+  second décompte à côté, exactement le patron du `respawn()` défini deux fois.
+- Le jeu se joue à l'identique sans compte et sans serveur, graine comprise : quatre cas nommés
+  (`ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible) sont testés comme des cas
+  normaux, et un billet qui tarde ne retarde jamais le coup d'envoi.
+- Chaque bloc `<script>` d'`index.html` est du JavaScript valide — un test l'extrait et le fait
+  parser par `vm.Script`.
 
 ## Argent des joueurs
 
