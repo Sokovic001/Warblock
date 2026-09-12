@@ -28,8 +28,17 @@ function test(nom, fn) {
 const PG_INT4_MAX = 2147483647, PG_INT4_MIN = -2147483648;
 const COLONNES_INT4 = ['stake_cents', 'seats', 'team_size', 'gross_cents', 'fee_cents', 'net_cents',
                        'purse_cents', 'declared_net_cents', 'ecart_cents',
-                       'seconds', 'kills', 'deaths', 'rank', 'cubes', 'damage'];
-function verifierInt4(valeurs) {
+                       'seconds', 'kills', 'deaths', 'rank', 'cubes', 'damage',
+                       'sim_version', 'seq', 'steps'];
+// Les colonnes de TEXTE et la largeur que le schéma leur donne. Une colonne `text` sans contrainte
+// avale n'importe quoi, mais celles-ci en portent une — `seed_secret` doit être 128 bits en
+// hexadécimal, `data` tient sous la borne du corps — et la doublure doit refuser ce que la base
+// refuserait, sinon aucun test ne peut voir la panne.
+const COLONNES_TEXTE = {
+  seed_secret: v => /^[0-9a-f]{32}$/.test(v),
+  data: v => typeof v === 'string' && v.length >= 1 && v.length <= 65536,
+};
+function verifierColonnes(valeurs) {
   for (const c of COLONNES_INT4) {
     const v = valeurs[c];
     if (v === undefined || v === null) continue;
@@ -39,10 +48,22 @@ function verifierInt4(valeurs) {
       throw e;
     }
   }
+  for (const [c, ok] of Object.entries(COLONNES_TEXTE)) {
+    const v = valeurs[c];
+    if (v === undefined || v === null) continue;
+    if (!ok(v)) {
+      const e = new Error(`new row for relation violates check constraint on ${c}`);
+      e.code = '23514';
+      throw e;
+    }
+  }
 }
 function fakeDb(seed = []) {
   const users = seed.map(u => ({ ...u }));
   const matches = [];
+  // `match_traces`, EN INSERTION SEULE : la doublure n'expose aucun moyen de modifier ni de
+  // supprimer une ligne, exactement comme db-pg.js n'écrit aucun `update` ni `delete` sur elle.
+  const traces = [];
   let next = users.length + 1, nextMatch = 1;
   // Les statistiques sont la SOMME des parties réglées, exactement comme l'agrégat SQL de
   // db-pg.js. Aucun compteur n'existe nulle part : il n'y a rien à incrémenter, donc rien qu'un
@@ -60,6 +81,7 @@ function fakeDb(seed = []) {
   return {
     users,
     matches,
+    traces,
     // La doublure imite les deux CONTRAINTES de la base, dans l'ordre exact de db-pg.js. Elle ne
     // regarde jamais si un billet existe avant de décider d'en créer un : elle rejoue ce que la
     // base répondrait à une insertion refusée. C'est aussi la limite connue de cet exercice — rien
@@ -74,9 +96,10 @@ function fakeDb(seed = []) {
         id: nextMatch++, user_id: m.userId, mode: m.mode, stake_cents: m.stakeCents, seats: m.seats,
         team_size: m.teamSize,
         brawler: m.brawler, seed_public: m.seedPublic, seed_secret: m.seedSecret,
+        sim_version: m.simVersion,
         client_key: m.clientKey, status: 'open', opened_at: m.openedAt, expires_at: m.expiresAt,
       };
-      verifierInt4(ligne);
+      verifierColonnes(ligne);
       matches.push(ligne);
       return { match: ligne, repris: false };
     },
@@ -102,9 +125,27 @@ function fakeDb(seed = []) {
       };
       // Vérifié AVANT d'écrire : une ligne à demi réglée par une écriture qui échoue en plein
       // milieu serait pire que la panne qu'on cherche à reproduire.
-      verifierInt4(ecriture);
+      verifierColonnes(ecriture);
       Object.assign(m, ecriture);
       return { match: m, deja: false };
+    },
+    // La trace. La doublure imite la clé primaire (match_id, seq) et `on conflict do nothing` : le
+    // PREMIER écrit gagne, un second segment de même rang ne remplace rien, et il n'existe aucun
+    // chemin qui modifie ou supprime une ligne déjà posée.
+    async addTrace({ matchId, seq, simVersion, steps, data, maxSteps }) {
+      const miennes = traces.filter(t => String(t.match_id) === String(matchId));
+      const deja = miennes.some(t => t.seq === seq);
+      const avant = miennes.reduce((s, t) => s + t.steps, 0);
+      if (!deja && avant + steps > maxSteps)
+        return { refuse: 'trop_de_pas', segments: miennes.length, totalSteps: avant };
+      if (!deja) {
+        const ligne = { match_id: matchId, seq, sim_version: simVersion, steps, data,
+                        created_at: '2026-01-01T00:00:00Z' };
+        verifierColonnes(ligne);
+        traces.push(ligne);
+      }
+      const apres = traces.filter(t => String(t.match_id) === String(matchId));
+      return { segments: apres.length, totalSteps: apres.reduce((s, t) => s + t.steps, 0) };
     },
     async expireMatches({ avant }) {
       let closes = 0;
@@ -165,6 +206,11 @@ const appDe = (db, extra = {}) => createApp({ db, verifyToken: verifOk, origins:
 // tout ce que le serveur en tire est comparable à une valeur écrite dans le test. La source lance
 // quand elle est épuisée, ce qui fixe au passage le nombre de tirages : deux par billet, ni plus.
 const GRAINES = Array.from({ length: 40 }, (_, i) => (i + 1) * 101010101);
+// La graine secrète a SA source depuis qu'elle fait 128 bits : elle n'est plus dans le domaine de
+// `makeRng`, donc elle ne peut plus sortir du même robinet sans mentir sur ce qu'elle vaut. Ces
+// valeurs-là n'ont rien d'aléatoire non plus : ce qu'on veut observer, c'est qu'elles ne fuient
+// jamais et qu'elles viennent bien du serveur.
+const SECRETS = Array.from({ length: 40 }, (_, i) => 'a' + String(i + 1).padStart(3, '0') + 'f'.repeat(28));
 const T0 = Date.parse('2026-01-01T12:00:00Z');
 const BRAWLER = Object.keys(C.BRAWLERS)[0];
 const DEMANDE = { mode: 'solo', stake: 0.5, brawler: BRAWLER, clientKey: 'cle-1' };
@@ -172,16 +218,20 @@ const DEMANDE = { mode: 'solo', stake: 0.5, brawler: BRAWLER, clientKey: 'cle-1'
 function bancDeBillet(extra = {}) {
   const db = fakeDb();
   const horloge = { t: T0 };
-  let tire = 0;
+  let tire = 0, tireSecret = 0;
   const app = appDe(db, {
     randomSeed: () => {
       if (tire >= GRAINES.length) throw new Error('la source de graines est épuisée : trop de tirages');
       return GRAINES[tire++];
     },
+    randomSecret: () => {
+      if (tireSecret >= SECRETS.length) throw new Error('la source de secrets est épuisée : trop de tirages');
+      return SECRETS[tireSecret++];
+    },
     now: () => horloge.t,
     ...extra,
   });
-  return { db, app, horloge, tires: () => tire };
+  return { db, app, horloge, tires: () => tire, tiresSecret: () => tireSecret };
 }
 const demander = (app, corps = DEMANDE, opts = {}) =>
   appel(app, { method: 'POST', path: '/api/match', token: 'ok:u1:Loic', body: corps, ...opts });
@@ -417,15 +467,21 @@ await test('sans jeton, rien n\'est écrit : le refus vient avant la base', asyn
   assert.strictEqual(tires(), 0, 'ni faire tirer une graine');
 });
 await test('le billet livre la graine publique, jamais la secrète', async () => {
-  const { db, app, tires } = bancDeBillet();
+  const { db, app, tires, tiresSecret } = bancDeBillet();
   const r = await demander(app);
   assert.strictEqual(r.code, 200);
   assert.strictEqual(r.corps.seed, GRAINES[0]);
   assert.strictEqual(db.matches[0].seed_public, GRAINES[0]);
-  assert.strictEqual(db.matches[0].seed_secret, GRAINES[1]);
-  assert.strictEqual(tires(), 2, 'deux graines par billet, et deux seulement');
+  // 128 BITS, EN HEXADÉCIMAL. `between 0 and 4294967295` rendait une graine « secrète » trouvable
+  // par force brute hors ligne, et une colonne qui porte un nom qui ment est pire que pas de
+  // colonne. Elle ne protège toujours rien dans cette phase — la simulation ne l'utilise pas — mais
+  // elle ne prétend plus le contraire.
+  assert.strictEqual(db.matches[0].seed_secret, SECRETS[0]);
+  assert.match(db.matches[0].seed_secret, /^[0-9a-f]{32}$/);
+  assert.strictEqual(tires(), 1, 'une graine publique par billet, et une seule');
+  assert.strictEqual(tiresSecret(), 1, 'un secret par billet, et un seul');
   const texte = JSON.stringify(r.corps);
-  assert.ok(!texte.includes(String(GRAINES[1])), 'la graine secrète a fui : ' + texte);
+  assert.ok(!texte.includes(SECRETS[0]), 'la graine secrète a fui : ' + texte);
   assert.ok(!/secret/i.test(texte), texte);
   assert.deepStrictEqual(Object.keys(r.corps).sort(),
     ['brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'seats', 'teamSize', 'seed', 'stakeCents', 'status'].sort());
@@ -1167,14 +1223,18 @@ test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées
       `${f} parle encore d'une table de compteurs`);
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   assert.deepStrictEqual((sql.match(/create table if not exists (\w+)/g) || []).sort(),
-    ['create table if not exists matches', 'create table if not exists users']);
+    ['create table if not exists match_traces', 'create table if not exists matches',
+     'create table if not exists users']);
   // « Une partie refusée ou restée ouverte ne compte pour rien » se prouve plus haut contre la
   // doublure ; la vraie requête, elle, n'est jamais exécutée par un test. On relit donc son texte.
   // Les commentaires sont retirés d'abord : ils citent `count()` et `sum()` entre accents graves,
   // et une garde qui prend un commentaire pour une requête ne garde rien. C'est arrivé en
   // écrivant ce test, exactement comme au module précédent.
   const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
-  const agregat = (pg.match(/`[^`]*`/g) || []).filter(q => /\bcount\s*\(/i.test(q));
+  // La trace compte elle aussi ses lignes, et c'est un garde-fou de volume, pas une statistique de
+  // joueur : on ne retient donc que ce qui agrège la table `matches`.
+  const agregat = (pg.match(/`[^`]*`/g) || [])
+    .filter(q => /\bcount\s*\(/i.test(q) && /from\s+matches\b/.test(q));
   assert.strictEqual(agregat.length, 1, 'une seule requête doit agréger les statistiques');
   assert.match(agregat[0], /from\s+matches/);
   assert.match(agregat[0], /status\s*=\s*'settled'/, 'l\'agrégat compterait des parties non réglées');
@@ -1218,6 +1278,373 @@ test('le serveur exige le destinataire que le jeu ne peut pas choisir', () => {
   assert.strictEqual(cle.projectId, PROJET);
   assert.throws(() => identityFromClaims(revendications({ aud: 'un_projet_choisi_par_le_client' }),
     { projectId: cle.projectId }));
+});
+
+console.log('Le serveur charge la simulation du jeu, il ne la recopie pas');
+// Le bloc SIM, chargé UNE SECONDE FOIS et à la façon du navigateur : son propre WBCore, extrait du
+// même index.html, et le bloc évalué par-dessus. Ce n'est pas une doublure — c'est le même texte,
+// dans un module qui ne partage rien avec `api/sim.js`. C'est ce qui permet de dire, et pas
+// seulement d'affirmer, que le serveur et le jeu exécutent le même code.
+const SIM = require('./sim');
+const NAVIGATEUR = (() => {
+  const fs = require('node:fs'), path = require('node:path');
+  const f = process.env.WARBLOCK_FILE || path.join(__dirname, '..', 'index.html');
+  const html = fs.readFileSync(f, 'utf8');
+  const noyau = html.slice(html.indexOf('/*CORE-START*/'), html.indexOf('/*CORE-END*/'));
+  const bloc = html.slice(html.indexOf('/*SIM-START*/'), html.indexOf('/*SIM-END*/'));
+  const mc = { exports: {} }; new Function('module', 'exports', noyau)(mc, mc.exports);
+  const ms = { exports: {} }; new Function('module', 'exports', 'WBCore', bloc)(ms, ms.exports, mc.exports);
+  return { C: mc.exports, S: ms.exports, html };
+})();
+
+// Une trace fabriquée par le codec de WBCore, jamais écrite à la main : c'est la seule porte, et
+// l'écrire à la main ferait deux idées du format — c'est toujours la seconde qui ment.
+function traceDe(C, pas, options = {}) {
+  const rec = C.traceEnregistreur(options.max || 400000);
+  const rng = C.makeRng(options.graine || 4242);
+  for (let i = 0; i < pas; i++) {
+    if (options.actes && i && i % options.actes === 0)
+      rec.acte(C.TRACE.SUP, C.traceViseeMots(Math.cos(i), Math.sin(i), 4));
+    const a = options.fixe ? 1 : rng() * Math.PI * 2;
+    rec.ajouter(C.traceMots({ mx: Math.cos(a), mz: Math.sin(a), ax: Math.cos(a), az: Math.sin(a),
+                              aimDist: options.fixe ? 4 : 3 + rng() * 4,
+                              feu: options.fixe ? true : rng() < 0.7 }));
+  }
+  return rec;
+}
+// La même partie, rejouée par un couple (WBCore, WBSim) donné. Rien d'autre que la graine publique
+// du billet et la trace des entrées du joueur n'entre ici : c'est exactement ce que le module
+// suivant aura sous la main au moment de juger.
+function empreinteDe(coeur, simu, texte) {
+  const G = simu.newMatch(31337, coeur.MODES.solo, 50, coeur.BRAWLERS.bolt);
+  const depart = { x: G.player.x, z: G.player.z };
+  const lu = coeur.traceDecode(texte);
+  assert.strictEqual(lu.erreur, null, 'la trace ne se relit pas : ' + lu.erreur);
+  simu.rejouer(G, lu.items);
+  return { empreinte: simu.empreinte(G), pas: G.pas,
+           // De quoi dire que la partie a VÉCU, et pas seulement qu'elle a tourné : le brawler a
+           // bougé, il a tiré, et le gaz s'est refermé sur lui.
+           parcouru: Math.round(coeur.dist(G.player.x - depart.x, G.player.z - depart.z) * 100),
+           morts: G.ents.filter(e => !e.alive).length,
+           cercle: Math.round(G.zone.r * 100) };
+}
+
+test('api/sim.js charge le MÊME bloc que le navigateur, et il n\'en existe pas de seconde copie', () => {
+  assert.strictEqual(typeof SIM.step, 'function');
+  assert.strictEqual(SIM.SIM_VERSION, NAVIGATEUR.S.SIM_VERSION);
+  // Le serveur ne redéfinit rien : le fichier n'est qu'un chargeur, calqué sur api/core.js. S'il
+  // contenait une règle, elle serait la seconde copie — le patron du `respawn()` défini deux fois.
+  const fs = require('node:fs'), path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'sim.js'), 'utf8');
+  assert.match(src, /SIM-START/);
+  assert.match(src, /new Function\('module', 'exports', 'WBCore'/);
+  assert.ok(!/function (step|newMatch|moveEntity|attack|rejouer)\s*\(/.test(src),
+    'api/sim.js redéfinit une fonction de simulation au lieu de charger le bloc');
+});
+test('LE REJEU DU SERVEUR ET CELUI DU JEU RENDENT LA MÊME EMPREINTE — c\'est le même bloc, chargé deux fois', () => {
+  // L'invariant central de la phase, et la raison est dans le titre : il n'y a pas deux
+  // simulations à réconcilier, il y a un bloc de texte dans index.html que deux chargeurs évaluent.
+  // Ce que ce test prouve, c'est que le chargeur du serveur n'a rien perdu en route — pas que deux
+  // MOTEURS JavaScript s'accordent, ce que rien ici ne peut montrer et que la spécification se
+  // garde bien de promettre.
+  const texte = traceDe(C, 4000, { actes: 137 }).texte();
+  const serveur = empreinteDe(C, SIM, texte);
+  const navigateur = empreinteDe(NAVIGATEUR.C, NAVIGATEUR.S, texte);
+  assert.strictEqual(serveur.pas, 4000);
+  assert.deepStrictEqual(serveur, navigateur, 'les deux chargements ne rejouent pas la même partie');
+  // Et la partie rejouée a VÉCU : sans ces bornes, deux parties vides rendraient aussi la même
+  // empreinte, et le test passerait sur un bloc à moitié chargé.
+  assert.ok(serveur.parcouru > 100, 'le brawler du rejeu n\'a pas bougé d\'une case');
+  assert.ok(serveur.morts > 0, 'personne n\'est mort en 4000 pas : la simulation ne tourne pas');
+  // La trace est bien le chaînon manquant : la même graine, sans elle, ne rejoue pas la même partie.
+  const immobile = SIM.newMatch(31337, C.MODES.solo, 50, C.BRAWLERS.bolt);
+  for (let i = 0; i < 4000; i++) SIM.step(immobile, {});
+  assert.notStrictEqual(SIM.empreinte(immobile), serveur.empreinte,
+    'un joueur immobile rend la même partie qu\'un joueur qui joue : la trace ne sert à rien');
+});
+test('la garde de démarrage d\'api/sim.js casse BRUYAMMENT si un nom exporté disparaît', () => {
+  // La même garde que celle de core.js, et pour la même raison : si le bloc change de forme, on veut
+  // casser au démarrage du serveur, pas à la première requête d'un joueur un dimanche soir. On le
+  // vérifie en amputant vraiment le bloc, pas en relisant la liste — une liste est toujours
+  // d'accord avec ce qu'on veut lui faire dire.
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+  const ampute = NAVIGATEUR.html.replace('newMatch, step, drainer,', 'step, drainer,');
+  assert.notStrictEqual(ampute, NAVIGATEUR.html, 'la ligne d\'export du bloc SIM n\'a pas été retrouvée');
+  const dossier = fs.mkdtempSync(path.join(os.tmpdir(), 'warblock-'));
+  const tmp = path.join(dossier, 'index.html');
+  fs.writeFileSync(tmp, ampute);
+  const r = require('node:child_process').spawnSync(process.execPath, ['-e', 'require("./sim.js")'],
+    { env: { ...process.env, WARBLOCK_FILE: tmp }, cwd: __dirname, encoding: 'utf8' });
+  fs.rmSync(dossier, { recursive: true, force: true });
+  assert.notStrictEqual(r.status, 0, 'un export disparu doit faire échouer le chargement');
+  assert.match(r.stderr, /WBSim n'exporte plus newMatch/, r.stderr);
+});
+test('la garde d\'api/sim.js couvre TOUS les noms de WBSim qu\'app.js appelle', () => {
+  // Le patron déjà en place pour core.js : une garde qui ne couvre pas ce que les gestionnaires
+  // consomment déplace la panne du démarrage vers la première requête d'un joueur.
+  const fs = require('node:fs'), path = require('node:path');
+  const lire = f => fs.readFileSync(path.join(__dirname, f), 'utf8');
+  const app = lire('app.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const src = lire('sim.js');
+  const liste = src.slice(src.indexOf('const ATTENDUS'), src.indexOf('for (const nom of ATTENDUS)'));
+  assert.ok(liste.length > 40, 'la liste de la garde n\'a pas été retrouvée dans sim.js');
+  const utilises = [...new Set((app.match(/\bS\.([A-Za-z_$][\w$]*)/g) || []).map(x => x.slice(2)))];
+  assert.ok(utilises.length >= 1, 'app.js n\'appelle aucun nom de WBSim : la garde ne garde rien');
+  for (const nom of utilises)
+    assert.ok(liste.includes(`'${nom}'`), `app.js appelle S.${nom}, que la garde de sim.js ne couvre pas`);
+  // Et le contrat public du bloc y figure en entier : c'est lui que le module du rejeu consommera.
+  for (const nom of ['SIM_VERSION', 'newMatch', 'step', 'empreinte', 'rejouer', 'appliquerActe'])
+    assert.ok(liste.includes(`'${nom}'`), `le contrat public de WBSim ne couvre pas ${nom}`);
+});
+
+console.log('sim_version, figée à l\'ouverture du billet');
+await test('sim_version est écrite par le SERVEUR, et un corps qui la porte n\'y change rien', async () => {
+  // Le patron déjà éprouvé sur les graines et les sièges : deux bancs, mêmes horloge et mêmes
+  // sources, et deux lignes qui doivent être indiscernables. La raison est celle de `seats` et de
+  // `team_size` : un correctif de simulation déployé pendant qu'un joueur joue rejouerait une AUTRE
+  // partie que la sienne, et paierait autre chose que ce qu'il a vu.
+  const nu = bancDeBillet(), charge = bancDeBillet();
+  const a = await demander(nu.app, DEMANDE);
+  const b = await demander(charge.app, { ...DEMANDE, simVersion: 999, sim_version: 999, simversion: 999 });
+  assert.strictEqual(nu.db.matches[0].sim_version, SIM.SIM_VERSION);
+  assert.deepStrictEqual(charge.db.matches, nu.db.matches, 'le client a écrit la version de simulation');
+  assert.deepStrictEqual(b.corps, a.corps);
+  // Elle ne part PAS au client : il n'en a rien à faire, et la lui donner l'inviterait à la renvoyer
+  // telle quelle au lieu de dire celle sous laquelle il a réellement joué.
+  assert.ok(!('simVersion' in a.corps), JSON.stringify(a.corps));
+  assert.ok(Number.isInteger(SIM.SIM_VERSION) && SIM.SIM_VERSION >= 1);
+});
+
+console.log('La trace, en insertion seule');
+const MAX_PAS = C.traceMaxSteps(C.zonePlan(GRAINES[0], C.MODES.solo));
+const TEXTE = traceDe(C, 400).texte();
+const envoyerTrace = (app, id, corps, opts = {}) =>
+  appel(app, { method: 'POST', path: `/api/match/${id}/trace`, token: 'ok:u1:Loic', body: corps, ...opts });
+const SEGMENT = (extra = {}) => ({ seq: 0, simVersion: SIM.SIM_VERSION, data: TEXTE, ...extra });
+
+await test('un segment est accepté, et le serveur COMPTE ses pas au lieu de les croire', async () => {
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  // Un nombre de pas annoncé n'a aucun effet : il n'est même pas lu. Le serveur relit la grammaire,
+  // ce qui valide le segment et en donne la longueur du même coup — un nombre déclaré aurait été un
+  // nombre de plus à ne pas croire.
+  const r = await envoyerTrace(app, b.corps.id, SEGMENT({ steps: 999999, totalSteps: 1 }));
+  assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+  assert.deepStrictEqual(r.corps, { matchId: b.corps.id, seq: 0, segments: 1, totalSteps: 400 });
+  assert.strictEqual(db.traces.length, 1);
+  assert.strictEqual(db.traces[0].steps, 400);
+  assert.strictEqual(db.traces[0].sim_version, SIM.SIM_VERSION);
+  assert.strictEqual(db.traces[0].data, TEXTE);
+  // Et la ligne du billet n'a pas bougé d'un octet : cette route n'écrit jamais dans `matches`.
+  assert.strictEqual(db.matches[0].status, 'open');
+  assert.strictEqual(db.matches[0].net_cents, undefined);
+});
+await test('IDEMPOTENCE : le même segment deux fois n\'écrit qu\'une ligne, et le PREMIER écrit gagne', async () => {
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  const un = await envoyerTrace(app, b.corps.id, SEGMENT());
+  const lignes = JSON.stringify(db.traces);
+  const deux = await envoyerTrace(app, b.corps.id, SEGMENT());
+  assert.deepStrictEqual(deux.corps, un.corps, 'un rejeu doit rendre exactement la première réponse');
+  assert.strictEqual(JSON.stringify(db.traces), lignes, 'la table a bougé au rejeu');
+  // Et un segment DIFFÉRENT sous le même rang ne remplace rien : premier écrit gagne. Sans cela, un
+  // client pourrait réécrire sa trace après coup, ce qui la viderait de toute valeur de preuve.
+  const menteur = await envoyerTrace(app, b.corps.id, SEGMENT({ data: traceDe(C, 120, { graine: 9 }).texte() }));
+  assert.strictEqual(menteur.code, 200);
+  assert.strictEqual(db.traces.length, 1);
+  assert.strictEqual(db.traces[0].data, TEXTE, 'la première trace a été réécrite');
+  assert.strictEqual(db.traces[0].steps, 400);
+  assert.deepStrictEqual(menteur.corps, un.corps);
+});
+await test('une partie complète tient en UN À TROIS segments, qui se recollent et s\'additionnent', async () => {
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  const rec = traceDe(C, 9000, { actes: 500 });
+  const segs = rec.segments();
+  assert.ok(segs.length >= 1 && segs.length <= 3, `${segs.length} segments pour une partie complète`);
+  let dernier = null;
+  for (let i = 0; i < segs.length; i++) {
+    dernier = await envoyerTrace(app, b.corps.id, { seq: i, simVersion: SIM.SIM_VERSION, data: segs[i] });
+    assert.strictEqual(dernier.code, 200, JSON.stringify(dernier.corps));
+  }
+  assert.strictEqual(dernier.corps.segments, segs.length);
+  assert.strictEqual(dernier.corps.totalSteps, 9000);
+  // Recollés dans l'ordre des rangs, ils rendent la trace entière — celle que le rejeu relira.
+  const recolle = db.traces.slice().sort((x, y) => x.seq - y.seq).map(t => t.data).join('');
+  assert.strictEqual(recolle, rec.texte());
+  assert.strictEqual(C.traceDecode(recolle).pas, 9000);
+});
+await test('chaque refus a un CODE NOMMÉ, sort en 400 ou 409, et ne laisse jamais la ligne bloquée', async () => {
+  // La leçon du `22003`, transposée à la trace : un joueur n'a qu'un billet ouvert à la fois, donc
+  // un 500 qui laisse la ligne `open` l'enferme jusqu'à l'expiration. Ici c'est structurel — cette
+  // route n'écrit jamais dans `matches` — et chaque refus se nomme.
+  // Un seau large : ce test envoie une vingtaine de requêtes, et ce n'est pas la limitation de
+  // débit qu'il éprouve — elle a le sien, juste en dessous.
+  const { db, app, horloge } = bancDeBillet({ limiter: makeLimiter({ max: 100, windowMs: 60_000 }) });
+  const b = await demander(app);
+  const cas = [
+    ['corps',       '{ pas du json',                                   400],
+    ['corps',       { ...SEGMENT(), data: 'A'.repeat(40 * 1024) },     400],
+    ['seq',         SEGMENT({ seq: -1 }),                              400],
+    ['seq',         SEGMENT({ seq: C.TRACE.MAX_SEG }),                 400],
+    ['seq',         SEGMENT({ seq: 1.5 }),                             400],
+    ['seq',         SEGMENT({ seq: '0' }),                             400],
+    ['sim_version', SEGMENT({ simVersion: SIM.SIM_VERSION + 1 }),      409],
+    ['sim_version', SEGMENT({ simVersion: undefined }),                409],
+    ['donnees',     SEGMENT({ data: 'pas une trace du tout' }),        400],
+    ['donnees',     SEGMENT({ data: '' }),                             400],
+    ['donnees',     SEGMENT({ data: 42 }),                             400],
+    ['trop_de_pas', SEGMENT({ data: traceDe(C, 40).texte() + '~___' }), 400],
+  ];
+  for (const [code, corps, attendu] of cas) {
+    const r = await envoyerTrace(app, b.corps.id, corps);
+    assert.strictEqual(r.code, attendu, `${code} : reçu ${r.code} — ${JSON.stringify(r.corps)}`);
+    assert.strictEqual(r.corps.code, code, JSON.stringify(r.corps));
+    assert.ok(r.corps.erreur && r.corps.erreur.length > 8, `${code} : un refus doit dire pourquoi`);
+    assert.strictEqual(db.traces.length, 0, `${code} : une trace refusée a été écrite`);
+    assert.strictEqual(db.matches[0].status, 'open', `${code} : la ligne du billet a été touchée`);
+  }
+  // Un billet qui n'est pas le sien, ou qui n'existe pas : 404, et rien n'est appris de personne.
+  const voisin = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/trace`,
+                                    token: 'ok:u2:Zoe', body: SEGMENT() });
+  assert.strictEqual(voisin.code, 404);
+  assert.strictEqual((await envoyerTrace(app, '999999', SEGMENT())).code, 404);
+  // Un billet déjà réglé n'accepte plus rien : la partie a son verdict, une trace n'y changerait rien.
+  const rap = RAPPORT({ seconds: 60, rank: 3 });
+  horloge.t = ARRIVEE(rap);
+  await rendre(app, b.corps.id, rap);
+  const clos = await envoyerTrace(app, b.corps.id, SEGMENT());
+  assert.strictEqual(clos.code, 409);
+  assert.strictEqual(clos.corps.code, 'billet_clos');
+  assert.strictEqual(db.traces.length, 0);
+  // Et un billet périmé non plus — sans être clos par cette route, qui ne touche pas `matches` : le
+  // veilleur de la 02a fait déjà ce travail, et un second endroit qui clôt une ligne serait un
+  // second endroit à surveiller.
+  const suite = bancDeBillet();
+  const c = await demander(suite.app, { ...DEMANDE, clientKey: 'cle-x' });
+  suite.horloge.t = Date.parse(c.corps.expiresAt) + 1;
+  const perime = await envoyerTrace(suite.app, c.corps.id, SEGMENT());
+  assert.strictEqual(perime.code, 409);
+  assert.strictEqual(perime.corps.code, 'expire');
+  assert.strictEqual(suite.db.matches[0].status, 'open', 'la route de trace a écrit dans matches');
+});
+await test('la borne de pas vient du PLAN DE ZONE du billet, et le total la respecte', async () => {
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  // Une trace longue mais compressible — un joueur qui ne change pas de geste — pour éprouver la
+  // borne de PAS et non celle du corps : les deux existent, elles ne disent pas la même chose.
+  const gros = traceDe(C, MAX_PAS - 10, { fixe: true });
+  const un = await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: gros.texte() });
+  assert.strictEqual(un.code, 200, JSON.stringify(un.corps));
+  assert.strictEqual(un.corps.totalSteps, MAX_PAS - 10);
+  const trop = await envoyerTrace(app, b.corps.id,
+    { seq: 1, simVersion: SIM.SIM_VERSION, data: traceDe(C, 100, { graine: 3 }).texte() });
+  assert.strictEqual(trop.code, 400);
+  assert.strictEqual(trop.corps.code, 'trop_de_pas');
+  assert.strictEqual(db.traces.length, 1, 'le segment de trop a été écrit quand même');
+  assert.strictEqual(db.matches[0].status, 'open');
+  // Le rejeu d'un segment DÉJÀ écrit reste accepté même à la borne : sinon une réponse perdue
+  // enfermerait le joueur, ce que toute cette route existe pour éviter.
+  const rejeu = await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: gros.texte() });
+  assert.deepStrictEqual(rejeu.corps, un.corps);
+  assert.strictEqual(db.traces.length, 1);
+});
+await test('MAX_BODY vaut toujours 4 Ko partout, et la borne large ne vaut QUE sur la trace', async () => {
+  // La route qui décide d'un règlement garde sa borne. Relever celle de tout le monde ferait de la
+  // route de l'argent la surface d'attaque la plus large de l'API, et « la raison est écrite » n'est
+  // pas une protection. La garde est double : le chiffre, et un gros corps qui passe sur la trace
+  // et sur elle seule.
+  const { MAX_BODY, MAX_TRACE_BODY } = require('./app');
+  assert.strictEqual(MAX_BODY, 4 * 1024);
+  assert.ok(MAX_TRACE_BODY > MAX_BODY);
+  const fs = require('node:fs'), path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  assert.match(src, /const MAX_BODY = 4 \* 1024;/);
+  // `lireCorps` prend sa borne en ARGUMENT, et un seul appel la relève : celui de la trace.
+  const larges = (src.match(/lireCorps\(req[^)]*\)/g) || []).filter(a => a.includes('MAX_TRACE_BODY'));
+  assert.strictEqual(larges.length, 1, 'plus d\'une route lit un corps large : ' + larges.join(' | '));
+  const { app } = bancDeBillet();
+  const b = await demander(app);
+  // Le même corps de huit kilo-octets : refusé sur le profil, LU sur la trace — où il est refusé sur
+  // le fond et non sur la taille, ce qui prouve qu'il est bien arrivé jusqu'à la lecture.
+  const bourre = 'x'.repeat(8 * 1024);
+  const profil = await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { name: bourre } });
+  assert.strictEqual(profil.code, 400);
+  const trace = await envoyerTrace(app, b.corps.id, SEGMENT({ data: bourre }));
+  assert.strictEqual(trace.corps.code, 'donnees', 'un corps de 8 Ko doit atteindre la route de trace');
+});
+test('match_traces est en INSERTION SEULE : aucun update, aucun delete, nulle part', () => {
+  // Garde textuelle, et elle porte sur les deux côtés : le schéma et le pilote. Aucune base ne
+  // tourne, donc c'est tout ce qu'on peut prouver — et il faut le dire : un test qui passe contre la
+  // doublure prouve la doublure, pas Postgres.
+  const fs = require('node:fs'), path = require('node:path');
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
+  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  assert.match(sql, /create table if not exists match_traces/);
+  assert.match(sql, /primary key \(match_id, seq\)/, 'la clé qui arbitre le premier-écrit-gagne a disparu');
+  for (const q of (pg.match(/`[^`]*`/g) || [])) {
+    if (!/match_traces/.test(q)) continue;
+    assert.ok(!/\bupdate\s+match_traces\b/i.test(q), 'un update vise match_traces : ' + q);
+    assert.ok(!/\bdelete\s+from\s+match_traces\b/i.test(q), 'un delete vise match_traces : ' + q);
+  }
+  // L'insertion, elle, porte `on conflict do nothing` : c'est la BASE qui arbitre l'idempotence,
+  // jamais un `select` préalable — même doctrine que `name_key`.
+  const inserts = (pg.match(/`[^`]*`/g) || []).filter(q => /insert into match_traces/i.test(q));
+  assert.strictEqual(inserts.length, 1, 'une seule insertion de trace');
+  assert.match(inserts[0], /on conflict do nothing/);
+  // Et la route de trace n'écrit JAMAIS dans `matches` : c'est ce qui fait qu'une trace refusée ne
+  // peut pas laisser un billet bloqué, quoi qu'il arrive.
+  const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const route = app.slice(app.indexOf('async function recevoirTrace'), app.indexOf('async function rendreResultat'));
+  assert.ok(route.length > 800, 'la route de trace n\'a pas été retrouvée');
+  for (const ecriture of ['db.settleMatch', 'db.createMatch', 'db.expireMatches'])
+    assert.ok(!route.includes(ecriture), `la route de trace appelle ${ecriture}`);
+});
+await test('des totaux rendus en chaînes par la base ressortent en nombres', async () => {
+  // Le même piège de pilote que les graines et les statistiques : `count()` et `sum()` rendent un
+  // `bigint`, donc une CHAÎNE. Un total parti en texte ne se verrait qu'à l'écran, longtemps après.
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  const brute = db.addTrace;
+  db.addTrace = async a => {
+    const r = await brute(a);
+    return { ...r, segments: String(r.segments), totalSteps: String(r.totalSteps) };
+  };
+  const r = await envoyerTrace(app, b.corps.id, SEGMENT());
+  assert.strictEqual(typeof r.corps.segments, 'number');
+  assert.strictEqual(typeof r.corps.totalSteps, 'number');
+  assert.strictEqual(r.corps.totalSteps, 400);
+});
+await test('la doublure refuse ce que la colonne de trace refuserait', async () => {
+  // La doublure ment comme le vrai pilote, ici comme ailleurs : `seq` et `steps` sont des `integer`,
+  // `data` porte une borne de longueur. Sans cela, aucun test ne pourrait voir la classe de panne du
+  // `22003` sur cette table-là.
+  const { db } = bancDeBillet();
+  await assert.rejects(() => db.addTrace({ matchId: '1', seq: 0, simVersion: 1,
+    steps: 3_000_000_000, data: 'AAAAA', maxSteps: 1e12 }), e => e.code === '22003');
+  await assert.rejects(() => db.addTrace({ matchId: '1', seq: 0, simVersion: 1,
+    steps: 1, data: 'A'.repeat(70000), maxSteps: 1e12 }), e => e.code === '23514');
+  assert.strictEqual(db.traces.length, 0, 'une écriture refusée ne doit rien laisser derrière');
+});
+await test('la trace a son propre seau de débit, son propre pré-vol, et sa seule méthode', async () => {
+  const { app } = bancDeBillet({ limiter: makeLimiter({ max: 2, windowMs: 60_000 }) });
+  const b = await demander(app);
+  const codes = [];
+  for (let i = 0; i < 3; i++) codes.push((await envoyerTrace(app, b.corps.id, SEGMENT({ seq: i }))).code);
+  assert.deepStrictEqual(codes, [200, 200, 429], codes.join(','));
+  // Marteler la trace ne doit pas empêcher de rendre son résultat : les seaux sont séparés.
+  const r = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/result`,
+                               token: 'ok:u1:Loic', body: {} });
+  assert.notStrictEqual(r.code, 429);
+  for (const m of ['GET', 'PATCH', 'DELETE'])
+    assert.strictEqual((await appel(app, { method: m, path: '/api/match/1/trace', token: 'ok:u1:Loic' })).code, 405, m);
+  for (const chemin of ['/api/match//trace', '/api/match/abc/trace', '/api/match/1/trace/x'])
+    assert.strictEqual((await appel(app, { method: 'POST', path: chemin, token: 'ok:u1:Loic' })).code, 404, chemin);
+  // Sans jeton, rien ne passe : le refus vient avant la lecture du corps.
+  assert.strictEqual((await appel(app, { method: 'POST', path: '/api/match/1/trace' })).code, 401);
+  // Et le pré-vol annonce la route sans que personne ait eu à réécrire la liste des méthodes.
+  const pre = await appel(app, { method: 'OPTIONS' });
+  assert.ok(String(pre.head['access-control-allow-methods']).split(',').includes('POST'));
 });
 
 console.log('Lecture de la clé d\'API Crossmint');

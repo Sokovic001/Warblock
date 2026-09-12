@@ -77,6 +77,37 @@ C'est un problème de performance, qui se répare ; une case fausse ne se répar
 
 ---
 
+### La trace est quantifiée À LA SOURCE, pas à l'enregistrement — phase 02b, module 6
+
+Un rejeu ne vaut que s'il refait **exactement** la partie qui s'est affichée. La trace des entrées du
+joueur doit tenir dans quelques dizaines de kilo-octets, donc elle est quantifiée : la visée au
+1024e de tour, la portée de visée au huitième de case, le déplacement au quinzième de course.
+
+La question qui décide de tout est *où* : quantifier au moment d'**écrire** la trace, ou au moment de
+**lire** l'entrée. Le premier choix est le réflexe et il est faux. Le jeu jouerait une valeur, la
+trace en porterait une autre, et le rejeu du serveur produirait une partie *voisine* de celle que le
+joueur a vue — avec un écart qui grandit à chaque pas et qu'aucune borne ne décrit. C'est
+`lireEntrees()` qui quantifie donc, et le jeu joue la valeur quantifiée. Le rejeu est alors exact
+**par construction**, et le test qui le prouve compare l'état final sans la moindre tolérance.
+
+Le corollaire coûte une phrase et il compte : **on quantifie avec ou sans billet.** Ne quantifier
+qu'en ligne aurait fait deux jeux, un en ligne et un hors ligne, pour un écart que personne ne peut
+sentir. La même règle vaut pour les gestes ponctuels — super, fumigène, tir bref : la visée est
+quantifiée avant d'être jouée, et c'est celle-là qui part dans la trace.
+
+### Une action ponctuelle n'est pas un champ d'entrée, c'est un jeton — phase 02b, module 6
+
+Le super, le fumigène, le tir d'une pression brève, l'encaissement et l'abandon partent d'un
+**événement** d'entrée, entre deux pas, et pas du pas lui-même. Le module 5 ne l'a pas changé pour ne
+pas déplacer la latence ressentie, ce qui laissait une dette : une partie rejouée n'aurait eu ni
+super ni fumigène.
+
+La solution qui paraît naturelle — ajouter des booléens à l'objet d'entrée et différer l'action au
+prochain pas — déplace la latence d'une demi-image en moyenne, sur le geste le plus important du jeu.
+La trace porte donc ces actions comme des **jetons à part**, dans l'ordre où elles sont arrivées, avec
+leur propre direction et leur propre portée : un super lancé au stick ne vise pas comme le pas qui
+l'entoure. Le rejeu les applique avant le pas qui suit, ce qui reproduit exactement l'ordre d'origine.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -279,11 +310,21 @@ séparés des précédents parce qu'ils ne se trouvent ni en relisant le code, n
   spécification avait déjà écartés : **une règle de plausibilité se vérifie contre le code du jeu,
   jamais contre l'intuition.**
 
-Ces trois-là partagent une cause : ce qui a été supposé d'un composant qu'on ne fait pas tourner.
+- **Une colonne « secrète » de 32 bits n'est pas un secret.** `seed_secret` portait
+  `check (seed_secret between 0 and 4294967295)` : deux milliards d'essais tiennent dans une soirée,
+  hors ligne, sans rien demander à personne. Elle est passée à **128 bits en hexadécimal** au module
+  6 de la phase 02b, et son commentaire dit désormais la vérité — dans une architecture de rejeu, le
+  client possède tout ce qu'il dessine, donc elle ne protège rien aujourd'hui et la simulation ne
+  l'utilise pas. Elle reste pour le jour où le serveur décidera de quelque chose que le client n'a
+  pas à savoir. Leçon : **une colonne qui porte un nom qui ment est pire que pas de colonne**, et le
+  moment de la corriger est celui où aucune base n'a encore tourné.
+
+Ces quatre-là partagent une cause : ce qui a été supposé d'un composant qu'on ne fait pas tourner.
 Aucune base n'a jamais tourné ici, et c'est la dette la plus silencieuse du dossier — l'index unique
-partiel, `name_key` et la clause `where status = 'open' and net_cents is null` n'ont été éprouvés
-que contre une doublure qui **imite** les contraintes au lieu de les subir. Un test qui passe contre
-la doublure prouve la doublure.
+partiel, `name_key`, la clause `where status = 'open' and net_cents is null` et, depuis la phase
+02b, la clé primaire `(match_id, seq)` qui arbitre le premier-écrit-gagne de `match_traces` n'ont été
+éprouvés que contre une doublure qui **imite** les contraintes au lieu de les subir. Un test qui
+passe contre la doublure prouve la doublure.
 
 ---
 
@@ -321,16 +362,25 @@ la doublure prouve la doublure.
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
-- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 4 livrés sur sept. Le
-  serveur possède l'identité d'une partie, pas son déroulement. Ce qui a bougé : le pas est fixe,
-  le hasard de la simulation descend de la graine, le bloc `WBSim` existe, et les tirs, les dégâts,
-  la mort, le butin et le fumigène y sont descendus avec un flux d'événements que le rendu lit.
-  Ce qui n'a pas bougé : **les bots** vivent toujours dans le bloc `Game`, aucune partie entière ne
-  se joue encore sans navigateur, et le solde reste modifiable depuis la console. Le verdict de 02a
-  est une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter comme
-  un premier étage d'anti-triche.
+- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 6 livrés sur sept. Le
+  serveur possède l'identité d'une partie et, depuis le module 6, la **pièce** qui prouve son
+  déroulement — mais pas encore son verdict. Ce qui a bougé : le pas est fixe, le hasard de la
+  simulation descend de la graine, le bloc `WBSim` existe et contient toute la simulation, une
+  partie entière se joue sans navigateur, `api/sim.js` charge ce bloc côté serveur, `sim_version`
+  est figée sur le billet et la trace des entrées du joueur arrive en base, en insertion seule.
+  **Ce qui n'a pas bougé, et c'est le tout dernier trou : `net_cents` vient toujours de la sacoche
+  DÉCLARÉE par le client.** Le serveur a la trace, il ne s'en sert pas encore pour juger. Le verdict
+  de 02a reste une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le
+  présenter comme un premier étage d'anti-triche. Le solde reste modifiable depuis la console.
 - **Aucune base n'a jamais tourné.** Les contraintes qui arbitrent l'unicité n'ont été éprouvées
   que contre une doublure.
+- ~~**Aucun test ne regarde le jeu tourner.**~~ **Refermé au module 5 de la phase 02b :** `node
+  test.js` joue cinquante parties complètes — dix graines × cinq modes — du coup d'envoi à la
+  dernière phase du gaz, sans navigateur. Ce qui reste ouvert derrière, et qui n'est pas la même
+  chose : **aucun test ne regarde le jeu se VOIR.** Le HUD, la caméra, le fondu d'un buisson, un
+  bouton qui répond au doigt — deux bugs de ce journal n'ont été trouvés que par un navigateur, et
+  le harnais de partie ne les aurait pas attrapés. Le texte d'origine est conservé ci-dessous pour
+  ce qu'il dit encore de vrai.
 - **Aucun test ne regarde le jeu tourner.** Deux bugs de ce journal n'ont été trouvés que par un
   test navigateur, et il n'en existe pas de harnais. Depuis le module 3 de la phase 02b, `node
   test.js` fait bouger de vraies entités sur une vraie carte — mais des entités synthétiques, sur

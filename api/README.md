@@ -1,4 +1,4 @@
-# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a)
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), trace de partie (phase 02b)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
 ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
@@ -16,7 +16,8 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `GET /api/health` | Répond `{ ok: true }`. Pour la surveillance. |
 | `GET /api/me` | Rend le profil du joueur connecté, **statistiques agrégées** comprises. La première connexion crée le compte. |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
-| `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, expiration. |
+| `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, version de simulation, expiration. |
+| `POST /api/match/:id/trace` | Reçoit la **trace des entrées du joueur**, en segments, en insertion seule. |
 | `POST /api/match/:id/result` | Juge le rapport rendu, encadre les montants et **clôt** la ligne. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
@@ -42,13 +43,31 @@ POST /api/match      { mode, stake, brawler, clientKey }
 - La mise est convertie par `WBCore.toCents()` à partir de la table retrouvée, jamais à partir du
   nombre reçu : une table à 0,50 $ s'enregistre `50`, entier.
 
-**Deux graines, et une seule sort.** La publique détermine la carte et le gaz, part au client sous le
-nom `seed` — celui que `WBCore.seedFor` lit dans le billet. La **secrète** ne quitte jamais le
-serveur. Elle ne sert à rien aujourd'hui puisque rien n'est simulé, et c'est exactement pourquoi elle
-est créée maintenant : le jour où le serveur décidera du contenu des caisses, il faudra que le client
-ne l'ait jamais reçue, et une colonne ajoutée aujourd'hui coûte zéro migration. Les deux sont tirées
-par une source **injectée** dans `createApp`, comme la base et la vérification du jeton, ce qui les
-rend observables en test ; par défaut, le générateur du système.
+**Deux graines, et une seule sort.** La publique — 32 bits, le domaine de `makeRng` — détermine la
+carte, le gaz, les caisses et les vingt bots, et part au client sous le nom `seed`, celui que
+`WBCore.seedFor` lit dans le billet. Elle reste 32 bits parce que tout le contrat client de la 02a en
+dépend, et parce que son entropie est publique par construction.
+
+La **secrète** ne quitte jamais le serveur, et depuis la phase 02b le commentaire du schéma dit la
+vérité sur elle : **dans une architecture de rejeu, elle ne protège rien et la simulation ne
+l'utilise pas.** Le client possède tout ce qu'il dessine — il dessine les caisses, donc il en connaît
+le contenu dès la première seconde. Elle reste pour le jour où le serveur décidera de quelque chose
+que le client n'a pas à savoir. Elle est passée de 32 bits à **128, en hexadécimal** :
+`between 0 and 4294967295` la rendait trouvable par force brute hors ligne, et une colonne qui porte
+un nom qui ment est pire que pas de colonne. Aucune base n'ayant jamais tourné, l'élargir coûte
+encore zéro migration.
+
+Les deux sortent de sources **injectées** dans `createApp` — `randomSeed` et `randomSecret`, deux
+robinets depuis qu'elles n'ont plus le même domaine — comme la base et la vérification du jeton, ce
+qui les rend observables en test ; par défaut, le générateur du système.
+
+**`sim_version` est figée à l'ouverture, et le client ne peut pas l'écrire.** Elle est lue sur le
+bloc `WBSim` que le serveur a chargé au démarrage, jamais dans le corps de la requête, et elle ne
+part pas au client. Un correctif de simulation déployé pendant qu'un joueur joue rejouerait une AUTRE
+partie que la sienne et paierait autre chose que ce qu'il a vu : c'est la raison exacte pour laquelle
+`seats` et `team_size` sont déjà figés ici. Corollaire d'exploitation, à ranger avec les décisions
+hors phases : **un déploiement se draine, il n'écrase pas les billets ouverts** — au plus une
+quinzaine de minutes.
 
 **L'expiration part avec le billet, pas après.** Elle vaut `LOBBY.wait` + la durée complète du plan de
 zone de ce mode — la borne haute d'une partie que personne ne gagne — + dix minutes de marge. Elle
@@ -89,6 +108,74 @@ volontairement : on ne fait que les recopier.
 
 **Aucune colonne solde, ici comme ailleurs.** `stake_cents` est une mise engagée, pas de l'argent
 détenu. La ligne s'insère puis se règle **une fois**, par la route ci-dessous.
+
+## `POST /api/match/:id/trace` — la trace des entrées du joueur
+
+```
+POST /api/match/12/trace   { seq, simVersion, data }
+→ 200                      { matchId, seq, segments, totalSteps }
+```
+
+Le serveur rejouera la partie depuis la graine publique du billet ; elle lui donne la carte, le gaz,
+les caisses et les vingt bots. **Il ne lui manque que ce que le joueur a fait**, et c'est tout ce que
+cette route transporte. Enregistrer les positions des bots ferait du client l'auteur de ses propres
+adversaires — la triche la plus simple qu'on puisse offrir — et multiplierait la taille par vingt.
+
+**La trace est quantifiée à la source**, et c'est ce qui rend le rejeu exact plutôt qu'approximatif :
+`lireEntrees()` rend la valeur **quantifiée**, le jeu joue celle-là, et la trace porte le même
+entier. Sans cela, le serveur rejouerait une partie légèrement différente de celle qui s'est affichée
+et l'écart n'aurait aucune borne connue. Le prix est une visée arrondie au 1024e de tour — 0,35
+degré, six centimètres à dix cases, la même table `C.UNIT` que la géométrie de la graine — une portée
+de visée au huitième de case et un déplacement au quinzième de course. Rien de percevable.
+
+Le format vit dans `WBCore` (`traceMots`, `traceEnregistreur`, `traceDecode`) parce que le jeu et le
+serveur le lisent tous les deux : cinq caractères base64url par pas distinct, plus un jeton de
+répétition pour les plages identiques, plus un jeton d'**action ponctuelle** — tir bref, super,
+fumigène, encaissement, abandon — car celles-là partent d'un événement d'entrée, entre deux pas, et
+non du pas lui-même. Sans ces jetons, une partie rejouée n'aurait ni super ni fumigène.
+
+**L'envoi se fait à la fin de la partie, jamais pendant** : enregistrer une trace ne coûte jamais une
+image — un pas identique au précédent n'alloue rien, il incrémente un compteur — et l'envoyer non
+plus. Il part avant le rapport, parce que le rejeu en aura besoin au moment du règlement. **Sans
+billet, aucune trace n'est enregistrée ni envoyée**, et le jeu se comporte exactement comme avant la
+phase : c'est la promesse du fichier unique, et les quatre cas nommés de la 02a restent testés comme
+des cas normaux.
+
+**La table `match_traces` est en insertion seule.** Clé primaire `(match_id, seq)`,
+`on conflict do nothing`, **premier écrit gagne**, aucun `update`, aucun `delete` : c'est la doctrine
+d'idempotence déjà arbitrée par la base en 02a, poussée jusqu'au bout. Un segment renvoyé n'écrit pas
+de seconde ligne et ne réécrit pas la première, même s'il porte d'autres données — sinon un client
+pourrait réécrire sa trace après coup, ce qui la viderait de toute valeur de preuve. La réponse ne
+dit d'ailleurs pas si la ligne vient d'être écrite : elle rend l'état de la trace, donc un rejeu rend
+exactement la même réponse que le premier appel.
+
+**Trois bornes, et chacune dit ce qu'elle borne.**
+
+- `MAX_TRACE_BODY` (32 Ko) vaut **sur cette route et sur elle seule**. `MAX_BODY` ne bouge pas :
+  relever la borne de la route qui décide d'un règlement ferait de la route de l'argent la surface
+  d'attaque la plus large de l'API, et « la raison est écrite » n'est pas une protection. `lireCorps`
+  prend donc sa borne en argument, et un seul appel la relève.
+- `traceMaxSteps(plan)` borne le nombre de **pas**, et il se déduit du plan de zone du billet — la
+  durée maximale d'une partie que personne ne gagne, plus la protection d'apparition, plus le compte
+  à rebours d'intro qui consomme des pas sans faire avancer `G.pas`. Il suit donc le mode : le gaz
+  rapide de Resurgence donne une borne plus courte.
+- Le nombre de pas d'un segment est **compté** par le serveur en relisant la grammaire, jamais
+  annoncé par le client. Un nombre déclaré aurait été un nombre de plus à ne pas croire.
+
+**Une trace refusée sort en 400 ou 409, jamais en 500, et ne laisse jamais la ligne `matches`
+bloquée.** C'est la leçon du `22003` : un joueur n'a qu'un billet ouvert à la fois, donc un 500 qui
+laisse la ligne `open` l'enferme jusqu'à l'expiration. Ici la garantie est **structurelle** — cette
+route n'écrit jamais dans `matches`, pas même pour clore une ligne périmée, que le veilleur de la 02a
+ramasse déjà. Sept codes nommés, chacun testé : `corps`, `seq`, `sim_version`, `donnees`,
+`trop_de_pas`, `billet_clos`, `expire`, plus un `404` pour un billet inconnu ou qui n'est pas le sien.
+
+**Aucune décision d'argent ne change ici.** `net_cents` vient toujours de la sacoche déclarée : le
+rejeu qui décide est le module suivant, et c'est délibéré — le risque reste là-bas.
+
+**La dette, nommée plutôt que tue** : `match_traces` n'a **aucune politique de conservation**, et
+elle est renvoyée à la phase 03. Et comme partout ailleurs dans ce dossier, aucune base n'a jamais
+tourné : la clé primaire `(match_id, seq)` et le premier-écrit-gagne n'ont été éprouvés que contre
+une doublure, et **un test qui passe contre la doublure prouve la doublure**.
 
 ## `POST /api/match/:id/result` — le verdict
 
@@ -250,17 +337,23 @@ silencieuse de la phase, et elle se solde le jour où une base tournera — pas 
 ```
 app.js              le routeur. Rien hors du cœur de Node, tout le reste lui est injecté.
 core.js             charge WBCore depuis index.html
+sim.js              charge WBSim depuis index.html — même chargeur, même garde bruyante
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
-schema.sql          le schéma : users, matches. Deux tables, et aucune colonne « solde ».
-test.js             104 tests sans rien installer, 113 avec jose
+schema.sql          le schéma : users, matches, match_traces. Aucune colonne « solde ».
+test.js             119 tests sans rien installer, 128 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
 
-`api/core.js` charge le bloc `WBCore` **depuis `index.html`**, le même que le navigateur exécute.
+`api/core.js` charge le bloc `WBCore` **depuis `index.html`**, le même que le navigateur exécute, et
+`api/sim.js` fait exactement pareil avec le bloc `WBSim` — même découpage par marqueurs, même
+`new Function`, même garde bruyante au démarrage sur la liste des noms exportés. Il n'y a donc pas
+deux simulations à réconcilier : il y a un bloc de texte que deux chargeurs évaluent, et un test le
+montre en le chargeant **une seconde fois** à la façon du navigateur puis en comparant l'empreinte
+d'une même trace rejouée des deux côtés.
 Le pseudo est validé côté serveur par `sanitizeName()` et `validName()`, les mêmes fonctions qui
 tournent dans le jeu, l'unicité s'appuie sur `nameKey()`, et la recherche de table sur `tierFor()` —
 l'API ne refait pas le `TIERS.find` elle-même, sans quoi une table ajoutée au jeu s'afficherait au
@@ -491,12 +584,22 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   production. Les seaux sont séparés par route : renommer son personnage ne consomme pas le droit de
   demander une partie, et l'inverse non plus.
 - **Aucune base n'a jamais tourné.** L'index unique partiel sur les billets ouverts, la contrainte
-  `name_key`, le comportement de `insert … on conflict do nothing` et la clause `where status =
-  'open' and net_cents is null` qui arbitre l'unicité du règlement n'ont été éprouvés que contre la
-  doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
+  `name_key`, le comportement de `insert … on conflict do nothing`, la clause `where status =
+  'open' and net_cents is null` qui arbitre l'unicité du règlement et, depuis la phase 02b, la clé
+  primaire `(match_id, seq)` qui arbitre le premier-écrit-gagne de `match_traces` n'ont été éprouvés
+  que contre la doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
   comporte autrement, rien ne le signalera avant le premier déploiement. C'est la dette la plus
   silencieuse du dossier, et elle grandit : c'est maintenant un montant qu'une clause non éprouvée
   protège.
+- **L'AIMBOT SURVIT ENTIER, ET L'ESP DEVIENT STRUCTUREL.** La trace porte une direction de visée par
+  pas, et une visée parfaite ne se distingue pas d'un très bon joueur : le rejeu rend le vol de
+  *temps* impossible, il ne touche pas au vol de *précision*. Pire, dans une architecture de rejeu le
+  client doit posséder tout ce qu'il dessine — il dessine les caisses, donc il connaît le contenu de
+  tout le butin de la carte dès la première seconde. Ce n'est pas un oubli, c'est le prix de
+  l'architecture, et il est payé les yeux ouverts : avec des adversaires tous robots, la seule
+  victime en est la maison, à chaque partie. **À ne jamais diluer.**
+- **`match_traces` n'a AUCUNE politique de conservation.** Combien de temps garde-t-on la pièce qui
+  prouve une partie, et qui a le droit de la relire : renvoyé à la phase 03.
 - **Pas encore de journal d'audit.** Chaque changement de pseudo devra être tracé avant que des
   comptes ne valent de l'argent.
 - **Pas de suppression de compte.** À ajouter, avec ce que la juridiction retenue impose de

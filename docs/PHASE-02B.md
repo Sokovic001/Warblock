@@ -454,6 +454,32 @@ Ce qu'on hérite en échange, et qui est une vraie dette : `match_traces` grandi
 de conservation. Elle est nommée ici et renvoyée à la phase 03, qui décidera de ce qu'un grand livre
 a besoin de garder.
 
+*Fait au module 6, avec les deux décisions de format qui n'étaient pas écrites ici.* **La trace est
+quantifiée À LA SOURCE**, et c'est le point qui rend le rejeu exact plutôt qu'approximatif :
+`lireEntrees()` rend la valeur quantifiée, le jeu joue celle-là, et la trace porte le même entier.
+Quantifier seulement à l'enregistrement aurait fait rejouer au serveur une partie *voisine* de celle
+qui s'est affichée, avec un écart sans borne connue ; quantifier seulement quand un billet est en
+main aurait fait deux jeux, un en ligne et un hors ligne. Le prix est une visée arrondie au 1024e de
+tour — la même table `C.UNIT` que la géométrie de la graine, donc un vecteur exactement unitaire des
+deux côtés — une portée de visée au huitième de case et un déplacement au quinzième de course.
+Ensuite, **les actions ponctuelles sont des jetons à part**, dans l'ordre où elles sont arrivées, et
+le rejeu les applique avant le pas qui suit : c'est la dette que le module 5 avait nommée, et sans
+elle une partie rejouée n'aurait ni super ni fumigène ni encaissement ni abandon. Elles portent leur
+propre visée, parce qu'un super lancé au stick ne vise pas comme le pas qui l'entoure.
+
+Le format tient en cinq caractères base64url par pas distinct, plus un jeton de répétition pour les
+plages identiques : une partie complète pèse une cinquantaine de kilo-octets dans le pire cas — une
+visée qui bouge à chaque image — donc **deux à trois segments de 24 000 caractères**, et bien moins
+dès que le joueur tient une direction. `MAX_TRACE_BODY` vaut 32 Ko, sur cette route et sur elle
+seule ; `lireCorps` prend sa borne en argument pour que celle du règlement ne puisse pas bouger par
+inadvertance. Le nombre de pas d'un segment est **compté** par le serveur en relisant la grammaire,
+jamais annoncé : un nombre déclaré aurait été un nombre de plus à ne pas croire.
+
+Enfin, la garantie « une trace refusée ne laisse jamais la ligne bloquée » est **structurelle** et
+pas seulement testée : la route n'écrit jamais dans `matches`, pas même pour clore un billet périmé,
+que le veilleur de la 02a ramasse déjà. Un second endroit qui clôt une ligne serait un second endroit
+à surveiller.
+
 ### `sim_version` est figée à l'ouverture du billet
 
 Un correctif de simulation déployé pendant qu'un joueur joue rejoue **une autre partie que la
@@ -465,6 +491,14 @@ avec un motif nommé.
 Corollaire d'exploitation, qui n'est pas de l'architecture : **un déploiement se draine**, il
 n'écrase pas les billets ouverts — au plus une quinzaine de minutes. À ranger à côté de « la maison
 est la contrepartie de chaque pot », dans les décisions à prendre hors des sept phases.
+
+*Fait au module 6.* La colonne existe, elle est écrite par le serveur depuis `WBSim.SIM_VERSION` et
+le client ne peut pas la toucher — le patron des graines et des sièges, éprouvé de la même façon :
+un corps qui la porte écrit une ligne strictement identique à celle d'un corps minimal. Elle **ne
+part pas au client** : il n'en a rien à faire, et la lui donner l'inviterait à la renvoyer telle
+quelle au lieu de dire celle sous laquelle il a réellement joué. La route de trace, elle, la compare
+et refuse en 409 avec un code nommé ; le refus de **juger** une trace produite sous une autre version
+reste au module 7.
 
 ### Une divergence est MESURÉE, jamais punie, et exclut la ligne du grand livre
 
@@ -525,7 +559,7 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 | Même graine et même trace donnent le même état final et la même empreinte | deux fois dans le processus et une fois dans un processus fils — le patron déjà employé pour `zonePlan` ; et changer **un seul** pas de la trace change l'empreinte, sans quoi elle ne prouve rien |
 | L'ordre de résolution est figé | `G.ents` garde un ordre d'insertion stable ; aucune itération de `Set`, de `Map` ou de clés d'objet ne décide d'un ordre de résolution ; aucun tri instable ; garde textuelle sur les sites concernés. *Livré au module 4 : dans le bloc SIM, zéro `.sort(`, zéro `for..in`, zéro `Object.keys/values/entries`, et `p.hit` comme `e.dashHit` ne connaissent que `has` et `add`. Les touches d'un même pas se résolvent par une clé **totale** — distance le long du segment, puis rang d'insertion — extraite par minimum successif plutôt que par un tri* |
 | Le code a bougé sans changer | corpus **gelé avant le déplacement** : les requêtes de grille et `moveEntity` rendent exactement les mêmes positions qu'avant, sur une trace capturée et figée dans `corpus-grille.json`, lue par `test.js`. *Livré au module 3 : huit graines, cent pas de `moveEntity` sur douze entités synthétiques, le glissement le long des murs, la ligne de vue de près comme de loin, et `spawnPoints` sur les cinq modes — comparés **exactement**, sans tolérance. Un second test vérifie que le corpus contient les deux réponses de chaque règle, sans quoi il passerait sur n'importe quel code* |
-| Une seule copie de chaque règle | `critShot`, `hexDamage`, `dmgMult`, `boxDrop`, `bucketAfterKill`, `cashoutPayout`, `segmentHitsDisc` restent **appelées** depuis `WBCore` ; garde textuelle contre une seconde règle de critique et contre le retour de `CRIT_TEST` ; `api/sim.js` charge le bloc depuis `index.html`, garde bruyante au démarrage |
+| Une seule copie de chaque règle | `critShot`, `hexDamage`, `dmgMult`, `boxDrop`, `bucketAfterKill`, `cashoutPayout`, `segmentHitsDisc` restent **appelées** depuis `WBCore` ; garde textuelle contre une seconde règle de critique et contre le retour de `CRIT_TEST` ; `api/sim.js` charge le bloc depuis `index.html`, garde bruyante au démarrage. *Livré au module 6 : le fichier est calqué sur `api/core.js`, et un test l'ampute VRAIMENT d'un export pour vérifier que le chargement échoue, avec le nom manquant dans le message* |
 | Un seul écrivain de mesh dans `Game` | garde textuelle : un seul `syncMeshes()` pour les corps de brawlers, un seul `syncMonde()` pour tout le reste, un seul `hudFast()` pour les étiquettes du DOM — trois tables annexes, trois lecteurs uniques, tous appelés depuis la boucle d'image et de nulle part ailleurs |
 | Le jeu tourne | sur dix graines et les cinq modes, une partie complète atteint une fin en moins de `zoneTotalS + GRACE`, personne ne termine coincé contre un mur, et le chien de garde `stuckT` est exercé pour de vrai. *Livré au module 5 : cinquante parties complètes jouées dans `node test.js`, chacune arrêtée sur un état terminal — une seule équipe en jeu, ou la fin du plan — jamais sur un compteur d'essais. Le chien de garde est compté, pas seulement supposé : plus de deux cents interventions sur les cinquante parties. Et il a trouvé un vrai bug, décrit ci-dessous* |
 | L'empreinte est un entier, prise à intervalle fixe de pas | `EMPREINTE_PAS = 60`, un condensé par seconde simulée, accumulé ; `empreinte(G)` referme l'accumulation sur le nombre de pas et sur `SIM_VERSION`. Elle voit la position **et la vitesse** : sans la vitesse, un brawler poussé contre un mur rendait le même condensé quelles que soient ses commandes |
@@ -535,7 +569,10 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 | La conservation de l'argent est vraie à chaque pas de la **vraie** simulation | à chaque pas, sacoches + sacoches au sol + encaissé = mise × sièges, sur les quatre tables et les cinq modes ; et **assertée une fois de plus au moment du règlement**, sur la partie réellement rejouée. *Livré au module 4 sur un banc qui appelle les vraies fonctions de SIM — vingt combinaisons, mille cinq cents pas chacune, moitié au coup d'envoi et moitié dans un gaz déjà refermé. Ce n'est pas encore une partie entière : les bots descendent au module 5* |
 | Les trois chemins de la sacoche tiennent | un kill la transfère entière, une mort par gaz la lâche au sol, un encaissement la met à zéro |
 | Aucun montant ne vient du client | `net_cents` sort de la partie rejouée ; un corps dont les kills, la sacoche et la durée sont gonflés écrit une ligne **strictement identique** à celle d'un corps sincère — patron de la 02a étendu des paramètres aux faits |
-| Le rejeu du serveur et celui du jeu rendent la même empreinte | même trace, même empreinte, et le test dit **pourquoi** : c'est le même bloc de code, chargé deux fois |
+| Le rejeu du serveur et celui du jeu rendent la même empreinte | même trace, même empreinte, et le test dit **pourquoi** : c'est le même bloc de code, chargé deux fois. *Livré au module 6 : `api/test.js` charge le bloc une seconde fois à la façon du navigateur — son propre `WBCore`, extrait du même fichier — et compare l'empreinte, le nombre de pas, la distance parcourue et le nombre de morts sur une même trace de 4 000 pas. Ce qu'il ne prouve pas, et ne prétend pas prouver : l'égalité entre deux MOTEURS* |
+| La trace fait un aller-retour sans perte | enregistrée, quantifiée, compressée, décompressée, elle rejoue **à l'identique** — état final et empreinte comparés **exactement**, sur trois modes. Une contre-épreuve montre qu'une trace vide ne rejoue PAS la même partie, sans quoi l'aller-retour passerait sur du vide, et retourner un seul pas change l'empreinte |
+| L'enregistrement ne coûte jamais une image | un pas identique au précédent n'ajoute aucune plage, il incrémente un compteur : 50 000 pas identiques tiennent en une plage, et le pire cas reste borné à une plage par pas. Le texte et les segments ne se fabriquent que dans `endMatch`, et une garde textuelle interdit à la boucle d'image de toucher à la trace |
+| La trace ne part que s'il y a un billet | l'enregistreur naît du billet et de lui seul ; sans compte, sans serveur, sur une réponse illisible ou sur un billet qui décrit une autre table, il n'existe pas — et même une trace tendue à la main au module `Match` ne part nulle part |
 | Tronquer une trace ne paie jamais rien | pour chaque trace terminale et chacun de ses préfixes, `net(préfixe) ≤ net(complète)` ; `net = 0` et aucun montant écrit sans état terminal |
 | Une trace invalide sort en 400, jamais en 500, et ne laisse jamais la ligne `open` | trop longue, malformée, absente, non terminale, `sim_version` différente, rejeu trop long : six codes nommés, chacun testé, et la ligne clôse ou laissée au veilleur, jamais bloquée |
 | Le rejeu tient un budget | `REPLAY_BUDGET_MS` éprouvé avec une **horloge injectée**, donc sans attendre ; plancher de performance dans `npm test` : N pas en moins de X ms |
@@ -581,8 +618,13 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
   changement de ressenti : les bots, le joueur et le gaz ont été déplacés, pas réécrits. Il déplace en
   revanche le MONDE — les caisses de toutes les graines changent de place, pour la raison du module 2
   et au même coût, zéro. La session de jeu réelle n'a toujours pas eu lieu.*
-- **Toutes les commandes du joueur ne passent pas encore par `entrees`, et le module 6 doit le
-  savoir.** Le super (barre d'espace, clic droit, stick), le fumigène, la visée automatique (`Q`, tap
+- ~~**Toutes les commandes du joueur ne passent pas encore par `entrees`.**~~ *Refermé au module 6 :
+  elles n'y passent toujours pas — c'est ce que le jeu a toujours fait, et le déplacer changerait la
+  latence ressentie — mais la trace les porte désormais comme des **jetons d'action ponctuelle**,
+  dans l'ordre où elles sont arrivées et avec leur propre visée, et `WBSim.appliquerActe` les rejoue
+  avant le pas qui suit. Le texte d'origine est conservé tel quel ci-dessous : il dit exactement ce
+  qu'il fallait faire.* **Toutes les commandes du joueur ne passent pas par `entrees`, et le module 6
+  doit le savoir.** Le super (barre d'espace, clic droit, stick), le fumigène, la visée automatique (`Q`, tap
   tactile) et le tir d'une pression brève partent d'un **événement d'entrée**, entre deux pas, pas du
   pas lui-même — c'est ce que le jeu a toujours fait et le module 5 ne l'a pas changé pour ne pas
   déplacer la latence ressentie. La trace devra donc porter ces actions ponctuelles **horodatées en
@@ -639,8 +681,13 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
    `node test.js` joue **cinquante parties complètes** — dix graines × cinq modes — du coup d'envoi
    à la dernière phase du gaz. Le trou le plus ancien du dossier se referme **avant** que le serveur
    n'ait besoin de quoi que ce soit.
-6. **La trace : `api/sim.js`, `sim_version`, enregistrement et route d'insertion seule.** Aucune
-   décision d'argent ne change encore.
+6. **La trace : `api/sim.js`, `sim_version`, enregistrement et route d'insertion seule. Fait.**
+   `api/sim.js` charge le bloc `WBSim` depuis `index.html` exactement comme `api/core.js` charge
+   `WBCore`, garde bruyante comprise ; `sim_version` est écrite sur le billet à son ouverture, par le
+   serveur et jamais par le client ; `seed_secret` passe à 128 bits et son commentaire dit enfin la
+   vérité ; le jeu enregistre la trace de ses entrées, quantifiée à la source et compressée par
+   plages, et l'envoie à la fin de la partie sur `POST /api/match/:id/trace`, en segments, dans une
+   table en **insertion seule**. Aucune décision d'argent n'a changé, et c'est voulu.
 7. **Le rejeu décide.** La route recalcule les faits, l'état terminal devient obligatoire, la
    divergence se mesure, la documentation rattrape.
 

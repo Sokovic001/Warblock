@@ -63,13 +63,27 @@ create table if not exists matches (
   -- n'avait achetée.
   team_size    integer      not null check (team_size > 0),
   brawler      text         not null,
-  -- Deux graines 32 bits non signées — le domaine de WBCore.makeRng. La publique décide de la
-  -- carte et du gaz et part au client ; la SECRÈTE ne sort jamais du serveur. Elle ne sert à rien
-  -- tant que rien n'est simulé : elle existe pour que le jour où le serveur décidera du contenu
-  -- des caisses, le client ne l'ait jamais reçue — et pour que ce jour-là coûte zéro migration.
+  -- La graine PUBLIQUE : 32 bits non signés, le domaine de WBCore.makeRng. Elle décide de la carte,
+  -- du gaz, des caisses et des vingt bots, et elle part au client — c'est `seedFor` qui la lit.
+  -- Elle reste 32 bits parce que tout le contrat client de la 02a en dépend, et parce que son
+  -- entropie est publique par construction : les flux nommés en dérivent un état plus large, ils
+  -- ne créent pas de l'entropie qui n'existe pas.
   -- bigint et pas integer : l'integer de Postgres est signé, il s'arrête à 2 147 483 647.
   seed_public  bigint       not null check (seed_public between 0 and 4294967295),
-  seed_secret  bigint       not null check (seed_secret between 0 and 4294967295),
+  -- La graine SECRÈTE, 128 bits en hexadécimal, et le commentaire dit la vérité : DANS CETTE PHASE
+  -- ELLE NE PROTÈGE RIEN ET LA SIMULATION NE L'UTILISE PAS. Dans une architecture de rejeu, le
+  -- client possède tout ce qu'il dessine — il dessine les caisses, donc il connaît leur contenu dès
+  -- la première seconde. Elle reste pour le jour où le serveur décidera de quelque chose que le
+  -- client n'a pas à savoir. Elle passe de 32 bits à 128 parce que `between 0 and 4294967295`
+  -- rendait une graine « secrète » trouvable par force brute hors ligne, et parce qu'une colonne qui
+  -- porte un nom qui ment est pire que pas de colonne. Aucune base n'ayant jamais tourné, l'élargir
+  -- coûte encore zéro migration.
+  seed_secret  text         not null check (seed_secret ~ '^[0-9a-f]{32}$'),
+  -- La version du bloc de simulation, FIGÉE À L'OUVERTURE du billet et écrite par le serveur, jamais
+  -- par le client. Un correctif de simulation déployé pendant qu'un joueur joue rejouerait une AUTRE
+  -- partie que la sienne, et paierait autre chose que ce qu'il a vu : c'est la raison exacte pour
+  -- laquelle `seats` et `team_size` sont déjà figés ici.
+  sim_version  integer      not null check (sim_version > 0),
   -- la clé d'idempotence tirée par le client. Sans elle, un POST dont la réponse se perd est
   -- indistinguable d'un POST jamais arrivé.
   client_key   text         not null check (char_length(client_key) between 1 and 64),
@@ -157,3 +171,40 @@ create unique index if not exists matches_un_seul_ouvert on matches (user_id) wh
 -- `matches`, `wins`, `kills` et `best`, et il n'existe nulle part ailleurs de case à écraser.
 -- Une partie refusée ou restée ouverte ne compte pour rien : la clause porte `status = 'settled'`.
 create index if not exists matches_user_status_idx on matches (user_id, status);
+
+-- ---------------------------------------------------------------------------------------------
+-- Phase 02b — la trace des entrées du joueur.
+--
+-- Ce que le serveur rejouera. La graine publique lui donne la carte, le gaz, les caisses et les
+-- vingt bots ; il ne lui manque que ce que le JOUEUR a fait. La trace porte donc cela et rien
+-- d'autre : enregistrer les positions des bots ferait du client l'auteur de ses propres
+-- adversaires, et multiplierait la taille par vingt.
+--
+-- CETTE TABLE EST EN INSERTION SEULE. Aucun `update`, aucun `delete`, PREMIER ÉCRIT GAGNE : la clé
+-- primaire (match_id, seq) et `on conflict do nothing` arbitrent, comme `name_key` et l'index
+-- partiel des billets ouverts. Un segment renvoyé n'écrit donc jamais une seconde ligne et ne
+-- réécrit jamais la première — c'est la même doctrine que « une ligne s'insère puis se règle une
+-- fois », poussée jusqu'au bout : ici, elle s'insère et c'est tout.
+--
+-- LA DETTE, ÉCRITE PLUTÔT QUE TUE : cette table n'a AUCUNE politique de conservation. Combien de
+-- temps garde-t-on la pièce qui prouve une partie, et qui a le droit de la relire, est renvoyé à
+-- la phase 03, qui décidera de ce qu'un grand livre a besoin de garder.
+create table if not exists match_traces (
+  match_id    bigint       not null references matches(id) on delete cascade,
+  -- Le rang du segment. Une partie complète tient en un à trois envois, jamais vingt : on ne paie
+  -- pas une sémantique d'ordre et de reprise pour une robustesse que la 02a possède déjà.
+  seq         integer      not null check (seq >= 0 and seq < 64),
+  -- La version du bloc sous laquelle la trace a été produite. Elle est comparée à celle du billet
+  -- à l'insertion : une trace produite par un autre code que celui qui la rejouera ne prouve rien.
+  sim_version integer      not null check (sim_version > 0),
+  -- Le nombre de pas de simulation que ce segment contient. Il est COMPTÉ par le serveur en
+  -- relisant la grammaire, jamais annoncé par le client : un nombre déclaré serait un nombre à
+  -- vérifier, donc un nombre de plus à ne pas croire.
+  steps       integer      not null check (steps > 0),
+  -- Le segment lui-même : la grammaire de WBCore.traceDecode, en base64url plus deux marqueurs.
+  -- La borne haute est celle de MAX_TRACE_BODY, moins la place de l'enveloppe JSON.
+  data        text         not null check (char_length(data) between 1 and 65536),
+  created_at  timestamptz  not null default now(),
+
+  constraint match_traces_pk primary key (match_id, seq)
+);

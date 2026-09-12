@@ -7,19 +7,22 @@ const COLS = 'id, auth_id, email, name, name_key, avatar, country, created_at';
 // La graine secrète est LUE ici — c'est la seule colonne de cette liste qui ne doit jamais
 // traverser le réseau. C'est `app.js` qui la retire, par sa liste blanche `billet()`.
 const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret, ' +
-                   'client_key, status, opened_at, expires_at, ' +
+                   'sim_version, client_key, status, opened_at, expires_at, ' +
                    // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
                    'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
                    'purse_cents, declared_net_cents, ecart_cents, ' +
                    'seconds, kills, deaths, rank, cubes, damage, cashed_out';
 
 // Le pilote Postgres rend les colonnes `bigint` sous forme de CHAÎNE — il ne peut pas garantir
-// qu'elles tiennent dans un nombre JavaScript. Les deux graines, elles, tiennent d'office : leur
-// domaine est celui des entiers 32 bits non signés, et c'est en nombre que WBCore les attend.
-// `id` et `user_id` restent des chaînes, on ne fait que les recopier.
+// qu'elles tiennent dans un nombre JavaScript. La graine PUBLIQUE, elle, tient d'office : son
+// domaine est celui des entiers 32 bits non signés, et c'est en nombre que WBCore l'attend. Une
+// graine en chaîne serait refusée par `seedFor`, qui repartirait sur la graine locale : le joueur
+// verrait une autre carte que celle de son billet, sans le moindre message.
+// `id` et `user_id` restent des chaînes, on ne fait que les recopier. La graine SECRÈTE aussi,
+// depuis qu'elle fait 128 bits : c'est du texte hexadécimal, et rien ne la lit comme un nombre.
 function ligneMatch(r) {
   if (!r) return r;
-  return { ...r, seed_public: Number(r.seed_public), seed_secret: Number(r.seed_secret) };
+  return { ...r, seed_public: Number(r.seed_public) };
 }
 
 function pgDb(connectionString) {
@@ -146,12 +149,12 @@ function pgDb(connectionString) {
           const ins = await client.query(
             `insert into matches
                (user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret,
-                client_key, status, opened_at, expires_at)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'open',$10,$11)
+                sim_version, client_key, status, opened_at, expires_at)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open',$11,$12)
              on conflict do nothing
              returning ${MATCH_COLS}`,
             [m.userId, m.mode, m.stakeCents, m.seats, m.teamSize, m.brawler, m.seedPublic,
-             m.seedSecret, m.clientKey, m.openedAt, m.expiresAt]);
+             m.seedSecret, m.simVersion, m.clientKey, m.openedAt, m.expiresAt]);
           if (ins.rows[0]) return { match: ligneMatch(ins.rows[0]), repris: false };
 
           // L'insertion a buté sur l'une des deux contraintes. La clé du client d'abord : la même
@@ -222,6 +225,45 @@ function pgDb(connectionString) {
         const deja = await client.query(
           `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [r.matchId, r.userId]);
         return { match: ligneMatch(deja.rows[0]) || null, deja: true };
+      } finally {
+        client.release();
+      }
+    },
+
+    // LA TRACE, EN INSERTION SEULE. Aucun `update`, aucun `delete`, premier écrit gagne : c'est la
+    // clé primaire (match_id, seq) et `on conflict do nothing` qui arbitrent, jamais un `select`
+    // préalable — même doctrine que `name_key` et que l'index partiel des billets ouverts. Un
+    // segment renvoyé n'écrit donc pas de seconde ligne et ne réécrit pas la première, même s'il
+    // porte d'autres données.
+    //
+    // La seule lecture préalable est celle de la BORNE : combien de pas ce billet a déjà reçus. Ce
+    // n'est pas de l'idempotence, c'est un garde-fou de volume, et il n'a pas besoin d'être
+    // atomique — deux segments concurrents pourraient la dépasser d'un segment, et le rejeu du
+    // module 7 porte de toute façon sa propre borne dure. Écrit ici pour ne pas être découvert.
+    //
+    // Cette méthode ne touche JAMAIS la table `matches` : une trace refusée ne peut donc pas
+    // laisser un billet bloqué, quoi qu'il arrive.
+    async addTrace({ matchId, seq, simVersion, steps, data, maxSteps }) {
+      const client = await pool.connect();
+      try {
+        const vus = await client.query(
+          'select seq, steps from match_traces where match_id = $1', [matchId]);
+        const deja = vus.rows.some(r => Number(r.seq) === seq);
+        const avant = vus.rows.reduce((s, r) => s + Number(r.steps), 0);
+        if (!deja && avant + steps > maxSteps)
+          return { refuse: 'trop_de_pas', segments: vus.rows.length, totalSteps: avant };
+        await client.query(
+          `insert into match_traces (match_id, seq, sim_version, steps, data)
+           values ($1,$2,$3,$4,$5)
+           on conflict do nothing`,
+          [matchId, seq, simVersion, steps, data]);
+        const apres = await client.query(
+          `select count(*) as n, coalesce(sum(steps), 0) as total
+             from match_traces where match_id = $1`, [matchId]);
+        const l = apres.rows[0] || {};
+        // Le même piège de pilote que les statistiques : `count()` et `sum()` rendent un `bigint`,
+        // donc une CHAÎNE. Une borne comparée à du texte comparerait n'importe quoi.
+        return { segments: Number(l.n) || 0, totalSteps: Number(l.total) || 0 };
       } finally {
         client.release();
       }

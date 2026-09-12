@@ -28,7 +28,8 @@ new Function('module', 'exports', html.slice(a, b))(mod, mod.exports);
 // nom de WBCore l'ajoute ici ; un test d'`api/test.js` compare cette liste au texte d'`app.js`.
 const ATTENDUS = ['sanitizeName', 'validName', 'nameKey', 'nameOr', 'NAME', 'MODES', 'TIERS',
                   'LOBBY', 'BRAWLERS', 'avatarList', 'toCents', 'tierFor', 'seatsOf', 'zonePlan',
-                  'zoneTotalS', 'checkReport', 'matchVerdict'];
+                  'zoneTotalS', 'checkReport', 'matchVerdict',
+                  'TRACE', 'traceMaxSteps', 'traceDecode'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBCore n'exporte plus ${nom}.`);
 }

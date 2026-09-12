@@ -2072,6 +2072,199 @@ const WBCore = (function(){
     if (!Number.isSafeInteger(stakeCents) || ticket.stakeCents !== stakeCents) return null;
     return ticket;
   }
+
+  // ---- LA TRACE DES ENTRÉES DU JOUEUR ---------------------------------------------------------
+  //
+  // Ce que le serveur rejouera. La graine publique lui donne la carte, le gaz, les caisses et les
+  // vingt bots ; il ne lui manque que ce que le JOUEUR a fait. La trace est donc exactement cela,
+  // et rien d'autre : enregistrer les positions des bots ferait du client l'auteur de ses propres
+  // adversaires, et multiplierait la taille par vingt.
+  //
+  // ELLE EST QUANTIFIÉE À LA SOURCE, et c'est le point qui rend le rejeu exact plutôt
+  // qu'approximatif : `lireEntrees` rend la valeur QUANTIFIÉE, le jeu joue celle-là, et la trace
+  // porte le même entier. Sans cela, le serveur rejouerait une partie légèrement différente de
+  // celle qui s'est affichée, et l'écart n'aurait aucune borne connue. Le prix est une visée
+  // arrondie au 1024e de tour — 0,35 degré, six centimètres à dix cases — et une portée de visée
+  // arrondie au huitième de case. Rien de percevable, et la promesse rendue en échange est exacte.
+  const TRACE = {
+    // Le déplacement : deux axes, 31 crans chacun. Le clavier ne produit que −1, 0 et 1, exactement
+    // représentables ; le stick tactile est continu, et 1/15e de course est loin sous ce qu'un
+    // pouce vise.
+    MV: 15,
+    // La visée : un indice de `UNIT`, la même table de 1024 directions que la géométrie de la
+    // graine. Le rejeu retrouve donc un vecteur EXACTEMENT unitaire, sans repasser par un cosinus.
+    DIR: UNIT_N,
+    // La portée de visée, au huitième de case jusqu'à 31,875 — au-delà, plus aucune arme du jeu
+    // n'atteint quoi que ce soit.
+    DIST_PAS: 8, DIST_MAX: 255,
+    // Les actions PONCTUELLES. Elles partent d'un événement d'entrée, entre deux pas — c'est ce que
+    // le jeu a toujours fait, et le module 5 ne l'a pas changé pour ne pas déplacer la latence
+    // ressentie. La trace les porte donc comme des jetons à part, dans l'ordre où elles sont
+    // arrivées, et le rejeu les applique avant le pas qui suit : même ordre des deux côtés.
+    TIR: 0, SUP: 1, GAD: 2, ENC: 3, QUIT: 4, ACTES: 5,
+    // Le compte à rebours d'intro consomme des pas de simulation sans faire avancer `G.pas` : sans
+    // cette marge, une partie parfaitement honnête dépasserait la borne de deux cent quarante pas.
+    INTRO_S: 5,
+    // De quoi couper la trace en segments. Une partie complète tient en un à trois envois, jamais
+    // vingt : on ne paie pas une sémantique d'ordre et de reprise pour une robustesse que la 02a
+    // possède déjà — un résultat en retard est accepté jusqu'à l'expiration du billet.
+    SEG: 24000, MAX_SEG: 8,
+  };
+  // L'alphabet est celui de base64url : sûr dans une URL, dans du JSON et dans une colonne `text`,
+  // et six bits par caractère. Les deux marqueurs `!` et `~` en sont volontairement absents — c'est
+  // ce qui rend la grammaire lisible sans état.
+  const TRACE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const TRACE_VAL = (function () {
+    const t = Object.create(null);
+    for (let i = 0; i < 64; i++) t[TRACE_ALPHABET[i]] = i;
+    return t;
+  })();
+  const traceChiffres = (v, n) => {
+    let s = '';
+    for (let i = n - 1; i >= 0; i--) s += TRACE_ALPHABET[(v >> (6 * i)) & 63];
+    return s;
+  };
+  const traceCran = (v, m) => {
+    const q = Math.round((typeof v === 'number' && isFinite(v) ? v : 0) * m);
+    return q < -m ? -m : (q > m ? m : q);
+  };
+  // L'indice de direction le plus proche. `Math.atan2` n'est pas spécifiée à l'ulp près, mais elle
+  // ne sert ici qu'à CHOISIR un cran : c'est l'indice qui voyage, et le vecteur rendu des deux
+  // côtés sort de la même table de littéraux. Un vecteur nul rend l'indice 0, faute de direction —
+  // le rendu n'en tirait déjà rien d'autre.
+  function traceDir(ax, az) {
+    const x = typeof ax === 'number' && isFinite(ax) ? ax : 0;
+    const z = typeof az === 'number' && isFinite(az) ? az : 0;
+    if (!x && !z) return 0;
+    return ((Math.round(Math.atan2(z, x) * UNIT_N / (2 * Math.PI)) % UNIT_N) + UNIT_N) % UNIT_N;
+  }
+  function traceDistCran(d) {
+    const q = Math.round((typeof d === 'number' && isFinite(d) ? d : 0) * TRACE.DIST_PAS);
+    return q < 0 ? 0 : (q > TRACE.DIST_MAX ? TRACE.DIST_MAX : q);
+  }
+  // Les deux mots d'un pas : `lo` tient sur onze bits (deux caractères), `hi` sur dix-huit (trois).
+  function traceMots(e) {
+    const x = e || {};
+    const lo = (traceCran(x.mx, TRACE.MV) + TRACE.MV)
+             | ((traceCran(x.mz, TRACE.MV) + TRACE.MV) << 5)
+             | (x.feu ? 1024 : 0);
+    return { hi: traceDir(x.ax, x.az) | (traceDistCran(x.aimDist) << 10), lo };
+  }
+  // L'entrée que le jeu JOUE et que la trace PORTE : la même, par construction.
+  function traceEntree(hi, lo) {
+    const u = UNIT[hi & 1023];
+    return { mx: ((lo & 31) - TRACE.MV) / TRACE.MV, mz: (((lo >> 5) & 31) - TRACE.MV) / TRACE.MV,
+             ax: u.x, az: u.z, aimDist: ((hi >> 10) & 255) / TRACE.DIST_PAS,
+             feu: !!(lo & 1024), hi, lo };
+  }
+  function traceQuant(e) { const m = traceMots(e); return traceEntree(m.hi, m.lo); }
+  // La visée d'une action ponctuelle : la même paire (direction, portée) que celle d'un pas.
+  function traceViseeMots(ax, az, dist) { return traceDir(ax, az) | (traceDistCran(dist) << 10); }
+  function traceVisee(m) {
+    const u = UNIT[m & 1023];
+    return { ax: u.x, az: u.z, dist: ((m >> 10) & 255) / TRACE.DIST_PAS };
+  }
+  // La borne DURE du nombre de pas d'une trace, dérivée du plan de zone du billet — la durée
+  // maximale d'une partie que personne ne gagne — de la protection d'apparition et du pas fixe.
+  // Elle ne se déduit donc jamais d'un nombre annoncé par le client.
+  function traceMaxSteps(plan) {
+    return Math.ceil((zoneTotalS(plan) + GRACE + TRACE.INTRO_S) / SIM.stepS);
+  }
+  // L'ENREGISTREUR. Trois tableaux plats plutôt qu'une liste d'objets, et une raison unique : un pas
+  // identique au précédent n'alloue RIEN, il incrémente un compteur. C'est ce qui fait que
+  // l'enregistrement ne coûte jamais une image, et le texte ne se fabrique qu'à la fin de la partie.
+  function traceEnregistreur(maxPas) {
+    const max = Math.max(1, maxPas | 0), hi = [], lo = [], rep = [], acte = [];
+    let pas = 0, dernier = -1, tronquee = false;
+    const jeton = i => (acte[i] >= 0
+      ? '!' + TRACE_ALPHABET[acte[i]] + traceChiffres(hi[i], 3)
+      : traceChiffres(lo[i], 2) + traceChiffres(hi[i], 3) + (rep[i] > 1 ? '~' + traceChiffres(rep[i] - 1, 3) : ''));
+    const pousser = (h, l, a) => { hi.push(h); lo.push(l); acte.push(a); rep.push(1); };
+    return {
+      pas: () => pas,
+      plages: () => rep.length,
+      tronquee: () => tronquee,
+      // Un pas. `m` sont les deux mots rendus par `traceMots`, que l'appelant a déjà sous la main
+      // puisque c'est cette entrée-là qu'il vient de jouer.
+      ajouter(m) {
+        if (pas >= max) { tronquee = true; return; }
+        pas++;
+        if (dernier >= 0 && hi[dernier] === m.hi && lo[dernier] === m.lo && rep[dernier] < 262144) {
+          rep[dernier]++; return;
+        }
+        pousser(m.hi, m.lo, -1); dernier = rep.length - 1;
+      },
+      // Une action ponctuelle, notée à l'instant où elle part. Elle coupe la plage en cours : une
+      // répétition qui l'enjamberait rejouerait le pas suivant AVANT l'action.
+      acte(code, mots) {
+        if (pas >= max) { tronquee = true; return; }
+        pousser(mots | 0, 0, code | 0); dernier = -1;
+      },
+      texte() { let s = ''; for (let i = 0; i < rep.length; i++) s += jeton(i); return s; },
+      // Couper au JETON, jamais au caractère : un segment coupé au milieu d'un mot serait
+      // indéchiffrable, et le serveur ne pourrait rien en dire de mieux que « malformé ».
+      segments(taille) {
+        const cap = Math.max(8, taille || TRACE.SEG), out = [];
+        let cur = '';
+        for (let i = 0; i < rep.length; i++) {
+          const t = jeton(i);
+          if (cur && cur.length + t.length > cap) { out.push(cur); cur = ''; }
+          cur += t;
+        }
+        if (cur) out.push(cur);
+        return out;
+      },
+    };
+  }
+  // RELIRE UNE TRACE. Elle ne lance JAMAIS et ne rend jamais un état partiel muet : un corps
+  // malformé doit sortir en 400 avec un code nommé, pas en 500 — c'est la leçon du `22003`, où un
+  // entier hors domaine laissait le joueur enfermé dans un billet mort jusqu'à l'expiration.
+  //
+  // `compter` sert à la route de transport, qui n'a besoin que du nombre de pas et de la validité :
+  // c'est la même grammaire, lue une seule fois dans le dépôt, sans matérialiser six mille objets
+  // pour les jeter aussitôt.
+  function traceDecode(texte, maxPas, compter) {
+    const items = [];
+    if (typeof texte !== 'string') return { items, pas: 0, erreur: 'type' };
+    const max = (typeof maxPas === 'number' && maxPas >= 0) ? maxPas : Infinity;
+    let i = 0, pas = 0, dernier = null;
+    const lire = k => {
+      let v = 0;
+      for (let j = 0; j < k; j++) { const d = TRACE_VAL[texte[i + j]]; if (d === undefined) return -1; v = v * 64 + d; }
+      i += k; return v;
+    };
+    while (i < texte.length) {
+      const c = texte[i];
+      if (c === '!') {
+        i++;
+        const code = lire(1), m = code < 0 ? -1 : lire(3);
+        if (code < 0 || code >= TRACE.ACTES || m < 0) return { items, pas, erreur: 'acte' };
+        if (!compter) { const v = traceVisee(m); items.push({ t: 'a', code, ax: v.ax, az: v.az, dist: v.dist }); }
+        dernier = null; continue;
+      }
+      if (c === '~') {
+        if (!dernier && !compter) return { items, pas, erreur: 'repetition' };
+        if (compter && dernier !== 'p') return { items, pas, erreur: 'repetition' };
+        i++;
+        const r = lire(3);
+        if (r < 0) return { items, pas, erreur: 'repetition' };
+        if (!compter) dernier.n += r;
+        pas += r;
+        if (pas > max) return { items, pas, erreur: 'trop_de_pas' };
+        dernier = null; continue;                  // une répétition ne se répète pas elle-même
+      }
+      const l = lire(2), h = l < 0 ? -1 : lire(3);
+      // Les bits au-delà de la gâchette doivent être nuls : c'est ce qui distingue une trace du
+      // dépôt d'un texte quelconque qui tomberait dans l'alphabet par hasard.
+      if (l < 0 || h < 0 || (l >> 11)) return { items, pas, erreur: 'pas' };
+      if (compter) dernier = 'p';
+      else { const e = traceEntree(h, l); e.t = 'p'; e.n = 1; items.push(e); dernier = e; }
+      pas++;
+      if (pas > max) return { items, pas, erreur: 'trop_de_pas' };
+    }
+    return { items, pas, erreur: null };
+  }
+
   // L'enchaînement d'une partie, bâti comme `authNext` : une table de transitions, et tout
   // événement inconnu laisse l'état où il est. Le tableau ci-dessous EST le contrat ; le code qui
   // l'appelle n'en est que l'usage.
@@ -2482,6 +2675,8 @@ const WBCore = (function(){
            FLUX, fluxSalt, fluxSeed, makeFlux, melangeSeme, UNIT_N, UNIT_COS, UNIT, unitAt, unitFrom, dist,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
            NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
+           TRACE, TRACE_ALPHABET, traceDir, traceMots, traceEntree, traceQuant, traceViseeMots, traceVisee,
+           traceMaxSteps, traceEnregistreur, traceDecode,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -3373,6 +3568,38 @@ function step(G, entrees){
   if(G.pas%EMPREINTE_PAS===0) G.empreinte=mele(G.empreinte,condenseEtat(G));
   return drainer(G);
 }
+// ---------- le rejeu d'une trace ----------
+// LE MEME BLOC DE CODE, APPLIQUE AUX MEMES ENTREES : c'est tout ce que le rejeu du serveur est. Il
+// ne decide d'aucun montant — c'est le module 7 — il refait la partie.
+//
+// Les actions ponctuelles du joueur — un tir bref, le super, le fumigene, l'encaissement, l'abandon
+// — partent d'un evenement d'entree, entre deux pas, et non du pas lui-meme. La trace les porte
+// donc comme des jetons a part, et c'est ICI qu'elles se rejouent, AVANT le pas qui suit : le meme
+// ordre que dans la partie d'origine. La visee de l'action est celle qu'elle portait, deja
+// quantifiee des l'enregistrement, et on la repose sur le brawler avant de la jouer — sans quoi
+// l'action partirait dans la direction du pas PRECEDENT.
+function appliquerActe(G,a){
+  const p=G.player, T=C.TRACE; if(!p) return false;
+  if(a.code===T.ENC) return doCashOut(G);
+  if(a.code===T.QUIT){ if(!p.alive) return false; kill(G,p,null,'abandoned'); return true; }
+  if(!p.alive) return false;
+  p.ax=a.ax; p.az=a.az;
+  if(a.code===T.TIR) attack(G,p,a.ax,a.az,a.dist);
+  else if(a.code===T.SUP) useSuper(G,p,a.dist);
+  else if(a.code===T.GAD) throwSmoke(G,p,a.dist);
+  else return false;
+  return true;
+}
+// Rejouer une trace deja relue par `C.traceDecode`. Elle rend le nombre de pas joues. Les
+// evenements du pas sont abandonnes : un rejeu refait un ETAT, il ne raconte rien a personne.
+function rejouer(G,items){
+  let pas=0;
+  for(const it of items){
+    if(it.t==='a'){ appliquerActe(G,it); continue; }
+    for(let k=0;k<(it.n|0);k++){ step(G,it); pas++; }
+  }
+  return pas;
+}
 // ---------- l'empreinte ----------
 // LA MONNAIE D'ECHANGE DU REJEU. Le serveur refera la partie et comparera un NOMBRE, pas un etat :
 // un condense entier de l'etat, pris a intervalle FIXE de pas et accumule. L'intervalle est fixe et
@@ -3428,7 +3655,7 @@ return { R, SIM_VERSION, EMPREINTE_PAS, BOT_NAMES,
          spawnPickup, removePickup, collect, botCashOut, inPlay, aliveTeams, playersLeft, kill,
          checkTeams, doCashOut, respawn, throwSmoke, nadesUpdate, spawnSmoke, smokesUpdate,
          findCover, findTarget, pickGoal, botUpdate, joueurUpdate, commonUpdate, zoneUpdate,
-         newMatch, step, drainer, condenseEtat, empreinte };
+         newMatch, step, drainer, condenseEtat, empreinte, appliquerActe, rejouer };
 })();
 if (typeof module!=='undefined') module.exports=WBSim;
 /*SIM-END*/
@@ -3446,7 +3673,7 @@ const { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity,
         clamp, maxHp, attack, useSuper, throwSmoke, dashUpdate, collect, kill, respawn,
         projUpdate, zonesUpdate, nadesUpdate, smokesUpdate, doCashOut, botCashOut,
-        aliveTeams, playersLeft, BOT_NAMES, newMatch, drainer } = WBSim;
+        aliveTeams, playersLeft, BOT_NAMES, newMatch, drainer, SIM_VERSION } = WBSim;
 const $=id=>document.getElementById(id);
 // keep cents when a value has them ($0.50), drop them when it is round ($1,600)
 const money=n=>{ const v=Math.round(n*100)/100;
@@ -3932,7 +4159,7 @@ const Match=(function(){
   }
   // Fin de partie. Le rapport ne part que s'il y a un billet qui decrit CETTE partie ; sinon
   // personne n'attend rien et l'enchainement se termine sur place.
-  function fin(etat){
+  function fin(etat,trace){
     const billet=enJeu; enJeu=null;
     // UN BILLET DONT LE RAPPORT EST PARTI NE RESSERVIRA JAMAIS, quoi que reponde le serveur. Il
     // etait efface a l'arrivee du reglement ; un reglement qui ne revient pas le laissait donc en
@@ -3948,15 +4175,36 @@ const Match=(function(){
     // `!billet` en plus de l'etat : `rendre(null, …)` lancerait sur `billet.id`, et un rejet non
     // gere ne se voit nulle part.
     if(step!=='rapport'||!billet) return;
-    rendre(billet,C.reportFrom(etat));
+    rendre(billet,C.reportFrom(etat),trace);
   }
-  async function rendre(billet,rapport){
+  // La trace, en segments, sur SA route. Elle part APRES la partie et jamais pendant : enregistrer
+  // une trace ne coute jamais une image, l'envoyer non plus.
+  //
+  // Un segment refuse arrete l'envoi : le rejeu a besoin de la trace ENTIERE, et marteler la suite
+  // ne ferait qu'user la limitation de debit d'un joueur dont le serveur a deja dit non. Ce n'est
+  // jamais une erreur visible — le rapport part quand meme, et c'est le serveur qui decidera de ce
+  // qu'il sait faire d'une trace incomplete.
+  async function envoyerTrace(billet,trace){
+    if(!trace||!trace.segments||!trace.segments.length) return false;
+    for(let i=0;i<trace.segments.length;i++){
+      const r=await Auth.send('/api/match/'+encodeURIComponent(billet.id)+'/trace',
+                              {seq:i,simVersion:trace.version,data:trace.segments[i]});
+      if(!r.ok) return false;
+    }
+    return true;
+  }
+  async function rendre(billet,rapport,trace){
     // La meme garde de generation que `demander`, et pour la meme raison — aggravee : depuis que
     // le sas peut repartir alors que le rapport est encore en vol, une reponse tardive ecrirait
     // `step` par-dessus l'etat de la partie SUIVANTE, et un `echec` ferait `demande → hors-ligne`,
     // tuant sa demande de billet. Le POST part et son resultat est encaisse dans tous les cas ;
     // c'est l'ecriture de l'etat qu'on abandonne.
     const n=gen;
+    // LA TRACE AVANT LE RAPPORT, parce que le rejeu du serveur en aura besoin AU MOMENT du
+    // reglement : un rapport qui arriverait le premier serait juge sans la piece qui le prouve.
+    // Son echec n'empeche jamais le rapport de partir — c'est le serveur qui tranche ce qu'il fait
+    // d'une trace absente, pas le client.
+    await envoyerTrace(billet,trace);
     const r=await Auth.send('/api/match/'+encodeURIComponent(billet.id)+'/result',rapport);
     const regle=!!(r.ok&&r.data&&typeof r.data==='object');
     if(n===gen) step=C.matchFlow(step,regle?'reglement':'echec');
@@ -3993,7 +4241,7 @@ addEventListener('keydown',e=>{ if(e.code==='Escape'&&rulesEl.classList.contains
 $('toLobby').onclick=()=>{ $('end').classList.remove('on'); $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); };
 $('again').onclick=()=>{ $('end').classList.remove('on'); if(wallet>=lastStake) enterWaiting(lastStake); else { $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); } };
 $('sndBtn').onclick=e=>{ e.stopPropagation(); setAudio(!MUS.on); };
-$('quit').onclick=()=>{ if(G&&G.running){ if(G.player.alive){ kill(G,G.player,null,'abandoned'); rendreEvenements(drainer(G)); } else endMatch(false,{killer:'Abandon',rank:aliveTeams(G).size+1}); } };
+$('quit').onclick=()=>{ if(G&&G.running){ if(G.player.alive) abandonJoueur(); else endMatch(false,{killer:'Abandon',rank:aliveTeams(G).size+1}); } };
 
 // ---------- three ----------
 const canvas=$('c');
@@ -5025,8 +5273,8 @@ function rendreEvenements(evts){
     }
   }
 }
-$('cashout').addEventListener('click',e=>{ e.stopPropagation(); if(G&&doCashOut(G)) rendreEvenements(drainer(G)); });
-$('cashout').addEventListener('touchend',e=>{ e.preventDefault(); e.stopPropagation(); if(G&&doCashOut(G)) rendreEvenements(drainer(G)); },{passive:false});
+$('cashout').addEventListener('click',e=>{ e.stopPropagation(); encaisserJoueur(); });
+$('cashout').addEventListener('touchend',e=>{ e.preventDefault(); e.stopPropagation(); encaisserJoueur(); },{passive:false});
 function feed(txt,hi){ const d=document.createElement('div');
   d.innerHTML='<span class="fsk">'+FEED_SKULL+'</span>';
   d.appendChild(document.createTextNode(txt));
@@ -5078,17 +5326,17 @@ function touchEnd(e){ if(!G) return;
   for(const t of e.changedTouches){
     if(T.move&&T.move.id===t.identifier){ T.move=null; $('stickL').style.display='none'; }
     if(T.aim&&T.aim.id===t.identifier){ const st=T.aim; T.aim=null; $('stickR').style.display='none';
-      if(G.running&&!G.paused&&G.player.alive){ if(!st.moved) autoAim(); else { const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; attack(G,G.player,a.ax,a.az,clamp(a.dist,0.2,1)*G.player.brawler.attack.range); } } }
+      if(G.running&&!G.paused&&G.player.alive){ if(!st.moved) autoAim(); else { const a=aimFromStick(st); tirJoueur(a.ax,a.az,clamp(a.dist,0.2,1)*G.player.brawler.attack.range); } } }
   } }
 canvas.addEventListener('touchend',touchEnd,{passive:true}); canvas.addEventListener('touchcancel',touchEnd,{passive:true});
 $('pauseBtn').addEventListener('click',()=>{ if(G&&G.running&&!G.paused) pause(); });
 
 addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==='Escape'){ if(G.paused) resume(); else pause(); return; } if(G.paused) return; keys[e.code]=true;
-  if(e.code==='Space'){ e.preventDefault(); useSuper(G,G.player,G.aimDist); } if(e.code==='KeyQ') autoAim();
+  if(e.code==='Space'){ e.preventDefault(); superJoueur(G.player.ax,G.player.az,G.aimDist); } if(e.code==='KeyQ') autoAim();
   // G porte les deux usages : on relache tot et la grenade tombe a ses pieds pour decrocher, on
   // maintient et on vise, elle part au loin au relachement. Rien ne part sur l'appui lui-meme.
   if(e.code==='KeyG'){ e.preventDefault(); if(!e.repeat && gDownAt<0) gDownAt=performance.now(); }
-  if(e.code==='KeyC'){ if(G&&doCashOut(G)) rendreEvenements(drainer(G)); }
+  if(e.code==='KeyC'){ encaisserJoueur(); }
   if(e.code==='KeyE'){ e.preventDefault(); openWheel(!wheelOpen); }
   if(/^Digit[1-8]$/.test(e.code)){ e.preventDefault(); sendEmote(G.player, C.EMOTE_WHEEL[+e.code.slice(5)-1]); openWheel(false); }
   if(e.code==='Enter'||e.code==='KeyT'){ e.preventDefault(); if(isTouch){ buildQuickChat(); quickChat(!quickOpen); } else openChat(true); }   // one-shot
@@ -5096,7 +5344,7 @@ addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==
 addEventListener('keyup',e=>{ keys[e.code]=false;
   if(e.code==='KeyG'&&gDownAt>=0){
     const held=(performance.now()-gDownAt)/1000; gDownAt=-1;
-    if(G&&G.running&&!G.paused&&!typing()) throwSmoke(G,G.player,C.smokeHoldDist(held,clamp(G.aimDist,1,C.SMOKE.range)));
+    if(G&&G.running&&!G.paused&&!typing()) gadgetJoueur(G.player.ax,G.player.az,C.smokeHoldDist(held,clamp(G.aimDist,1,C.SMOKE.range)));
   }
 });
 canvas.addEventListener('mousemove',e=>{ if(isTouch) return; mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1; });
@@ -5105,16 +5353,16 @@ canvas.addEventListener('mousedown',e=>{ if(isTouch||!G||!G.running||G.paused) r
     // one press fires exactly one shot; holding only starts repeating after C.HOLD_REPEAT
     // seconds, so a click that lingers a little can never cost two rounds
     mouse.down=true;
-    if(G.player.alive) attack(G,G.player,G.player.ax,G.player.az,G.aimDist);
+    if(G.player.alive) tirJoueur(G.player.ax,G.player.az,G.aimDist);
   }
-  if(e.button===2) useSuper(G,G.player,G.aimDist);
+  if(e.button===2) superJoueur(G.player.ax,G.player.az,G.aimDist);
 });
-$('superwrap').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) useSuper(G,G.player,G.aimDist); });
+$('superwrap').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) superJoueur(G.player.ax,G.player.az,G.aimDist); });
 $('superwrap').addEventListener('touchstart',e=>{ if(!G||!G.running||G.paused) return; e.preventDefault(); e.stopPropagation(); const t=e.changedTouches[0]; T.superT={id:t.identifier,ox:t.clientX,oy:t.clientY,dx:0,dy:0,moved:false}; },{passive:false});
 $('superwrap').addEventListener('touchmove',e=>{ if(!T.superT) return; e.preventDefault(); const t=[...e.changedTouches].find(t=>t.identifier===T.superT.id); if(!t) return; const st=T.superT; st.dx=t.clientX-st.ox; st.dy=t.clientY-st.oy; clampStick(st); if(Math.hypot(st.dx,st.dy)>16) st.moved=true; },{passive:false});
 $('superwrap').addEventListener('touchend',e=>{ const st=T.superT; if(!st) return; T.superT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
-  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; useSuper(G,G.player,clamp(a.dist,0.2,1)*(G.player.brawler.super.range||G.player.brawler.attack.range)); }
-  else useSuper(G,G.player,G.aimDist); },{passive:true});
+  if(st.moved){ const a=aimFromStick(st); superJoueur(a.ax,a.az,clamp(a.dist,0.2,1)*(G.player.brawler.super.range||G.player.brawler.attack.range)); }
+  else superJoueur(G.player.ax,G.player.az,G.aimDist); },{passive:true});
 // The quick input always smokes you where you stand; the deliberate one places the cloud.
 // On a mouse that is G versus a click on the button, which throws at the cursor. On a phone it is
 // a tap versus a drag, exactly like the right thumb taps to shoot and drags to aim.
@@ -5124,12 +5372,12 @@ let gDownAt=-1;
 const gHold=()=> gDownAt<0 ? 0 : (performance.now()-gDownAt)/1000;
 $('gadget').addEventListener('mouseenter',()=>{ gadgetHover=true; });
 $('gadget').addEventListener('mouseleave',()=>{ gadgetHover=false; });
-$('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) throwSmoke(G,G.player,clamp(G.aimDist,0,C.SMOKE.range)); });
+$('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) gadgetJoueur(G.player.ax,G.player.az,clamp(G.aimDist,0,C.SMOKE.range)); });
 $('gadget').addEventListener('touchstart',e=>{ if(!G||!G.running||G.paused) return; e.preventDefault(); e.stopPropagation(); const t=e.changedTouches[0]; T.gadgetT={id:t.identifier,ox:t.clientX,oy:t.clientY,dx:0,dy:0,moved:false}; },{passive:false});
 $('gadget').addEventListener('touchmove',e=>{ if(!T.gadgetT) return; e.preventDefault(); const t=[...e.changedTouches].find(t=>t.identifier===T.gadgetT.id); if(!t) return; const st=T.gadgetT; st.dx=t.clientX-st.ox; st.dy=t.clientY-st.oy; clampStick(st); if(Math.hypot(st.dx,st.dy)>16) st.moved=true; },{passive:false});
 $('gadget').addEventListener('touchend',e=>{ const st=T.gadgetT; if(!st) return; T.gadgetT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
-  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; throwSmoke(G,G.player,clamp(a.dist,0.2,1)*C.SMOKE.range); }
-  else throwSmoke(G,G.player,0); },{passive:true});
+  if(st.moved){ const a=aimFromStick(st); gadgetJoueur(a.ax,a.az,clamp(a.dist,0.2,1)*C.SMOKE.range); }
+  else gadgetJoueur(G.player.ax,G.player.az,0); },{passive:true});
 addEventListener('mouseup',e=>{ if(e.button===0) mouse.down=false; });
 addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('blur',()=>pause());
@@ -5155,7 +5403,7 @@ function buildQualityUI(){
 }
 function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; gDownAt=-1; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
 function mouseWorld(){ raycaster.setFromCamera(mouse,camera); const p=new THREE.Vector3(); return raycaster.ray.intersectPlane(groundPlane,p)?p:null; }
-function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(G,p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(G,p,p.ax,p.az,d); } }
+function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(G,p,e)){ bd=d; best=e; } } if(best){ const d=bd; tirJoueur((best.x-p.x)/d,(best.z-p.z)/d,d); } }
 
 // ---------- player ----------
 // CE QUI RESTE DU JOUEUR ICI, c'est la LECTURE de ses commandes, et rien d'autre. La souris, les
@@ -5170,7 +5418,54 @@ function lireEntrees(){
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ ax=dx/d; az=dz/d; } aimDist=d; } }
   let mx=(keys.KeyD?1:0)-(keys.KeyA?1:0), mz=(keys.KeyS?1:0)-(keys.KeyW?1:0);
   if(T.move){ mx=T.move.dx/STICK_R; mz=T.move.dy/STICK_R; }
-  return {mx,mz,ax,az,aimDist,feu:mouse.down};
+  // LA QUANTIFICATION SE FAIT ICI, AVEC OU SANS BILLET, et c'est ce qui rend le rejeu exact plutot
+  // qu'approximatif : le jeu joue la valeur QUANTIFIEE, et la trace porte le meme entier. Quantifier
+  // seulement quand un billet est en main ferait deux jeux — un en ligne, un hors ligne — pour un
+  // ecart que personne ne peut sentir : la visee s'arrondit au 1024e de tour, la portee au huitieme
+  // de case, le deplacement au quinzieme de course.
+  return C.traceQuant({mx,mz,ax,az,aimDist,feu:mouse.down});
+}
+// ---------- la trace du joueur ----------
+// Elle n'existe QUE s'il y a un billet : sans compte, sans serveur, sans billet ou avec un billet
+// qui decrit une autre table, rien n'est enregistre et rien n'est envoye. C'est la promesse du
+// fichier unique, et c'est aussi pourquoi l'enregistreur est une variable et pas une constante.
+//
+// Elle ne coute jamais une image : un pas identique au precedent n'alloue rien, il incremente un
+// compteur dans `C.traceEnregistreur`, le texte ne se fabrique qu'a la fin de la partie, et
+// l'envoi se fait apres l'ecran de fin.
+let TR=null;
+// Une action ponctuelle du joueur, notee a l'instant ou elle part. Elle rend la visee QUANTIFIEE,
+// que l'appelant joue telle quelle : c'est ce qui garantit que le rejeu refera exactement le meme
+// geste, jusqu'au huitieme de case.
+function acteJoueur(code,ax,az,dist){
+  const mots=C.traceViseeMots(ax,az,dist);
+  if(TR) TR.acte(code,mots);
+  return C.traceVisee(mots);
+}
+function tirJoueur(ax,az,dist){
+  const p=G.player; if(!p||!p.alive) return;
+  const v=acteJoueur(C.TRACE.TIR,ax,az,dist); p.ax=v.ax; p.az=v.az; attack(G,p,v.ax,v.az,v.dist);
+}
+function superJoueur(ax,az,dist){
+  const p=G.player; if(!p) return;
+  const v=acteJoueur(C.TRACE.SUP,ax,az,dist); p.ax=v.ax; p.az=v.az; useSuper(G,p,v.dist);
+}
+function gadgetJoueur(ax,az,dist){
+  const p=G.player; if(!p) return;
+  const v=acteJoueur(C.TRACE.GAD,ax,az,dist); p.ax=v.ax; p.az=v.az; throwSmoke(G,p,v.dist);
+}
+// L'encaissement et l'abandon n'ont pas de visee, mais ce sont des faits de partie qui partent d'un
+// bouton : sans eux dans la trace, une partie rejouee n'encaisserait jamais et n'abandonnerait
+// jamais. Le zero est la place de la visee, gardee pour que tous les jetons d'acte aient la meme
+// forme — cinq caracteres, quelle que soit l'action.
+function encaisserJoueur(){
+  if(!G||!doCashOut(G)) return false;
+  if(TR) TR.acte(C.TRACE.ENC,0);
+  rendreEvenements(drainer(G)); return true;
+}
+function abandonJoueur(){
+  if(TR) TR.acte(C.TRACE.QUIT,0);
+  kill(G,G.player,null,'abandoned'); rendreEvenements(drainer(G));
 }
 // Le HUD du joueur qui doit avancer au PAS et pas a l'image : le refroidissement des emotes, et le
 // bouton d'encaissement, dont le verrou est decompte par SIM juste avant. Ces deux-la tiquent avant
@@ -5726,6 +6021,12 @@ function startMatch(stake){
   // caisses, des points de depart et des bots faisait que deux appareils ne jouaient pas la meme
   // partie sur la meme graine.
   G=newMatch(seed,mode,C.toCents(stake),B[selBrawler],{nomJoueur:profile.name});
+  // SANS BILLET, AUCUNE TRACE. Elle n'aurait nulle part ou aller — la route de trace exige un
+  // billet ouvert — et le jeu doit se comporter exactement comme avant la phase quand il manque un
+  // compte, un serveur, ou quand le billet en main decrit une autre table. La borne de pas se
+  // deduit du plan de zone de CETTE partie, donc de la graine du billet : elle est la meme des deux
+  // cotes, et le serveur la recalcule pour lui-meme au lieu de croire un nombre annonce.
+  TR=billet?C.traceEnregistreur(C.traceMaxSteps(G.zonePlan)):null;
   G.paused=true; G.camT=new THREE.Vector3();
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
@@ -5949,6 +6250,12 @@ function endMatch(won,info){
   //
   // Le portefeuille de demonstration ne bouge pas d'un centime dans cette phase : `wallet` reste
   // une variable du navigateur, aucun solde ne part au serveur et aucun n'en revient.
+  //
+  // LA TRACE PART AVEC LE RAPPORT, ET APRES LA PARTIE — jamais pendant. Elle est deja enregistree,
+  // il ne reste qu'a la couper en segments, ce qui est le seul travail que l'enregistrement coute
+  // en dehors d'une comparaison d'entiers par pas. Sans billet, `TR` est nul et rien ne part.
+  const trace=TR?{version:SIM_VERSION,segments:TR.segments(),tronquee:TR.tronquee()}:null;
+  TR=null;
   Match.fin({
     seconds:G.survivedT||G.time,
     kills:p.kills,
@@ -5961,7 +6268,7 @@ function endMatch(won,info){
     cashedOut:!!(cash&&info&&info.cashedOut),
     purseCents:C.toCents(p.pouch),
     declaredNetCents:C.toCents(netGagne),
-  });
+  },trace);
   setTimeout(()=>{
     $('game').style.display='none'; $('end').classList.add('on');
     // the cascade only starts once the screen is actually on, otherwise it plays out of sight
@@ -6103,7 +6410,12 @@ function simPas(){
   // fait rien avancer d'autre. Le HUD du joueur ne doit pas tiquer pendant ce temps-la : on lit
   // donc l'etat du decompte AVANT le pas, comme le faisait le retour anticipe d'autrefois.
   const avance=G.intro<=0;
-  const evts=WBSim.step(G,lireEntrees());
+  const entrees=lireEntrees();
+  // La trace s'ecrit AVANT le pas, comme le rejeu la relira : un pas identique au precedent
+  // n'alloue rien. Le compte a rebours d'intro y figure aussi — `step` en consomme des pas sans
+  // faire avancer `G.pas`, et une trace qui les sauterait decalerait tout ce qui suit.
+  if(TR) TR.ajouter(entrees);
+  const evts=WBSim.step(G,entrees);
   if(avance) hudPas(dt);
   // Le pas est joue ; ce qui s'y est PASSE devient maintenant du son et des nombres a l'ecran.
   rendreEvenements(evts);

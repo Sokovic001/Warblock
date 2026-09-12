@@ -31,7 +31,9 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
    joueur et le gaz. Il ne sonne pas et n'écrit pas à l'écran : il rend une **liste d'événements**
    horodatés en pas, que `Game` traduit. Son contrat public tient en quatre noms —
    `newMatch(graine, mode, miseCents, brawler)`, `step(G, entrees)`, `empreinte(G)` et
-   `SIM_VERSION` — et c'est par eux que `node test.js` joue des parties entières sans navigateur.
+   `SIM_VERSION` — plus `rejouer(G, items)`, qui rejoue une trace d'entrées déjà relue. C'est par eux
+   que `node test.js` joue des parties entières sans navigateur, et que `api/sim.js` refait la même
+   partie côté serveur.
 4. `<script>` **Game** — rendu Three.js, entrées clavier/tactile, audio, HUD. Il reprend les noms de
    `WBSim` en une seule ligne de déstructuration, garde tout ce qu'il dessine dans **trois tables
    annexes** — `MESHES` (corps des brawlers, par `eid`), `VIS` (projectiles, caisses, butin, zones,
@@ -48,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 345 tests sur le jeu (`node test.js`) et
-  113 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 358 tests sur le jeu (`node test.js`) et
+  119 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -163,6 +165,28 @@ porte : le reste a besoin d'un navigateur pour tourner.
   se régénère pas, sinon il ne prouverait plus rien.
 - Les points d'apparition placent un **corps entier** : `spawnPoints` balaie sur `free()` et jamais
   sur `isWall()`, vérifié sur deux cents graines et les cinq modes.
+- **La trace des entrées du joueur fait l'aller-retour sans perte.** Elle est **quantifiée à la
+  source** — `lireEntrees()` rend la valeur quantifiée et le jeu joue celle-là — puis compressée par
+  plages, découpée en un à trois segments et envoyée à la fin de la partie. Enregistrée, encodée,
+  décodée, elle rejoue **à l'identique** : même état final, même empreinte, comparés sans tolérance.
+  Les gestes ponctuels — tir bref, super, fumigène, encaissement, abandon — y sont des jetons à part,
+  avec leur propre visée, et cinq passerelles du bloc `Game` sont les **seuls** appelants des
+  fonctions de SIM correspondantes. L'enregistrement ne coûte jamais une image : un pas identique au
+  précédent n'alloue rien.
+- **Le serveur charge la simulation du jeu, il ne la recopie pas.** `api/sim.js` extrait le bloc
+  `WBSim` d'`index.html` exactement comme `api/core.js` extrait `WBCore`, garde bruyante au démarrage
+  comprise. Un test charge le bloc **une seconde fois** à la façon du navigateur et vérifie que les
+  deux rejouent la même trace jusqu'à la même empreinte — c'est le même code, chargé deux fois. Ce
+  qui n'est pas prouvé, et n'est pas promis : l'égalité entre deux **moteurs** JavaScript.
+- **`sim_version` est figée à l'ouverture du billet**, écrite par le serveur et jamais par le client :
+  un correctif déployé pendant qu'un joueur joue rejouerait une autre partie que la sienne. Même
+  patron que `seats` et `team_size`, et même test — un corps qui la porte écrit une ligne strictement
+  identique à celle d'un corps minimal.
+- **`match_traces` est en insertion seule** : clé primaire `(match_id, seq)`, `on conflict do
+  nothing`, premier écrit gagne, aucun `update`, aucun `delete`. `MAX_BODY` reste à 4 Ko sur toutes
+  les routes ; la borne large, `MAX_TRACE_BODY`, ne vaut que sur la route de trace, qui n'écrit
+  jamais dans `matches` — c'est ce qui rend structurellement impossible qu'une trace refusée laisse
+  un billet bloqué.
 
 ## Argent des joueurs
 
@@ -191,8 +215,10 @@ tout solde y est modifiable depuis la console.
     la graine sans transcendantes, le bloc SIM qui existe désormais, les tirs, les dégâts, la mort
     et le butin qui y sont descendus avec leur flux d'événements, et enfin les bots, le joueur et
     le gaz, si bien qu'une **partie entière se joue désormais sans navigateur** dans `node test.js`.
-    Restent les deux modules qui touchent à l'argent : `api/sim.js` et l'enregistrement de la trace,
-    puis le rejeu qui décide. `net_cents` vient donc toujours d'une sacoche déclarée par le client.
+    Le module 6 a livré le transport : `api/sim.js`, `sim_version` figée sur le billet, la trace des
+    entrées du joueur enregistrée par le jeu et reçue par une route en insertion seule. **Reste le
+    dernier module, celui qui décide** : le rejeu qui recalcule les faits. `net_cents` vient donc
+    toujours d'une sacoche déclarée par le client.
     Ce n'est pas une autorité temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à
     arbitrer en direct.
   Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de

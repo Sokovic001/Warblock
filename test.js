@@ -2706,6 +2706,83 @@ testAsync('sans compte ni serveur, le module ne parle à personne', () => {
     })
     .then(() => assert.deepStrictEqual(envois, [], 'et aucun rapport non plus'));
 });
+// Une trace de trois segments, telle que `TR.segments()` la rend, avec la version du bloc à côté.
+const TRACE_ENVOI = { version: 1, segments: ['aaa', 'bbb', 'ccc'], tronquee: false };
+testAsync('la trace part sur SA route, en segments, et AVANT le rapport', () => {
+  // L'ordre n'est pas un détail : le rejeu du serveur aura besoin de la trace AU MOMENT du
+  // règlement. Un rapport arrivé le premier serait jugé sans la pièce qui le prouve.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('55', 4242) }); return souffler(); })
+    .then(() => {
+      Match.coupDenvoi('solo', 50);
+      Match.fin(FIN, TRACE_ENVOI);
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2, 'le premier segment doit partir avant tout le reste');
+      assert.strictEqual(envois[1].path, '/api/match/55/trace');
+      assert.deepStrictEqual(envois[1].body, { seq: 0, simVersion: 1, data: 'aaa' });
+      envois[1].repondre({ ok: true, status: 200, data: {} });
+      return souffler();
+    })
+    .then(() => {
+      assert.deepStrictEqual(envois[2].body, { seq: 1, simVersion: 1, data: 'bbb' });
+      envois[2].repondre({ ok: true, status: 200, data: {} });
+      return souffler();
+    })
+    .then(() => {
+      assert.deepStrictEqual(envois[3].body, { seq: 2, simVersion: 1, data: 'ccc' });
+      envois[3].repondre({ ok: true, status: 200, data: {} });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 5, 'le rapport doit partir après le dernier segment');
+      assert.strictEqual(envois[4].path, '/api/match/55/result');
+    });
+});
+testAsync('un segment refusé arrête l\'envoi, mais ne retient jamais le rapport', () => {
+  // Le rejeu a besoin de la trace ENTIÈRE : marteler la suite n'userait que la limitation de débit
+  // d'un joueur dont le serveur a déjà dit non. Ce que le serveur fera d'une trace incomplète est
+  // son affaire, pas celle du client — et une partie jouée doit être rendue quoi qu'il arrive.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('56', 4242) }); return souffler(); })
+    .then(() => { Match.coupDenvoi('solo', 50); Match.fin(FIN, TRACE_ENVOI); return souffler(); })
+    .then(() => { envois[1].repondre({ ok: false, status: 409, data: null }); return souffler(); })
+    .then(() => {
+      assert.strictEqual(envois.length, 3, 'le second segment ne doit pas partir');
+      assert.strictEqual(envois[2].path, '/api/match/56/result', 'le rapport part quand même');
+    });
+});
+testAsync('SANS BILLET, AUCUNE TRACE NE PART — et le jeu se comporte comme avant la phase', () => {
+  // Le cas nommé de la 02a, étendu à la trace : pas de compte, pas de serveur, billet illisible, ou
+  // billet qui décrit une autre table. Dans les quatre, il n'y a rien à tracer et rien à rendre.
+  const horsLigne = bancMatch({ online: false });
+  const autreTable = bancMatch();
+  return Promise.resolve()
+    .then(() => { horsLigne.Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      horsLigne.Match.coupDenvoi('solo', 50);
+      // Même si l'appelant lui tendait une trace, elle n'aurait nulle part où aller.
+      horsLigne.Match.fin(FIN, TRACE_ENVOI);
+      return souffler();
+    })
+    .then(() => {
+      assert.deepStrictEqual(horsLigne.envois, [], 'hors ligne, ni trace ni rapport');
+      autreTable.Match.sas('solo', 0.5, 'bolt'); return souffler();
+    })
+    .then(() => { autreTable.envois[0].repondre({ ok: true, status: 200, data: BILLET('57', 99) }); return souffler(); })
+    .then(() => {
+      assert.strictEqual(autreTable.Match.coupDenvoi('duo', 50), null, 'le billet décrit une autre table');
+      autreTable.Match.fin(FIN, TRACE_ENVOI);
+      return souffler();
+    })
+    .then(() => assert.strictEqual(autreTable.envois.length, 1,
+      'un billet qu\'on n\'a pas joué ne doit recevoir ni trace ni rapport'));
+});
 test('les statistiques venues du serveur passent par applyAccount, jamais par une écriture directe', () => {
   // Le seul endroit qui écrit `profile.stats` sans passer par applyAccount est endMatch, et il
   // écrit ce que la partie VIENT de produire en local — c'est ce qui fait que le jeu hors ligne
@@ -2747,7 +2824,8 @@ test('aucune fonction de simulation n\'est appelée depuis la boucle d\'image', 
   }
   // Et ce que `simPas` garde n'est plus qu'un aiguillage : lire les commandes, faire tiquer le HUD,
   // traduire ce que le pas a raconté.
-  assert.match(codeDe(PAS_FIXE), /WBSim\.step\(G,lireEntrees\(\)\)/, 'simPas doit passer par WBSim.step');
+  assert.match(codeDe(PAS_FIXE), /const entrees=lireEntrees\(\);/, 'simPas doit LIRE les commandes');
+  assert.match(codeDe(PAS_FIXE), /WBSim\.step\(G,entrees\)/, 'simPas doit passer par WBSim.step');
   // Et le pas fixe ne connaît qu'un seul `dt` : celui de WBCore. Aucune horloge, aucun `now`.
   assert.match(PAS_FIXE, /const dt=C\.SIM\.stepS;/, 'le pas doit venir de WBCore, jamais d\'une constante recopiée');
   assert.match(ETAPE, /const dt=C\.SIM\.stepS;/, 'le pas de WBSim.step doit venir de WBCore lui aussi');
@@ -4296,6 +4374,308 @@ test('BRAWLER_IDS est le roster, et il n\'en existe qu\'une seule copie', () => 
   assert.deepStrictEqual(C.BRAWLER_IDS, Object.keys(C.BRAWLERS));
   for (const id of C.BRAWLER_IDS) assert.strictEqual(C.BRAWLERS[id].id, id);
   assert.ok(!sansCommentaires(sim).includes('Object.keys'), 'SIM parcourt les clés d\'un objet');
+});
+
+console.log('La trace des entrées du joueur');
+// CE QUE CETTE SECTION PROUVE. La trace est le seul chaînon que le serveur n'a pas : il refait la
+// carte, le gaz, les caisses et les vingt bots depuis la graine publique, il ne sait pas ce que le
+// JOUEUR a fait. Ce qui doit donc tenir, et rien de moins : ce qui est enregistré, quantifié,
+// compressé puis décompressé rejoue à l'IDENTIQUE — même état final, même empreinte, sans
+// tolérance. Une trace « presque » fidèle serait pire qu'aucune trace : elle paierait un montant
+// que personne n'a joué.
+//
+// CE QU'ELLE NE PROUVE PAS : rien de tout ceci n'est encore branché sur un montant. Aucune décision
+// d'argent n'a changé dans ce module, et c'est voulu — le risque reste dans le module suivant.
+
+// Une partie jouée avec le pilote du harnais, MAIS quantifiée comme le jeu la quantifie : c'est
+// `lireEntrees` qui rend désormais la valeur quantifiée, et c'est cette valeur-là que le jeu joue.
+// Le super, lui, part d'un ÉVÉNEMENT d'entrée, entre deux pas, exactement comme la barre d'espace.
+function jouerEtTracer(graine, cleMode, miseCents, cleBrawler, pasMax) {
+  const mode = C.MODES[cleMode];
+  const G = SIMU.newMatch(graine, mode, miseCents, C.BRAWLERS[cleBrawler]);
+  const rec = C.traceEnregistreur(C.traceMaxSteps(G.zonePlan));
+  let actes = 0;
+  for (let i = 0; i < pasMax; i++) {
+    const brut = H.pilote(C, SIMU, G);
+    const e = C.traceQuant(brut);
+    if (brut.sup && G.player.alive) {
+      // Le geste ponctuel : la visée est quantifiée AVANT d'être jouée, et c'est elle qui part dans
+      // la trace. Sans cela le rejeu tirerait dans une direction voisine, et tout ce qui suit
+      // divergerait.
+      const mots = C.traceViseeMots(G.player.ax, G.player.az, e.aimDist);
+      const v = C.traceVisee(mots);
+      rec.acte(C.TRACE.SUP, mots);
+      G.player.ax = v.ax; G.player.az = v.az;
+      SIMU.useSuper(G, G.player, v.dist);
+      actes++;
+    }
+    rec.ajouter(e);
+    SIMU.step(G, e);
+  }
+  return { G, rec, actes, texte: rec.texte() };
+}
+// Le rejeu : une partie NEUVE, la même graine, et rien d'autre que la trace relue.
+function rejouerTrace(graine, cleMode, miseCents, cleBrawler, texte) {
+  const G = SIMU.newMatch(graine, C.MODES[cleMode], miseCents, C.BRAWLERS[cleBrawler]);
+  const lu = C.traceDecode(texte);
+  assert.strictEqual(lu.erreur, null, 'la trace ne se relit pas : ' + lu.erreur);
+  return { G, pas: SIMU.rejouer(G, lu.items), lu };
+}
+const etatDe = G => G.ents.map(e => [e.eid, e.alive, e.cashedOut, e.hp, e.x, e.z, e.vx, e.vz,
+                                     e.ax, e.az, e.pouch, e.cubes, e.kills, e.lives, e.ammo]);
+
+test('ALLER-RETOUR SANS PERTE : enregistrée, quantifiée, compressée, décompressée, la trace rejoue à l\'identique', () => {
+  let actes = 0;
+  for (const [graine, mode, mise, brawler] of
+       [[7301, 'solo', 50, 'bolt'], [7302, 'duo', 100, 'hex'], [7303, 'resurgence', 500, 'medic']]) {
+    const joue = jouerEtTracer(graine, mode, mise, brawler, 2400);
+    const rejoue = rejouerTrace(graine, mode, mise, brawler, joue.texte);
+    const ou = `${mode} · graine ${graine}`;
+    assert.strictEqual(rejoue.pas, 2400, `${ou} : le rejeu n'a pas joué le même nombre de pas`);
+    assert.strictEqual(rejoue.G.pas, joue.G.pas, `${ou} : le compteur de pas diverge`);
+    // Comparé EXACTEMENT, sans tolérance : les deux exécutions tournent sur le même moteur et sur
+    // le même code, donc le moindre écart est un défaut du transport, pas une histoire d'ulp.
+    assert.deepStrictEqual(etatDe(rejoue.G), etatDe(joue.G), `${ou} : l'état final diverge`);
+    assert.strictEqual(SIMU.empreinte(rejoue.G), SIMU.empreinte(joue.G), `${ou} : l'empreinte diverge`);
+    // Et il s'est passé quelque chose : sans ces bornes, tout ce qui précède passerait sur une
+    // trace où personne n'appuie sur rien.
+    assert.ok(joue.G.dmgDealt > 0, `${ou} : le joueur n'a rien touché`);
+    actes += joue.actes;
+    if (joue.actes) assert.ok(joue.texte.includes('!'), `${ou} : l'action ponctuelle n'est pas dans le texte`);
+  }
+  assert.ok(actes > 0, 'aucune action ponctuelle dans les trois traces : le jeton d\'acte n\'est pas éprouvé');
+});
+
+test('LA TRACE EST LE SEUL CHAÎNON MANQUANT : la même graine sans elle ne rejoue pas la même partie', () => {
+  // Sans cette contre-épreuve, l'aller-retour ci-dessus passerait aussi bien sur une trace vide :
+  // la graine seule refait déjà la carte, le gaz, les caisses et les vingt bots.
+  const joue = jouerEtTracer(7304, 'solo', 50, 'volt', 900);
+  const muet = SIMU.newMatch(7304, C.MODES.solo, 50, C.BRAWLERS.volt);
+  for (let i = 0; i < 900; i++) SIMU.step(muet, {});
+  assert.notStrictEqual(SIMU.empreinte(muet), SIMU.empreinte(joue.G),
+    'un joueur immobile rend la même partie qu\'un joueur qui joue : la trace ne sert à rien');
+});
+
+test('changer UN SEUL pas de la trace change ce qu\'elle rejoue', () => {
+  const joue = jouerEtTracer(7305, 'solo', 50, 'bolt', 600);
+  const base = rejouerTrace(7305, 'solo', 50, 'bolt', joue.texte);
+  // On coupe la première plage en deux et on retourne le déplacement d'un seul pas au milieu.
+  const lu = C.traceDecode(joue.texte);
+  const i = lu.items.findIndex(it => it.t === 'p' && (it.mx || it.mz));
+  assert.ok(i >= 0, 'aucun pas de la trace ne demandait un mouvement : le test ne prouve rien');
+  const items = lu.items.slice();
+  const tordu = Object.assign({}, items[i], { mx: -items[i].mx, mz: -items[i].mz, n: 1 });
+  const reste = Object.assign({}, items[i], { n: items[i].n - 1 });
+  items.splice(i, 1, tordu, ...(reste.n > 0 ? [reste] : []));
+  const G = SIMU.newMatch(7305, C.MODES.solo, 50, C.BRAWLERS.bolt);
+  SIMU.rejouer(G, items);
+  assert.strictEqual(G.pas, base.G.pas, 'le nombre de pas doit être le même : c\'est le geste qui change');
+  assert.notStrictEqual(SIMU.empreinte(G), SIMU.empreinte(base.G),
+    'un pas retourné ne change rien : la trace ne porte pas ce qu\'elle prétend porter');
+});
+
+test('la quantification est IDEMPOTENTE : ce que le jeu joue est exactement ce que la trace porte', () => {
+  // C'est la propriété qui rend le rejeu exact plutôt qu'approximatif. `lireEntrees` rend la valeur
+  // quantifiée, le jeu la joue, la trace la porte : requantifier ne doit donc plus rien déplacer,
+  // sinon le rejeu et la partie s'écarteraient d'un cran à chaque pas.
+  const rng = C.makeRng(2718);
+  for (let n = 0; n < 4000; n++) {
+    const a = rng() * Math.PI * 2;
+    const brut = { mx: rng() * 2 - 1, mz: rng() * 2 - 1, ax: Math.cos(a), az: Math.sin(a),
+                   aimDist: rng() * 40, feu: rng() < 0.5 };
+    const un = C.traceQuant(brut), deux = C.traceQuant(un);
+    assert.strictEqual(deux.hi, un.hi, 'la visée se déplace en se requantifiant');
+    assert.strictEqual(deux.lo, un.lo, 'le déplacement se déplace en se requantifiant');
+    // Et la visée reste EXACTEMENT unitaire : elle sort de la table `C.UNIT`, pas d'un cosinus.
+    assert.ok(C.UNIT.includes(C.UNIT[un.hi & 1023]));
+    assert.strictEqual(un.ax, C.UNIT[un.hi & 1023].x);
+    assert.strictEqual(un.az, C.UNIT[un.hi & 1023].z);
+    // La portée est bornée, jamais NaN, jamais négative.
+    assert.ok(un.aimDist >= 0 && un.aimDist <= C.TRACE.DIST_MAX / C.TRACE.DIST_PAS);
+  }
+  // Et rien de tordu ne la fait sortir de ses bornes.
+  for (const fou of [{}, { mx: NaN, mz: Infinity, ax: NaN, az: NaN, aimDist: -5 },
+                     { mx: 1e9, mz: -1e9, ax: 0, az: 0, aimDist: 1e9 }]) {
+    const q = C.traceQuant(fou);
+    for (const k of ['mx', 'mz', 'ax', 'az', 'aimDist'])
+      assert.ok(Number.isFinite(q[k]), `${k} n'est pas un nombre fini`);
+    assert.ok(q.mx >= -1 && q.mx <= 1 && q.mz >= -1 && q.mz <= 1);
+  }
+});
+
+test('L\'ENREGISTREMENT NE COÛTE JAMAIS UNE IMAGE : un pas identique n\'alloue rien', () => {
+  // La propriété qui compte pour la boucle d'image : un pas identique au précédent n'ajoute AUCUNE
+  // plage, il incrémente un compteur. Le texte, lui, ne se fabrique qu'à la fin de la partie.
+  const rec = C.traceEnregistreur(100000);
+  const immobile = C.traceMots({ mx: 0, mz: 0, ax: 1, az: 0, aimDist: 5, feu: false });
+  for (let i = 0; i < 50000; i++) rec.ajouter(immobile);
+  assert.strictEqual(rec.pas(), 50000);
+  assert.ok(rec.plages() <= 1 + Math.ceil(50000 / 262144), `50 000 pas identiques ont produit ${rec.plages()} plages`);
+  // Et le pire cas reste BORNÉ : une plage par pas, jamais davantage.
+  const avant = rec.plages();
+  for (let i = 0; i < 1000; i++)
+    rec.ajouter(C.traceMots({ mx: (i % 31) / 15 - 1, mz: 0, ax: 1, az: 0, aimDist: 5, feu: !!(i % 2) }));
+  assert.ok(rec.plages() - avant <= 1000, 'une plage par pas au pire, jamais plus');
+  // La borne dure est tenue, et elle se dit : au-delà, on cesse d'enregistrer plutôt que de gonfler.
+  const court = C.traceEnregistreur(10);
+  for (let i = 0; i < 100; i++) court.ajouter(immobile);
+  assert.strictEqual(court.pas(), 10);
+  assert.strictEqual(court.tronquee(), true);
+});
+
+test('la trace se coupe en UN À TROIS segments, jamais vingt, et toujours sur un jeton', () => {
+  // Le compromis est écrit dans docs/PHASE-02B.md : on ne paie pas une sémantique d'ordre et de
+  // reprise pour une robustesse que la 02a possède déjà. Ce test le tient au chiffre.
+  const pire = C.traceEnregistreur(200000);
+  // Le pire cas réaliste : une visée qui bouge à chaque pas, donc aucune plage ne se compresse.
+  for (let i = 0; i < 9240; i++)
+    pire.ajouter(C.traceMots({ mx: 1, mz: 0, ax: Math.cos(i / 97), az: Math.sin(i / 97), aimDist: 6, feu: true }));
+  const segs = pire.segments();
+  assert.ok(segs.length >= 1 && segs.length <= 3, `${segs.length} segments pour une partie complète`);
+  for (const s of segs) assert.ok(s.length <= C.TRACE.SEG, 'un segment dépasse sa taille');
+  assert.ok(segs.length <= C.TRACE.MAX_SEG);
+  // Recollés, ils rendent exactement le texte, et chaque segment est relisible SEUL : la coupe se
+  // fait au jeton, jamais au caractère.
+  assert.strictEqual(segs.join(''), pire.texte());
+  let pas = 0;
+  for (const s of segs) { const lu = C.traceDecode(s); assert.strictEqual(lu.erreur, null); pas += lu.pas; }
+  assert.strictEqual(pas, 9240);
+});
+
+test('une trace malformée est NOMMÉE, jamais une exception', () => {
+  // C'est la leçon du `22003`, transposée : un corps qu'on ne sait pas lire doit sortir avec un code
+  // que la route traduit en 400. Une exception ici deviendrait un 500, et un 500 sur cette route
+  // laisserait un joueur enfermé dans un billet mort jusqu'à l'expiration.
+  const bon = C.traceEnregistreur(1000);
+  bon.ajouter(C.traceMots({ mx: 1, mz: 0, ax: 1, az: 0, aimDist: 5, feu: true }));
+  bon.acte(C.TRACE.SUP, C.traceViseeMots(0, 1, 3));
+  bon.ajouter(C.traceMots({ mx: 0, mz: 1, ax: 0, az: 1, aimDist: 2, feu: false }));
+  const t = bon.texte();
+  assert.strictEqual(C.traceDecode(t).erreur, null);
+  const mauvais = [
+    ['', null],                                  // vide : lisible, simplement sans un pas
+    ['AA', 'pas'],                               // un mot coupé
+    ['AAAA', 'pas'],                             // un mot coupé au milieu
+    ['....', 'pas'],                             // hors alphabet
+    ['~AAA', 'repetition'],                      // une répétition sans rien à répéter
+    [t.slice(0, t.indexOf('!') + 5) + '~AAA', 'repetition'],   // une répétition juste après un acte
+    ['!' + '_' + 'AAA', 'acte'],                 // un code d'acte qui n'existe pas
+    ['!A', 'acte'],                              // un acte coupé
+  ];
+  for (const [texte, code] of mauvais)
+    assert.strictEqual(C.traceDecode(texte).erreur, code, JSON.stringify(texte));
+  for (const rien of [undefined, null, 42, {}, []])
+    assert.strictEqual(C.traceDecode(rien).erreur, 'type', String(rien));
+  // Et la borne de pas est un refus NOMMÉ, pas un tableau de dix millions d'objets.
+  const long = C.traceEnregistreur(100000);
+  const m = C.traceMots({ mx: 1, mz: 0, ax: 1, az: 0, aimDist: 5, feu: false });
+  for (let i = 0; i < 5000; i++) long.ajouter(m);
+  assert.strictEqual(C.traceDecode(long.texte(), 4999, true).erreur, 'trop_de_pas');
+  assert.strictEqual(C.traceDecode(long.texte(), 5000, true).erreur, null);
+  assert.strictEqual(C.traceDecode(long.texte(), 5000, true).pas, 5000);
+});
+
+test('la borne de pas d\'une trace vient du PLAN DE ZONE, jamais d\'un nombre annoncé', () => {
+  for (const cle of Object.keys(C.MODES)) {
+    const plan = C.zonePlan(9182, C.MODES[cle]);
+    const max = C.traceMaxSteps(plan);
+    assert.ok(Number.isInteger(max) && max > 0, cle);
+    // Une partie complète tient dedans, décompte d'intro compris — c'est la raison de la marge.
+    assert.ok(max >= Math.ceil((C.zoneTotalS(plan) + C.GRACE) / C.SIM.stepS), cle);
+    assert.ok(max <= Math.ceil((C.zoneTotalS(plan) + C.GRACE + 30) / C.SIM.stepS), cle);
+  }
+  // Le gaz rapide de Resurgence donne une borne plus courte : elle suit le mode, pas un chiffre rond.
+  assert.ok(C.traceMaxSteps(C.zonePlan(9182, C.MODES.resurgence))
+          < C.traceMaxSteps(C.zonePlan(9182, C.MODES.solo)));
+});
+
+test('LES ACTIONS PONCTUELLES SONT DANS LA TRACE : sans elles, une partie rejouée n\'a ni super ni fumigène', () => {
+  // La dette signalée par le module 5, refermée ici. Le super, le fumigène, le tir d'une pression
+  // brève, l'encaissement et l'abandon partent tous d'un ÉVÉNEMENT d'entrée, entre deux pas — le
+  // module 5 ne l'a pas changé pour ne pas déplacer la latence ressentie. La trace les porte donc
+  // comme des jetons à part, et `WBSim.appliquerActe` les rejoue avant le pas qui suit.
+  const codes = ['TIR', 'SUP', 'GAD', 'ENC', 'QUIT'];
+  assert.strictEqual(new Set(codes.map(k => C.TRACE[k])).size, codes.length, 'deux actions partagent un code');
+  assert.strictEqual(C.TRACE.ACTES, codes.length);
+
+  // Chaque action a un EFFET quand elle est rejouée, sinon la porter ne servirait à rien.
+  const neuf = () => {
+    const G = SIMU.newMatch(7311, C.MODES.resurgence, 50, C.BRAWLERS.bolt);
+    for (let i = 0; i < 60; i++) SIMU.step(G, {});
+    return G;
+  };
+  const tir = neuf();
+  const munAvant = tir.player.ammo;
+  assert.strictEqual(SIMU.appliquerActe(tir, { code: C.TRACE.TIR, ax: 1, az: 0, dist: 5 }), true);
+  assert.ok(tir.player.ammo < munAvant, 'un tir rejoué ne consomme pas de munition');
+
+  const sup = neuf();
+  sup.player.super = sup.player.brawler.super.cost;
+  assert.strictEqual(SIMU.appliquerActe(sup, { code: C.TRACE.SUP, ax: 0, az: 1, dist: 4 }), true);
+  assert.strictEqual(sup.player.super, 0, 'un super rejoué ne se déclenche pas');
+
+  const gad = neuf();
+  gad.player.gadget = { charges: 1, cd: 0 };
+  const nuages = gad.nades.length;
+  SIMU.appliquerActe(gad, { code: C.TRACE.GAD, ax: 1, az: 0, dist: 3 });
+  assert.ok(gad.nades.length > nuages, 'un fumigène rejoué ne part pas');
+
+  const enc = neuf();
+  enc.player.cashLock = 0;
+  assert.strictEqual(SIMU.appliquerActe(enc, { code: C.TRACE.ENC, ax: 1, az: 0, dist: 0 }), true);
+  assert.strictEqual(enc.player.cashedOut, true, 'un encaissement rejoué n\'encaisse pas');
+
+  const quit = neuf();
+  assert.strictEqual(SIMU.appliquerActe(quit, { code: C.TRACE.QUIT, ax: 1, az: 0, dist: 0 }), true);
+  assert.strictEqual(quit.player.alive, false, 'un abandon rejoué ne tue pas');
+
+  // Et la visée de l'action est REPOSÉE sur le brawler avant d'être jouée : sans cela, l'action
+  // partirait dans la direction du pas précédent, et tout ce qui suit divergerait.
+  const vise = neuf();
+  vise.player.ax = 1; vise.player.az = 0;
+  const u = C.UNIT[300];
+  SIMU.appliquerActe(vise, { code: C.TRACE.TIR, ax: u.x, az: u.z, dist: 5 });
+  assert.strictEqual(vise.player.ax, u.x);
+  assert.strictEqual(vise.player.az, u.z);
+});
+
+test('le jeu ENREGISTRE ce qu\'il joue : un seul écrivain, et rien pendant l\'image', () => {
+  // Les gardes textuelles du module. La trace ne s'écrit que depuis `simPas` et depuis les gestes
+  // ponctuels du joueur ; elle ne se fabrique en texte qu'à la fin de la partie ; et sans billet
+  // elle n'existe pas du tout.
+  const jeu = sansCommentaires(JEU);
+  assert.strictEqual(compte(jeu, /TR\.ajouter\(/g), 1, 'un seul site enregistre un pas');
+  // La ligne EXACTE, pas seulement le nom : `if(TR&&false)` contiendrait aussi « TR.ajouter », et
+  // une garde textuelle qui se contente d'un nom se laisse désarmer par une condition.
+  const pas = sansCommentaires(corpsDe('simPas'));
+  assert.ok(/\n\s*if\(TR\) TR\.ajouter\(entrees\);\n/.test(pas),
+    'le pas doit être enregistré par simPas, sans condition ajoutée, avant WBSim.step');
+  assert.ok(pas.indexOf('TR.ajouter') < pas.indexOf('WBSim.step'),
+    'la trace doit s\'écrire AVANT le pas, comme le rejeu la relira');
+  // `lireEntrees` rend la valeur QUANTIFIÉE : c'est ce qui fait que le jeu joue exactement ce que la
+  // trace porte. Sans cela, le rejeu serait « presque » la partie, et un presque ne se borne pas.
+  assert.ok(sansCommentaires(corpsDe('lireEntrees')).includes('C.traceQuant('),
+    'lireEntrees doit rendre l\'entrée quantifiée');
+  // Le texte et les segments ne se fabriquent QUE dans endMatch : jamais dans la boucle d'image.
+  assert.strictEqual(compte(jeu, /TR\.segments\(/g), 1);
+  assert.ok(sansCommentaires(corpsDe('endMatch')).includes('TR.segments()'),
+    'la trace ne se met en segments qu\'à la fin de la partie');
+  assert.ok(!sansCommentaires(corpsDe('loop')).includes('TR.'), 'la boucle d\'image touche à la trace');
+  // Sans billet, aucun enregistreur : c'est structurel, pas une condition posée au moment d'envoyer.
+  assert.ok(sansCommentaires(corpsDe('startMatch')).includes('TR=billet?C.traceEnregistreur('),
+    'l\'enregistreur doit naître du billet, et de lui seul');
+  // PLUS AUCUN GESTE DU JOUEUR NE COURT-CIRCUITE LA TRACE, et c'est le patron du lecteur unique
+  // appliqué aux entrées : chacune des cinq fonctions de SIM qui décident d'un fait ponctuel
+  // n'apparaît qu'UNE fois dans le bloc `Game`, dans sa passerelle. Un treizième bouton branché
+  // directement sur `useSuper` produirait une partie qui ne se rejoue pas, sans que rien ne casse.
+  for (const [prim, porte] of Object.entries({ attack: 'tirJoueur', useSuper: 'superJoueur',
+                                               throwSmoke: 'gadgetJoueur', doCashOut: 'encaisserJoueur',
+                                               kill: 'abandonJoueur' })) {
+    assert.strictEqual(compte(jeu, new RegExp('\\b' + prim + '\\(', 'g')), 1,
+      `${prim}( est appelée plus d'une fois dans le bloc Game : un geste du joueur contourne la trace`);
+    assert.ok(sansCommentaires(corpsDe(porte)).includes(prim + '('),
+      `la passerelle ${porte} n'appelle plus ${prim}`);
+  }
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

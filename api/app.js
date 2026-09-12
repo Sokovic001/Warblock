@@ -5,8 +5,16 @@
 'use strict';
 const crypto = require('node:crypto');
 const C = require('./core');
+const S = require('./sim');
 
 const MAX_BODY = 4 * 1024;          // un profil tient largement dedans ; au-delà, on coupe
+// LA BORNE DE LA TRACE, ET D'ELLE SEULE. `MAX_BODY` ne bouge pas : relever la borne de la route qui
+// décide d'un règlement ferait de la route de l'argent la surface d'attaque la plus large de l'API,
+// et « la raison est écrite » n'est pas une protection. La trace, elle, est volumineuse par nature
+// — cinq caractères par pas distinct, jusqu'à neuf mille pas — et vit sur sa propre route, en
+// insertion seule, où le pire cas est une ligne de plus dans une table qui n'a aucun montant.
+// Trente-deux kilo-octets font tenir une partie complète en un à trois envois, jamais vingt.
+const MAX_TRACE_BODY = 32 * 1024;
 const AVATARS = new Set(C.avatarList(Object.keys(C.BRAWLERS)).map(a => a.id));
 
 // Les routes et les méthodes qu'elles acceptent. Une table plutôt qu'une cascade de `if` : le 405,
@@ -22,7 +30,12 @@ const METHODES = new Map([
 // convertir en nombre perdrait des parties au-delà de 2^53.
 const RESULTAT = /^\/api\/match\/([0-9]{1,19})\/result$/;
 const RESULTAT_METHODES = ['POST'];
-const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES)), 'OPTIONS'].join(',');
+// La trace a SA route, séparée de celle qui règle l'argent. C'est ce qui permet de lui donner une
+// borne de corps plus large sans toucher à celle du règlement, et c'est aussi ce qui la rend
+// inoffensive : elle n'écrit que dans `match_traces`, en insertion seule, et jamais dans `matches`.
+const TRACE = /^\/api\/match\/([0-9]{1,19})\/trace$/;
+const TRACE_METHODES = ['POST'];
+const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES, TRACE_METHODES)), 'OPTIONS'].join(',');
 
 // Combien de temps un billet reste ouvert : l'attente du sas, toute la durée du plan de zone — la
 // borne haute d'une partie que personne ne gagne — et dix minutes de marge. La marge est le
@@ -121,7 +134,7 @@ function checkMatch(corps) {
   };
 }
 
-// Les deux graines d'une partie. Le domaine est celui des entiers 32 bits non signés parce que
+// La graine PUBLIQUE d'une partie. Le domaine est celui des entiers 32 bits non signés parce que
 // c'est celui de `makeRng`, et donc celui que `seedFor` accepte côté client : une graine hors de ce
 // domaine serait rejetée par le jeu, qui repartirait sur la sienne sans que personne ne le sache.
 // Une source détraquée fait donc échouer bruyamment plutôt que d'écrire une graine inutilisable.
@@ -129,6 +142,21 @@ function graine32(source) {
   const s = source();
   if (!Number.isInteger(s) || s < 0 || s > 0xFFFFFFFF)
     throw new Error('randomSeed doit rendre un entier 32 bits non signé.');
+  return s;
+}
+// La graine SECRÈTE, 128 bits en hexadécimal. Elle ne partage plus la source de la publique, et pour
+// une raison qui tient en une phrase : elles n'ont plus le même domaine. `between 0 and 4294967295`
+// rendait une graine « secrète » trouvable par force brute hors ligne — deux milliards d'essais
+// tiennent dans une soirée — et une colonne qui porte un nom qui ment est pire que pas de colonne.
+//
+// Ce qu'elle protège dans CETTE phase : rien, et la simulation ne l'utilise pas. Dans une
+// architecture de rejeu, le client possède tout ce qu'il dessine ; il dessine les caisses, donc il
+// en connaît le contenu dès la première seconde. Elle existe pour le jour où le serveur décidera de
+// quelque chose que le client n'a pas à savoir.
+function graine128(source) {
+  const s = source();
+  if (typeof s !== 'string' || !/^[0-9a-f]{32}$/.test(s))
+    throw new Error('randomSecret doit rendre 32 caractères hexadécimaux minuscules — 128 bits.');
   return s;
 }
 
@@ -206,6 +234,10 @@ function createApp({
   // les graines observables dans les tests. Par défaut, le générateur du système — une graine tirée
   // sur `Math.random` serait devinable, et l'une des deux ne doit jamais l'être.
   randomSeed = () => crypto.randomInt(0, 2 ** 32),
+  // La graine secrète a sa propre source depuis qu'elle fait 128 bits : elle ne vit plus dans le
+  // domaine de `makeRng`, donc elle ne peut plus sortir du même robinet sans mentir sur ce qu'elle
+  // vaut. Par défaut, le générateur du système.
+  randomSecret = () => crypto.randomBytes(16).toString('hex'),
   // L'horloge aussi : l'expiration d'un billet se teste en avançant le temps, pas en attendant.
   now = Date.now,
 }) {
@@ -232,12 +264,16 @@ function createApp({
     res.end(texte);
   }
 
-  function lireCorps(req) {
+  // La borne du corps est un ARGUMENT, et sa valeur par défaut reste `MAX_BODY`. C'est ce qui permet
+  // à la route de trace d'en avoir une plus large sans que celle du règlement bouge d'un octet : une
+  // borne relevée « pour tout le monde » aurait été relevée pour la route de l'argent aussi.
+  function lireCorps(req, max) {
+    const borne = max || MAX_BODY;
     return new Promise((resolve, reject) => {
       let taille = 0; const morceaux = [];
       req.on('data', d => {
         taille += d.length;
-        if (taille > MAX_BODY) { reject(new Error('corps trop long')); req.destroy(); return; }
+        if (taille > borne) { reject(new Error('corps trop long')); req.destroy(); return; }
         morceaux.push(d);
       });
       req.on('end', () => {
@@ -283,7 +319,7 @@ function createApp({
     // c'est exactement pourquoi elle est créée maintenant — le jour où le serveur décidera du
     // contenu des caisses, il faudra que le client ne l'ait jamais reçue, sans migration.
     const seedPublic = graine32(randomSeed);
-    const seedSecret = graine32(randomSeed);
+    const seedSecret = graine128(randomSecret);
 
     // L'expiration se livre AVEC le billet. Elle se déduit du plan de zone, donc de la vraie durée
     // maximale d'une partie de ce mode, et non d'un délai rond choisi au hasard.
@@ -303,6 +339,11 @@ function createApp({
       teamSize: champs.teamSize,
       brawler: champs.brawler,
       seedPublic, seedSecret,
+      // FIGÉE ICI, ET NULLE PART AILLEURS. Le client n'a aucun moyen de l'écrire : elle est lue sur
+      // le bloc de simulation que le serveur a chargé au démarrage. Un correctif déployé pendant
+      // qu'un joueur joue rejouerait une AUTRE partie que la sienne et paierait autre chose que ce
+      // qu'il a vu — exactement la raison pour laquelle `seats` et `teamSize` sont déjà figés.
+      simVersion: S.SIM_VERSION,
       clientKey: champs.clientKey,
       openedAt, expiresAt,
     });
@@ -310,6 +351,87 @@ function createApp({
     // d'être créé ou qu'il existait déjà rendrait le rejeu distinguable du premier appel, ce qui
     // est précisément ce que l'idempotence promet d'effacer.
     return envoyer(res, 200, billet(match), origin);
+  }
+
+  // ---------- POST /api/match/:id/trace ----------
+  // La trace des entrées du joueur, en segments, EN INSERTION SEULE. Cette route ne décide d'aucun
+  // montant et n'écrit jamais dans `matches` : c'est le module suivant qui rejouera, et c'est
+  // délibérément séparé pour que le risque reste là-bas.
+  //
+  // TROIS PROMESSES, ET CHACUNE A SON TEST. (1) Elle ne sort jamais en 500 : trop gros, malformé,
+  // hors bornes, billet inconnu ou déjà réglé, version différente — chacun est un code NOMMÉ, en
+  // 400 ou 409. (2) Elle ne laisse jamais la ligne `matches` bloquée, et c'est structurel : elle ne
+  // l'écrit pas. C'est la leçon du `22003`, où un joueur restait enfermé dans un billet mort
+  // jusqu'à l'expiration puisqu'il n'en a qu'un à la fois. (3) Elle est idempotente, et c'est la
+  // BASE qui l'arbitre : `(match_id, seq)` unique, `on conflict do nothing`, premier écrit gagne.
+  async function recevoirTrace(req, res, identite, origin, matchId) {
+    if (!limiter('trace:' + identite.authId))
+      return envoyer(res, 429, { erreur: 'Trop de traces envoyées d\'affilée. Réessaie dans une minute.' }, origin);
+
+    // La borne LARGE, sur cette route et sur elle seule. `MAX_BODY` ne bouge pas ailleurs.
+    let corps;
+    try { corps = await lireCorps(req, MAX_TRACE_BODY); }
+    catch { return envoyer(res, 400, { erreur: 'Trace illisible ou trop longue.', code: 'corps' }, origin); }
+    if (!corps || typeof corps !== 'object' || Array.isArray(corps))
+      return envoyer(res, 400, { erreur: 'Trace illisible.', code: 'corps' }, origin);
+
+    const { user } = await db.findOrCreate({
+      authId: identite.authId,
+      email: identite.email || '',
+      name: C.nameOr(identite.name, C.NAME.fallback),
+      nameKey: C.nameKey,
+    });
+
+    // `user_id` fait partie de la recherche, comme pour le résultat : un identifiant deviné ne doit
+    // rien apprendre sur la partie de quelqu'un d'autre, pas même qu'elle existe.
+    const ligne = await db.findMatch({ matchId, userId: user.id });
+    if (!ligne) return envoyer(res, 404, { erreur: 'Billet introuvable.', code: 'billet' }, origin);
+    // Une trace n'a de sens que sur un billet qu'on est encore en train de jouer. Réglé, refusé ou
+    // périmé, la partie a déjà son verdict et une trace n'y changerait rien : on refuse, on n'écrit
+    // pas, et surtout on ne touche pas à la ligne.
+    if (ligne.status !== 'open')
+      return envoyer(res, 409, { erreur: 'Ce billet est déjà clos.', code: 'billet_clos' }, origin);
+    // `new Date(...)` et pas `Date.parse(...)` : le pilote rend un objet `Date`, la doublure aussi,
+    // et `Date.parse` d'un objet passe par sa représentation textuelle — qui perd les millisecondes.
+    if (new Date(ligne.expires_at).getTime() <= now())
+      return envoyer(res, 409, { erreur: 'Ce billet a expiré.', code: 'expire' }, origin);
+
+    // La version du bloc de simulation. Elle est figée sur le billet à son ouverture ; une trace
+    // produite sous une autre version décrit une AUTRE partie que celle que le serveur saurait
+    // rejouer, et la stocker ne ferait que remplir la table de pièces illisibles.
+    if (corps.simVersion !== ligne.sim_version)
+      return envoyer(res, 409, {
+        erreur: `Cette trace a été produite par une autre version de la simulation (${corps.simVersion}) que celle du billet (${ligne.sim_version}).`,
+        code: 'sim_version',
+      }, origin);
+
+    const seq = corps.seq;
+    if (!Number.isInteger(seq) || seq < 0 || seq >= C.TRACE.MAX_SEG)
+      return envoyer(res, 400, { erreur: `« seq » doit être un entier de 0 à ${C.TRACE.MAX_SEG - 1}.`, code: 'seq' }, origin);
+
+    // LE NOMBRE DE PAS EST COMPTÉ, JAMAIS DÉCLARÉ. On relit la grammaire — la même que celle du
+    // rejeu, lue une seule fois dans le dépôt — ce qui valide le segment et en donne la longueur
+    // du même coup. Un nombre annoncé aurait été un nombre de plus à ne pas croire.
+    const maxPas = C.traceMaxSteps(C.zonePlan(ligne.seed_public, C.MODES[ligne.mode]));
+    const lu = C.traceDecode(corps.data, maxPas, true);
+    if (lu.erreur === 'trop_de_pas')
+      return envoyer(res, 400, { erreur: `Cette trace dépasse à elle seule les ${maxPas} pas qu'une partie de ce mode peut durer.`, code: 'trop_de_pas' }, origin);
+    if (lu.erreur || !lu.pas)
+      return envoyer(res, 400, { erreur: 'Trace malformée.', code: 'donnees', detail: lu.erreur || 'vide' }, origin);
+
+    const r = await db.addTrace({
+      matchId, seq, simVersion: ligne.sim_version, steps: lu.pas, data: corps.data, maxSteps: maxPas,
+    });
+    if (r.refuse === 'trop_de_pas')
+      return envoyer(res, 400, { erreur: `Cette partie a déjà rendu ${nombre(r.totalSteps)} pas sur les ${maxPas} qu'elle peut durer.`, code: 'trop_de_pas' }, origin);
+
+    // La réponse ne dit PAS si la ligne a été écrite ou si elle existait déjà : elle rend l'état de
+    // la trace. Un rejeu à l'identique rend donc exactement la même réponse, comme pour le billet —
+    // un rejeu distinguable du premier appel n'est pas un rejeu.
+    return envoyer(res, 200, {
+      matchId: String(ligne.id), seq,
+      segments: nombre(r.segments), totalSteps: nombre(r.totalSteps),
+    }, origin);
   }
 
   // ---------- POST /api/match/:id/result ----------
@@ -406,7 +528,8 @@ function createApp({
     if (route === '/api/health') return envoyer(res, 200, { ok: true }, origin);
 
     const resultat = RESULTAT.exec(route);
-    const methodes = resultat ? RESULTAT_METHODES : METHODES.get(route);
+    const trace = TRACE.exec(route);
+    const methodes = resultat ? RESULTAT_METHODES : trace ? TRACE_METHODES : METHODES.get(route);
     if (!methodes) return envoyer(res, 404, { erreur: 'Route inconnue.' }, origin);
     if (!methodes.includes(req.method))
       return envoyer(res, 405, { erreur: 'Méthode non autorisée.' }, origin);
@@ -429,6 +552,7 @@ function createApp({
     try {
       // ---------- le billet d'une partie, puis son verdict ----------
       if (route === '/api/match') return await ouvrirBillet(req, res, identite, origin);
+      if (trace) return await recevoirTrace(req, res, identite, origin, trace[1]);
       if (resultat) return await rendreResultat(req, res, identite, origin, resultat[1]);
 
       // ---------- lecture ----------
@@ -476,4 +600,5 @@ function createApp({
   return handler;
 }
 
-module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY, MATCH_MARGE_S, RESULTAT };
+module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY,
+                   MAX_TRACE_BODY, MATCH_MARGE_S, RESULTAT, TRACE };
