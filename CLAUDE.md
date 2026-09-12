@@ -29,8 +29,8 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 198 tests sur le jeu (`node test.js`) et
-  46 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 213 tests sur le jeu (`node test.js`) et
+  57 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -70,9 +70,10 @@ Le plan complet est en sept phases, et **l'ordre n'est pas négociable** : le se
 l'état du jeu avant qu'un euro n'entre. Aujourd'hui `wallet` est une variable du navigateur, donc
 tout solde y est modifiable depuis la console.
 
-- Phase 01 — comptes et profils. **Faite côté serveur** : `api/`, aucun argent. Reste à brancher
-  l'écran de connexion dans le jeu, par les routes de code email de Crossmint — deux `fetch`, pas de
-  React, pour que `index.html` reste un seul fichier.
+- Phase 01 — comptes et profils. **Faite** : `api/` côté serveur, et l'écran de connexion dans le
+  jeu, par les routes de code email de Crossmint. Pas de React, pas de bundler : `index.html` reste
+  un seul fichier, et reste jouable sans compte. Une ligne à remplir, `ACCOUNT.api`, le jour où le
+  serveur tournera quelque part.
 - Phase 02 — le serveur devient l'autorité du jeu. `WBCore` tourne déjà dans Node, c'est le socle.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde.

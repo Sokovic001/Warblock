@@ -157,27 +157,38 @@ tous les deux. La base tranche, le serveur traduit en `409`.
 **Les statistiques sont en lecture seule pour le client.** `PATCH /api/me` n'accepte que trois
 champs ; tout le reste du corps est ignoré, y compris `stats` et `id`.
 
-## Ce qu'il reste à brancher côté jeu
+## Le côté jeu
 
-Le serveur attend un jeton ; personne ne le lui donne encore. C'est le morceau suivant, et il pose
-une vraie question : l'interface de connexion de Crossmint est un composant React, et Warblock est
-un fichier HTML sans build. Les deux ne vont pas ensemble, et il n'est pas question d'installer un
-bundler pour un écran de connexion.
-
-Il y a une porte de sortie, et elle est meilleure que le composant : la connexion par code email de
-Crossmint est une API HTTP ordinaire, que le jeu peut appeler avec deux `fetch` et sa clé `ck_`.
+L'écran de connexion est dans `index.html`, et le fichier est resté un seul fichier. L'interface de
+Crossmint est un composant React, incompatible avec une page sans build ; leur connexion par code
+email, elle, est une API HTTP ordinaire. On appelle donc les routes directement, avec la clé `ck_`
+en en-tête :
 
 ```
-POST /api/2024-09-26/session/sdk/auth/otps/send          { email }
-POST /api/2024-09-26/session/sdk/auth/authenticate?…     → jeton + jeton de rafraîchissement
+POST …/session/sdk/auth/otps/send        { email }              → un état de session
+POST …/session/sdk/auth/authenticate?…   code à six chiffres    → un secret à usage unique
+POST …/session/sdk/auth/refresh          { refresh: <secret> }  → { jwt, refresh, user }
+POST …/session/sdk/auth/logout           { refresh }
 ```
 
-Le joueur saisit son email, reçoit un code, le saisit. Pas de React, pas de bundler, pas de
-redirection : le fichier unique reste un fichier unique. Le jeton se range en mémoire, se
-rafraîchit avant d'expirer, et accompagne chaque appel à `/api/me`.
+Le joueur saisit son adresse, reçoit un code, le saisit. Pas de React, pas de bundler, pas de
+redirection. Le jeton se range dans le navigateur, se rafraîchit deux minutes avant d'expirer, et
+reprend tout seul au rechargement suivant.
 
-À faire dans l'ordre, le jour où on s'y met : l'écran de connexion, le rafraîchissement, puis le
-profil qui remplace l'objet local du navigateur.
+**Le jeu reste jouable sans compte.** C'est la promesse du fichier unique : on l'ouvre et on joue.
+Se connecter ajoute un profil qui suit le joueur d'une machine à l'autre.
+
+Les décisions de cet écran sont dans `WBCore`, avec leurs tests : ce que vaut une adresse, ce que
+vaut un code, l'enchaînement des écrans, quand rafraîchir, ce qu'on montre quand ça rate. Le reste
+n'est que DOM et réseau.
+
+Une ligne reste à remplir, `ACCOUNT.api` dans `index.html` : l'adresse de ce serveur, le jour où il
+tournera quelque part. Vide, la connexion fonctionne et le profil reste local.
+
+**Ce qui n'a pas pu être vérifié.** Le format exact des échanges avec Crossmint vient de la lecture
+de leur SDK, pas d'un appel réel : le conteneur où ce code a été écrit n'a pas accès à leur domaine.
+La première vraie connexion est donc le moment de vérité. Si une réponse ne ressemble pas à ce qui
+est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre fonctions d'une ligne.
 
 ## Limites connues, à traiter avant la production
 

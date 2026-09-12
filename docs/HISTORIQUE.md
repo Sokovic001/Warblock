@@ -31,6 +31,8 @@ ce qui a suivi découle de ce choix.
 | **L'ordre des sept phases de l'argent n'est pas négociable** | Le serveur doit posséder l'état du jeu avant qu'un euro n'entre. Tant que `wallet` est une variable du navigateur, tout solde est modifiable depuis la console. |
 | **Aucune colonne « solde » en base tant que le grand livre n'existe pas** | Un solde qu'on écrase est exactement ce qu'il faudrait supprimer en phase 03. Mieux vaut ne pas créer la case que d'avoir à en sortir de l'argent. |
 | **Crossmint plutôt que Clerk** | Même fournisseur pour la connexion par email et pour le portefeuille : le portefeuille de la phase 04 naît du compte de la phase 01, sans second fournisseur à réconcilier. |
+| **Le jeu reste jouable sans compte** | La promesse du fichier unique tient : on l'ouvre et on joue. Se connecter ajoute un profil qui suit le joueur d'une machine à l'autre, ça n'ouvre pas la porte. |
+| **Connexion par code email, pas par le composant React de Crossmint** | Leur interface demande un bundler, que ce dépôt n'a pas et ne veut pas. Leurs routes de connexion sont du HTTP ordinaire : quatre appels, la clé `ck_` en en-tête, et `index.html` reste un seul fichier. |
 
 ---
 
@@ -100,6 +102,15 @@ Ces cinq-là ont tous la même origine : une **édition automatisée par remplac
   réel du champ. Cliquer ailleurs ne le remettait pas à zéro.
 - **Icône illisible en petit.** Plusieurs propositions superbes en 512 px devenaient une tache à
   32 px. Toute icône se juge réduite, dans une grille, jamais isolée.
+- **Le `maxlength` qui mangeait le code de connexion.** Le champ du code à six chiffres était borné
+  à six caractères. Un code recopié depuis un mail arrive avec des espaces : le navigateur coupait
+  avant que le nettoyage ne voie les derniers chiffres, et le bouton restait éteint sans rien dire.
+  C'est la fonction qui isole les chiffres qui doit couper, pas le navigateur. Trouvé par le test
+  navigateur, jamais par un test unitaire.
+- **Le rafraîchissement en boucle.** Le jeton se rafraîchit deux minutes avant d'expirer. Si le
+  fournisseur rendait un jeton déjà périmé, le délai suivant valait zéro et le jeu le martelait
+  aussi vite que le réseau le permettait. Un plancher casse la boucle. Même origine : le test
+  navigateur, en simulant une réponse qu'on ne peut pas demander à un vrai fournisseur.
 
 ---
 

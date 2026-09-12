@@ -289,6 +289,32 @@
     padding:11px;font-size:15px;box-shadow:0 5px 0 #7a3b00}
   #pSave:disabled{filter:grayscale(1);opacity:.55}
   .touch .pinfo b{font-size:14px;max-width:96px} .touch .pav{width:26px;height:26px}
+  /* ---------- ACCOUNT ---------- */
+  /* Le bandeau de compte vit en haut du panneau de profil : le joueur n'a pas un écran de plus à
+     trouver, et le lobby ne bouge pas. Hors connexion il propose, connecté il informe. */
+  #acct{border:3px solid #000;border-radius:12px;background:#00000042;padding:9px 11px;margin-bottom:14px}
+  #acct .arow{display:flex;align-items:center;gap:9px}
+  #acct .who{flex:1 1 auto;min-width:0}
+  #acct .who small{display:block;font-size:8px;letter-spacing:.14em;color:#b9c8ee;font-family:Arial,sans-serif;font-weight:700}
+  #acct .who b{display:block;font-size:12px;color:#fff;font-family:Arial,sans-serif;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #acct button{flex:0 0 auto;border:3px solid #000;border-radius:11px;padding:7px 11px;font-size:11px;
+    background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000;box-shadow:0 3px 0 #7a3b00}
+  #acct button.ghost{background:#ffffff1a;color:#fff;box-shadow:0 3px 0 #000}
+  #acct button:disabled{filter:grayscale(1);opacity:.55}
+  #acct .dot{width:9px;height:9px;border-radius:50%;background:#5a6b8f;border:2px solid #000;flex:0 0 auto}
+  #acct.in .dot{background:var(--green,#5ee06a);animation:apulse 2s infinite}
+  @keyframes apulse{0%,100%{opacity:1}50%{opacity:.45}}
+  #acctForm{margin-top:9px}
+  #acctForm input{width:100%;border:3px solid #000;border-radius:11px;background:rgba(13,20,44,.95);color:#fff;
+    padding:9px 11px;font-size:15px;font-family:"Arial Black",Impact,sans-serif;outline:none}
+  #acctForm input:focus{box-shadow:0 0 0 3px var(--yellow)}
+  #acctCode{letter-spacing:.42em;text-align:center}
+  #acctForm .arow{margin-top:8px}
+  #acctForm .arow button{flex:1 1 auto}
+  #acctMsg{margin-top:7px;font-size:11px;color:#9fb4dd;font-family:Arial,sans-serif;font-weight:700}
+  #acctMsg.bad{color:#ff8a8a} #acctMsg.good{color:#9ff0a6}
+  #acct[hidden]{display:none}
   /* ---------- GAME ---------- */
   /* container-type:size fait de #game l'unite de reference du HUD : 1cqw vaut 1 % de la largeur
      de l'ecran de jeu. Les tailles relevees sur la reference tiennent donc a toute resolution,
@@ -788,6 +814,25 @@
 <section id="profile"><div class="pbox">
   <div class="phead"><h3>YOUR PROFILE</h3><button id="pClose">✕</button></div>
   <div class="pbody">
+    <div id="acct">
+      <div class="arow">
+        <span class="dot"></span>
+        <span class="who"><small id="acctLbl">NOT SIGNED IN</small><b id="acctWho">Your progress stays on this device</b></span>
+        <button id="acctBtn">SIGN IN</button>
+      </div>
+      <form id="acctForm" hidden autocomplete="on">
+        <input id="acctMail" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" maxlength="254">
+        <!-- Pas de maxlength ici, volontairement : un code collé depuis un mail arrive avec des
+             espaces ou un tiret, et la coupure du navigateur mangerait les derniers chiffres avant
+             que otpDigits() ne les ait nettoyés. C'est lui qui coupe, une fois les chiffres isolés. -->
+        <input id="acctCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" hidden>
+        <div class="arow">
+          <button type="button" class="ghost" id="acctBack">BACK</button>
+          <button type="submit" id="acctGo">SEND CODE</button>
+        </div>
+      </form>
+      <div id="acctMsg"></div>
+    </div>
     <label class="plab">AVATAR</label>
     <div class="pavatars" id="pAvatars"></div>
     <label class="plab" style="margin-top:14px">USERNAME</label>
@@ -1000,6 +1045,129 @@ const WBCore = (function(){
       .replace(/[ _.\-]/g, '');
   }
   function nameOr(text, fallback){ const n = sanitizeName(text); return validName(n) ? n : (fallback || NAME.fallback); }
+  // ---- Comptes joueurs. Connexion par code email, chez Crossmint.
+  //
+  // Tout ce qui décide est ici, sans DOM ni réseau : ce que vaut une adresse, ce que vaut un code,
+  // l'enchaînement des écrans, quand redemander un jeton frais, ce qu'on dit au joueur quand ça
+  // rate. Un écran de connexion rate toujours dans les cas tordus — code recopié avec des espaces,
+  // jeton expiré pendant qu'on regardait ailleurs, réseau coupé — et ces cas-là se testent mal dans
+  // un navigateur. Ils se testent bien ici.
+  //
+  // Le navigateur ne vérifie jamais un jeton : c'est le serveur qui décide. Ici on ne fait que
+  // savoir quand en redemander un.
+  const AUTH = {
+    root: 'api/2024-09-26/session/sdk/auth',
+    codeLen: 6,
+    resend: 30,            // secondes avant de pouvoir redemander un code
+    refreshMargin: 120,    // on rafraîchit deux minutes avant l'expiration
+    minRefresh: 30,        // jamais deux rafraîchissements coup sur coup
+    store: 'wb.session',   // la clé de rangement du navigateur
+  };
+  // L'environnement se lit dans le préfixe de la clé. Le serveur en fait autant, en vérifiant en
+  // plus la signature ; ici c'est de la configuration, pas un contrôle de sécurité.
+  function crossmintEnv(apiKey){
+    const m = /^(?:ck|sk)_(development|staging|production)_/.exec(String(apiKey == null ? '' : apiKey));
+    return m ? m[1] : null;
+  }
+  function crossmintApi(apiKey){
+    switch (crossmintEnv(apiKey)) {
+      case 'production': return 'https://www.crossmint.com';
+      case 'staging':    return 'https://staging.crossmint.com';
+      case 'development':return 'http://localhost:3000';
+      default:           return null;
+    }
+  }
+  function authUrl(apiKey, route){
+    const base = crossmintApi(apiKey);
+    return base ? `${base}/${AUTH.root}/${route}` : null;
+  }
+  function cleanEmail(text){ return String(text == null ? '' : text).trim().toLowerCase(); }
+  function validEmail(text){
+    const s = cleanEmail(text);
+    if (s.length < 6 || s.length > 254) return false;
+    if (s.indexOf('@') !== s.lastIndexOf('@')) return false;
+    return /^[^@\s]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/.test(s);
+  }
+  // Un code arrive recopié d'un mail : avec des espaces, un tiret au milieu, parfois collé en trop
+  // long. On garde les chiffres, on coupe à la bonne longueur, et le champ ne se plaint jamais.
+  function otpDigits(text){ return String(text == null ? '' : text).replace(/\D/g, '').slice(0, AUTH.codeLen); }
+  function otpReady(text){ return otpDigits(text).length === AUTH.codeLen; }
+  // L'enchaînement des écrans. Trois états seulement : on demande l'adresse, on attend le code, on
+  // est connecté. Tout événement inconnu laisse l'écran où il est, ce qui vaut mieux que de le
+  // renvoyer au début sur un clic en double.
+  const AUTH_STEPS = ['out', 'code', 'in'];
+  function authNext(step, event){
+    const from = AUTH_STEPS.includes(step) ? step : 'out';
+    switch (from + ':' + event) {
+      case 'out:sent':   return 'code';
+      case 'code:ok':    return 'in';
+      case 'code:back':  return 'out';
+      case 'code:retry': return 'out';
+      case 'in:signout': return 'out';
+      default:           return from;
+    }
+  }
+  // Lit `exp` sans vérifier quoi que ce soit. Un joueur qui se mentirait à lui-même sur cette valeur
+  // n'y gagnerait rien : le serveur, lui, vérifie.
+  function jwtExpiry(token){
+    try {
+      const part = String(token).split('.')[1];
+      if (!part) return 0;
+      let b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const json = (typeof atob === 'function') ? atob(b64) : Buffer.from(b64, 'base64').toString('utf8');
+      const exp = JSON.parse(json).exp;
+      return (typeof exp === 'number' && isFinite(exp) && exp > 0) ? exp : 0;
+    } catch { return 0; }
+  }
+  function sessionLive(token, nowMs){
+    const exp = jwtExpiry(token);
+    return exp > 0 && exp * 1000 > (nowMs === undefined ? Date.now() : nowMs);
+  }
+  // Combien de millisecondes avant de redemander un jeton. Zéro veut dire « tout de suite » : jeton
+  // illisible, déjà expiré, ou sur le point de l'être.
+  function refreshDelay(token, nowMs){
+    const exp = jwtExpiry(token);
+    if (!exp) return 0;
+    const now = (nowMs === undefined ? Date.now() : nowMs);
+    return Math.max(0, exp * 1000 - now - AUTH.refreshMargin * 1000);
+  }
+  // Le prochain rafraîchissement *programmé*, qui n'est pas la même question. `refreshDelay` répond
+  // « ce jeton est-il encore bon ? » et peut donc dire zéro. Ici on programme la suite, et zéro
+  // serait un piège : un fournisseur qui rendrait un jeton déjà périmé nous ferait le marteler en
+  // boucle, aussi vite que le réseau le permet. Le plancher casse la boucle.
+  function nextRefresh(token, nowMs){
+    return Math.max(AUTH.minRefresh * 1000, refreshDelay(token, nowMs));
+  }
+  // Ce qu'on montre au joueur quand ça rate. Jamais le détail technique : il n'aide que celui qui
+  // cherche à deviner si une adresse existe.
+  function authMessage(status){
+    const code = Number(status) || 0;
+    if (!code)          return 'No connection. Check your network and try again.';
+    if (code === 429)   return 'Too many tries. Wait a minute, then start again.';
+    if (code === 400 || code === 401 || code === 403) return 'That code is wrong or has expired.';
+    if (code >= 500)    return 'Sign-in is down right now. Try again in a moment.';
+    return 'Something went wrong. Try again.';
+  }
+  // Le profil du serveur remplace le brouillon local dès qu'on est connecté. Deux pièges ici, et
+  // c'est pour eux que la fonction est pure : le serveur compte en CENTIMES entiers alors que le
+  // jeu compte en dollars, et un avatar inconnu du client ne doit pas vider la case.
+  function applyAccount(profile, compte, avatars){
+    const base = profile || { name: NAME.fallback, avatar: '', stats: {} };
+    const s = (compte && compte.stats) || {};
+    const entier = v => Math.max(0, Math.floor(Number(v) || 0));
+    return {
+      ...base,
+      name: nameOr(compte && compte.name, base.name),
+      avatar: (compte && validAvatar(compte.avatar, avatars || [])) ? compte.avatar : base.avatar,
+      stats: {
+        matches: entier(s.matches),
+        wins: entier(s.wins),
+        kills: entier(s.kills),
+        best: cents(entier(s.best) / 100),
+      },
+    };
+  }
   // ---- Music tension, 0..1. Drives tempo and how many layers play. Kept pure so the curve can be
   // reasoned about and tested rather than tuned blind.
   const MUSIC = { beatSlow: 0.72, beatFast: 0.34, layer2: 0.35, layer3: 0.7 };
@@ -1486,7 +1654,9 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
+           AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
+           authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };
@@ -1710,7 +1880,192 @@ $('pDice').onclick=e=>{ e.stopPropagation(); $('pInput').value=randomName(); che
 $('pSave').onclick=e=>{ e.stopPropagation();
   profile.name=C.nameOr($('pInput').value, profile.name);
   renderProfile(); openProfile(false);
+  Auth.pushProfile();
 };
+// ---------- comptes joueurs ----------
+// Le jeu reste jouable sans compte : c'est la promesse du fichier unique, on l'ouvre et on joue.
+// Se connecter ajoute un profil qui suit le joueur d'une machine a l'autre, et prepare la suite.
+//
+// Toutes les decisions de cet ecran sont dans WBCore et testees : ce qui vaut une adresse, ce qui
+// vaut un code, l'enchainement des ecrans, quand rafraichir, ce qu'on dit quand ca rate. Il ne
+// reste ici que le DOM et le reseau, qui demandent un navigateur.
+const ACCOUNT={
+  // La cle CLIENT de Crossmint. Elle est publique par nature : elle vit dans la page, n'importe qui
+  // peut la lire, et c'est prevu ainsi. Ce qui la protege, ce sont les origines autorisees declarees
+  // dans la console Crossmint. Sans elles, n'importe quel site peut s'en servir.
+  key:'ck_production_35MfuqsYNKJk76z8qDXRTtiCPyK8WSJGLtCVFm9XuC5mFgdtEyHVcmuMLeLFqfhab6uUippA8Mqj2oTz4i1hpRwotGkvgbaS55QwfZfkK3DQx6XaoEss49rnU7C6h7xTF6TLg8L9HTdKTmnoxQRs7GbmqZ5RXfaofhBuhbtdcA3SjFGuFmKKL2RUaKTStjxDLdni9Vv9PxdSaZWHyx8vE79',
+  // L'adresse de notre API de profils. Vide tant qu'elle n'est pas deployee : on peut alors se
+  // connecter, mais le profil reste local. Une seule ligne a remplir le jour ou le serveur tourne.
+  api:'',
+};
+const Auth=(function(){
+  let step='out', session=null, busy=false, flow=null, timer=0;
+  const has=()=>!!(session&&session.jwt);
+  // Le rangement du navigateur peut jeter : navigation privee, cookies coupes, quota plein. Rien
+  // ici ne doit empecher de jouer, donc tout echec est silencieux et le joueur se reconnecte.
+  function store(v){
+    try{ if(v) localStorage.setItem(C.AUTH.store,JSON.stringify(v)); else localStorage.removeItem(C.AUTH.store); }catch(e){}
+  }
+  function stored(){
+    try{ const r=localStorage.getItem(C.AUTH.store); return r?JSON.parse(r):null; }catch(e){ return null; }
+  }
+  // Un seul point de passage vers le reseau : il ne lance jamais, il rend toujours un etat lisible.
+  // Un `fetch` qui echoue rend status 0, ce que WBCore traduit en « verifie ton reseau ».
+  async function call(url,opts){
+    if(!url) return {ok:false,status:0,data:null};
+    try{
+      const r=await fetch(url,opts);
+      let data=null; try{ data=await r.json(); }catch(e){}
+      return {ok:r.ok,status:r.status,data};
+    }catch(e){ return {ok:false,status:0,data:null}; }
+  }
+  const cmHead={'content-type':'application/json','x-api-key':ACCOUNT.key};
+  const cmCall=(route,opts)=>call(C.authUrl(ACCOUNT.key,route),opts);
+  // ---- les trois echanges avec Crossmint ----
+  const sendCode=email=>cmCall('otps/send',{method:'POST',headers:cmHead,body:JSON.stringify({email})});
+  function confirmCode(email,state,code){
+    const q=new URLSearchParams({email,signinAuthenticationMethod:'email',token:code,locale:'en',state,
+      callbackUrl:`${C.crossmintApi(ACCOUNT.key)}/${C.AUTH.root}/callback`});
+    return cmCall('authenticate?'+q,{method:'POST',headers:cmHead});
+  }
+  const exchange=refresh=>cmCall('refresh',{method:'POST',headers:cmHead,body:JSON.stringify({refresh})});
+  // Crossmint rend le jeton, le jeton de rafraichissement et le compte. On ne garde que ce qui sert,
+  // et on ne fait jamais confiance a la forme : un champ manquant ne doit pas creer une session vide.
+  function adopt(data){
+    const jwt=data&&typeof data.jwt==='string'?data.jwt:'';
+    const refresh=data&&data.refresh&&typeof data.refresh.secret==='string'?data.refresh.secret:'';
+    if(!jwt||!refresh) return false;
+    session={ jwt, refresh, email:(data.user&&data.user.email)||(session&&session.email)||'' };
+    store(session); plan(); render(); sync();
+    return true;
+  }
+  // Rafraichir avant l'expiration, jamais apres : le delai vient de WBCore, qui lit `exp`.
+  function plan(){
+    clearTimeout(timer);
+    if(!has()) return;
+    timer=setTimeout(()=>{ renew(); }, C.nextRefresh(session.jwt));
+  }
+  async function renew(){
+    if(!session||!session.refresh) return false;
+    const r=await exchange(session.refresh);
+    if(r.ok&&adopt(r.data)) return true;
+    // Un rafraichissement refuse veut dire que la session est finie pour de bon. On sort proprement
+    // plutot que de laisser un jeton mort dans un coin.
+    if(r.status&&r.status!==0) forget();
+    return false;
+  }
+  function forget(){
+    clearTimeout(timer); session=null; flow=null; store(null);
+    step=C.authNext(step,'signout'); render();
+  }
+  // ---- notre API de profils ----
+  // Tant que `ACCOUNT.api` est vide, le serveur n'existe pas encore : on se connecte quand meme, et
+  // le profil reste local. Le jour ou il tourne, rien d'autre ne change ici.
+  const mine=path=>ACCOUNT.api?ACCOUNT.api.replace(/\/+$/,'')+path:null;
+  async function sync(){
+    if(!has()||!ACCOUNT.api) return;
+    const r=await call(mine('/api/me'),{headers:{authorization:'Bearer '+session.jwt}});
+    if(!r.ok) return;
+    const p=C.applyAccount(profile,r.data,AVATARS);
+    profile.name=p.name; profile.avatar=p.avatar; profile.stats=p.stats;
+    renderProfile(); render();
+  }
+  async function pushProfile(){
+    if(!has()||!ACCOUNT.api) return;
+    const r=await call(mine('/api/me'),{method:'PATCH',
+      headers:{authorization:'Bearer '+session.jwt,'content-type':'application/json'},
+      body:JSON.stringify({name:profile.name,avatar:profile.avatar})});
+    // Le serveur arbitre les pseudos : s'il refuse, c'est qu'il est pris, et le joueur doit le savoir.
+    if(r.status===409){ msg('That name is already taken. Pick another one.','bad'); openProfile(true); return; }
+    if(r.ok&&r.data){ const p=C.applyAccount(profile,r.data,AVATARS); profile.name=p.name; profile.avatar=p.avatar; renderProfile(); }
+  }
+  // ---- l'ecran ----
+  function msg(text,kind){
+    const m=$('acctMsg'); if(!m) return;
+    m.textContent=text||''; m.className=kind||'';
+  }
+  function render(){
+    const box=$('acct'); if(!box) return;
+    const form=$('acctForm'), mail=$('acctMail'), code=$('acctCode'), go=$('acctGo'), back=$('acctBack');
+    box.classList.toggle('in',has());
+    $('acctLbl').textContent = has()?'SIGNED IN':'NOT SIGNED IN';
+    $('acctWho').textContent = has()
+      ? (session.email||'Your account')
+      : (step==='out'&&!form.hidden ? 'We email you a six-digit code.'
+        : step==='code' ? 'Check your inbox for the code.'
+        : 'Your progress stays on this device.');
+    $('acctBtn').textContent = has()?'SIGN OUT':'SIGN IN';
+    $('acctBtn').hidden = !has() && !form.hidden;
+    form.hidden = has() || (step==='out' && form.dataset.open!=='1');
+    mail.hidden = step==='code';
+    code.hidden = step!=='code';
+    back.textContent = step==='code'?'BACK':'CANCEL';
+    go.textContent = busy ? '…' : (step==='code'?'SIGN IN':'SEND CODE');
+    go.disabled = busy || (step==='code' ? !C.otpReady(code.value) : !C.validEmail(mail.value));
+  }
+  function open(v){
+    const form=$('acctForm');
+    form.dataset.open=v?'1':'0';
+    if(v){ step='out'; msg(''); render(); $('acctMail').focus(); }
+    else { step='out'; flow=null; msg(''); render(); }
+  }
+  async function submit(){
+    if(busy) return;
+    const mail=$('acctMail'), code=$('acctCode');
+    busy=true; render();
+    if(step==='out'){
+      const email=C.cleanEmail(mail.value);
+      const r=await sendCode(email);
+      busy=false;
+      if(!r.ok){ msg(C.authMessage(r.status),'bad'); render(); return; }
+      // Le champ qui porte l'etat n'a pas le meme nom selon les versions de Crossmint. On prend le
+      // premier qui repond, plutot que de parier sur un seul.
+      const d=r.data||{};
+      flow={ email, state:d.state||d.emailId||d.id||'' };
+      step=C.authNext(step,'sent'); code.value=''; msg('Code sent to '+email+'.','good'); render(); code.focus();
+      return;
+    }
+    const r=await confirmCode(flow.email,flow.state,C.otpDigits(code.value));
+    const secret=r.ok&&r.data?(r.data.oneTimeSecret||r.data.refresh||''):'';
+    if(!secret){ busy=false; msg(C.authMessage(r.status||401),'bad'); render(); return; }
+    const t=await exchange(secret);
+    busy=false;
+    if(!(t.ok&&adopt(t.data))){ msg(C.authMessage(t.status),'bad'); render(); return; }
+    session.email=session.email||flow.email; store(session);
+    step=C.authNext(step,'ok'); flow=null; open(false); msg('Signed in as '+session.email,'good'); render();
+  }
+  function wire(){
+    const form=$('acctForm'); if(!form) return;
+    form.onsubmit=e=>{ e.preventDefault(); e.stopPropagation(); submit(); };
+    $('acctBtn').onclick=e=>{ e.stopPropagation(); if(has()) signOut(); else open(true); };
+    $('acctBack').onclick=e=>{ e.stopPropagation();
+      if(step==='code'){ step=C.authNext(step,'back'); msg(''); render(); $('acctMail').focus(); }
+      else open(false);
+    };
+    // Le code se nettoie a la frappe : un code colle avec des espaces doit marcher du premier coup.
+    $('acctCode').addEventListener('input',e=>{ e.target.value=C.otpDigits(e.target.value); render(); });
+    $('acctMail').addEventListener('input',render);
+    for(const id of ['acctMail','acctCode'])
+      $(id).addEventListener('keydown',e=>{ e.stopPropagation(); });
+    render();
+  }
+  async function signOut(){
+    const r=session&&session.refresh;
+    forget(); msg('Signed out.','');
+    if(r) cmCall('logout',{method:'POST',headers:cmHead,body:JSON.stringify({refresh:r})});
+  }
+  // Au chargement : si une session dort dans le navigateur, on la reprend sans rien demander. Un
+  // jeton encore valide sert tel quel, un jeton perime est echange contre un neuf.
+  function restore(){
+    const s=stored();
+    if(!s||!s.refresh) return;
+    session=s; step='in';
+    if(C.sessionLive(s.jwt)){ plan(); render(); sync(); }
+    else renew();
+  }
+  return { wire, restore, pushProfile, signOut };
+})();
+Auth.wire(); Auth.restore();
 const rulesEl=$('rules');
 function showRules(v){ rulesEl.classList.toggle('on',v); rulesEl.setAttribute('aria-hidden',String(!v)); }
 $('rulesBtn').onclick=()=>showRules(true);

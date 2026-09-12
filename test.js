@@ -1119,4 +1119,128 @@ test('boxes give cubes more often than hearts', () => {
 });
 test('bots hesitate before their first shot and fire slower than a human', () => { assert.ok(C.BOT.reaction>=0.4); assert.ok(C.BOT.fireMult>1); });
 
+console.log('Signing in');
+test('the environment of the key decides which Crossmint answers', () => {
+  assert.strictEqual(C.crossmintApi('ck_production_abc'), 'https://www.crossmint.com');
+  assert.strictEqual(C.crossmintApi('ck_staging_abc'), 'https://staging.crossmint.com');
+  assert.strictEqual(C.crossmintEnv('sk_staging_abc'), 'staging', 'the server key parses the same way');
+  // Une clé absente ne doit pas produire une URL à moitié formée qu'on appellerait quand même.
+  for (const junk of [undefined, null, '', 'nope', 'ck_prod_abc', 42])
+    assert.strictEqual(C.crossmintApi(junk), null, String(junk));
+  assert.strictEqual(C.authUrl(undefined, 'otps/send'), null);
+});
+test('the sign-in routes are built from the key, never hand-written', () => {
+  assert.strictEqual(C.authUrl('ck_production_abc', 'otps/send'),
+    'https://www.crossmint.com/api/2024-09-26/session/sdk/auth/otps/send');
+  assert.ok(C.authUrl('ck_production_abc', 'authenticate').startsWith('https://'));
+});
+test('an address is accepted or refused on what it is, not on how it looks', () => {
+  for (const bon of ['a@b.co', 'loic.jnepro@gmail.com', 'LOIC@EXAMPLE.COM', 'a+tag@sub.domain.fr'])
+    assert.ok(C.validEmail(bon), bon);
+  for (const mauvais of ['', 'loic', 'loic@', '@gmail.com', 'a@b', 'a b@c.com', 'a@@b.co', 'a@b..co',
+                         'a@b.c', undefined, null, 42, 'a@-b.co', 'x'.repeat(250) + '@b.co'])
+    assert.ok(!C.validEmail(mauvais), String(mauvais));
+});
+test('an address is stored folded, so the same person is the same person', () => {
+  assert.strictEqual(C.cleanEmail('  LoIc@Gmail.COM  '), 'loic@gmail.com');
+  assert.strictEqual(C.cleanEmail(undefined), '');
+});
+test('a code copied out of an email still works', () => {
+  // Espaces, tirets, collage trop long : le champ ne se plaint jamais, il garde les chiffres.
+  for (const brut of ['123456', '123 456', '12-34-56', ' 123456 ', '123456789'])
+    assert.strictEqual(C.otpDigits(brut), '123456', brut);
+  assert.ok(C.otpReady('123 456'));
+  assert.ok(!C.otpReady('1234'));
+  assert.ok(!C.otpReady('abcdef'));
+  for (const junk of [undefined, null, {}, []]) assert.strictEqual(C.otpDigits(junk), '');
+});
+test('the sign-in screens never go backwards on their own', () => {
+  assert.strictEqual(C.authNext('out', 'sent'), 'code');
+  assert.strictEqual(C.authNext('code', 'ok'), 'in');
+  assert.strictEqual(C.authNext('code', 'back'), 'out');
+  assert.strictEqual(C.authNext('in', 'signout'), 'out');
+  // Un double clic, un événement en retard, un état inventé : l'écran reste où il est.
+  assert.strictEqual(C.authNext('code', 'sent'), 'code');
+  assert.strictEqual(C.authNext('in', 'ok'), 'in');
+  assert.strictEqual(C.authNext('out', 'ok'), 'out');
+  assert.strictEqual(C.authNext('nimporte', 'ok'), 'out');
+});
+test('a token says when it expires, and a broken one says nothing', () => {
+  const jeton = exp => 'x.' + Buffer.from(JSON.stringify({ sub: 'u', exp })).toString('base64url') + '.y';
+  assert.strictEqual(C.jwtExpiry(jeton(1800000000)), 1800000000);
+  for (const junk of [undefined, null, '', 'abc', 'a.b', 'a.!!.c', jeton('bientôt'), jeton(0), jeton(-5)])
+    assert.strictEqual(C.jwtExpiry(junk), 0, String(junk));
+});
+test('a session is live until it is not, and the clock is the judge', () => {
+  const jeton = exp => 'x.' + Buffer.from(JSON.stringify({ exp })).toString('base64url') + '.y';
+  assert.ok(C.sessionLive(jeton(2000), 1999 * 1000));
+  assert.ok(!C.sessionLive(jeton(2000), 2001 * 1000));
+  assert.ok(!C.sessionLive('cassé', 0), 'un jeton illisible n\'est jamais une session');
+});
+test('a token is refreshed before it dies, never after', () => {
+  const jeton = exp => 'x.' + Buffer.from(JSON.stringify({ exp })).toString('base64url') + '.y';
+  const marge = C.AUTH.refreshMargin;
+  assert.ok(marge >= 30, 'une marge trop courte ne laisse pas le temps au réseau');
+  // Une heure devant soi : on rafraîchit une heure moins la marge plus tard.
+  assert.strictEqual(C.refreshDelay(jeton(3600), 0), (3600 - marge) * 1000);
+  // Déjà dans la marge, ou déjà expiré : tout de suite, et jamais un délai négatif.
+  assert.strictEqual(C.refreshDelay(jeton(3600), 3590 * 1000), 0);
+  assert.strictEqual(C.refreshDelay(jeton(100), 900 * 1000), 0);
+  assert.strictEqual(C.refreshDelay('cassé', 0), 0);
+});
+test('a token that comes back already dead never turns into a refresh loop', () => {
+  // Le piège que le test navigateur a trouvé : rafraîchir rendait un jeton périmé, le délai suivant
+  // valait zéro, et le jeu martelait Crossmint aussi vite que le réseau le permettait.
+  const jeton = exp => 'x.' + Buffer.from(JSON.stringify({ exp })).toString('base64url') + '.y';
+  const plancher = C.AUTH.minRefresh * 1000;
+  assert.ok(plancher > 0, 'sans plancher, la boucle revient');
+  assert.strictEqual(C.nextRefresh(jeton(10), 900 * 1000), plancher, 'jeton déjà mort');
+  assert.strictEqual(C.nextRefresh('cassé', 0), plancher, 'jeton illisible');
+  assert.strictEqual(C.nextRefresh(jeton(3600), 3599 * 1000), plancher, 'jeton qui expire dans une seconde');
+  // Un jeton normal garde son vrai délai : le plancher ne doit pas rafraîchir plus que nécessaire.
+  assert.strictEqual(C.nextRefresh(jeton(3600), 0), (3600 - C.AUTH.refreshMargin) * 1000);
+  assert.ok(C.AUTH.minRefresh < C.AUTH.refreshMargin, 'le plancher ne doit jamais dépasser la marge');
+});
+test('a failure tells the player what to do, never why it really failed', () => {
+  for (const code of [0, 400, 401, 403, 429, 500, 503, 418]) {
+    const m = C.authMessage(code);
+    assert.ok(m.length > 10 && /[.!]$/.test(m), `${code}: ${m}`);
+    assert.ok(!/\d/.test(m), `${code}: le joueur n'a que faire du code HTTP`);
+  }
+  assert.notStrictEqual(C.authMessage(429), C.authMessage(401), 'ces deux-là appellent des gestes différents');
+});
+test('the account the server sends replaces the local draft', () => {
+  const avatars = C.avatarList(Object.keys(C.BRAWLERS));
+  const local = { name: 'Brouillon', avatar: avatars[3].id, stats: { matches: 99, wins: 99, kills: 99, best: 99 } };
+  const p = C.applyAccount(local, { name: 'Loïc', avatar: avatars[1].id,
+    stats: { matches: 4, wins: 1, kills: 7, best: 250 } }, avatars);
+  assert.strictEqual(p.name, 'Loïc');
+  assert.strictEqual(p.avatar, avatars[1].id);
+  assert.deepStrictEqual(p.stats, { matches: 4, wins: 1, kills: 7, best: 2.5 });
+});
+test('the server counts in cents and the game in dollars, and the seam is exact', () => {
+  const avatars = C.avatarList(Object.keys(C.BRAWLERS));
+  const local = { name: 'x', avatar: avatars[0].id, stats: {} };
+  // 50 centimes, la plus petite table : un arrondi à l'entier l'effacerait.
+  assert.strictEqual(C.applyAccount(local, { stats: { best: 50 } }, avatars).stats.best, 0.5);
+  assert.strictEqual(C.applyAccount(local, { stats: { best: 1 } }, avatars).stats.best, 0.01);
+  assert.strictEqual(C.applyAccount(local, { stats: { best: 123456 } }, avatars).stats.best, 1234.56);
+});
+test('a half-written account never wipes what the player already had', () => {
+  const avatars = C.avatarList(Object.keys(C.BRAWLERS));
+  const local = { name: 'Loic', avatar: avatars[2].id, stats: { matches: 3, wins: 1, kills: 2, best: 5 } };
+  for (const cassé of [undefined, null, {}, { name: '' }, { avatar: 'bolt:pirate' }, { stats: null }]) {
+    const p = C.applyAccount(local, cassé, avatars);
+    assert.strictEqual(p.name, 'Loic', String(JSON.stringify(cassé)));
+    assert.strictEqual(p.avatar, avatars[2].id, 'un avatar inconnu ne doit pas vider la case');
+    assert.deepStrictEqual(p.stats, { matches: 0, wins: 0, kills: 0, best: 0 });
+  }
+});
+test('statistics coming back negative or absurd are clamped, not trusted', () => {
+  const avatars = C.avatarList(Object.keys(C.BRAWLERS));
+  const p = C.applyAccount({ name: 'x', avatar: avatars[0].id, stats: {} },
+    { stats: { matches: -5, wins: 'beaucoup', kills: 2.7, best: -100 } }, avatars);
+  assert.deepStrictEqual(p.stats, { matches: 0, wins: 0, kills: 2, best: 0 });
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

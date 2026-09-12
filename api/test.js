@@ -257,6 +257,22 @@ test('WBCore est chargé depuis index.html, pas recopié', () => {
   assert.strictEqual(C.nameKey('Loïc'), C.nameKey('LOIC'));
   assert.ok(C.BRAWLERS.bolt, 'les brawlers du jeu sont visibles côté serveur');
 });
+test('le jeu et le serveur désignent le même Crossmint, environnement par environnement', () => {
+  // Deux adresses écrites à deux endroits finissent toujours par diverger. Le jeu déduit la sienne
+  // du préfixe de sa clé « ck_ », le serveur de sa clé « sk_ » : ce test est le seul garde-fou.
+  const { crossmintBaseUrl } = require('./crossmint-key');
+  for (const env of ['development', 'staging', 'production'])
+    assert.strictEqual(C.crossmintApi(`ck_${env}_abc`), crossmintBaseUrl(env), env);
+});
+test('le serveur exige le destinataire que le jeu ne peut pas choisir', () => {
+  // Le jeu ne fabrique jamais de jeton : il reçoit celui de Crossmint et le transmet. L'identifiant
+  // de projet qui sert de destinataire vient de la clé serveur, hors de portée du navigateur.
+  const a = autorite();
+  const cle = parseApiKey(fabriqueCle(a, { projectId: PROJET }), { usageOrigin: 'server', signers: a.signers });
+  assert.strictEqual(cle.projectId, PROJET);
+  assert.throws(() => identityFromClaims(revendications({ aud: 'un_projet_choisi_par_le_client' }),
+    { projectId: cle.projectId }));
+});
 
 console.log('Lecture de la clé d\'API Crossmint');
 test('le base58 fait l\'aller-retour, zéros de tête compris', () => {
