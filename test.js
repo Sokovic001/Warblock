@@ -2760,7 +2760,9 @@ test('CRIT_TEST n\'existe plus, et ne doit pas réapparaître', () => {
   // descend dans la simulation installerait une seconde règle de critique — le patron du
   // `respawn()` défini deux fois, dont docs/HISTORIQUE.md garde la trace.
   assert.ok(!html.includes('CRIT_TEST'), 'CRIT_TEST est de retour dans index.html');
-  const tir = JEU.slice(JEU.indexOf('function projUpdate('), JEU.indexOf('// ---------- damage / death / loot'));
+  // `projUpdate` a rejoint le bloc SIM au module 4 : c'est là qu'on la cherche désormais, et le
+  // fait qu'elle n'y soit plus ferait tomber ce test plutôt que de le rendre vide.
+  const tir = sim.slice(sim.indexOf('function projUpdate('), sim.indexOf('// ---------- degats, mort, butin'));
   assert.ok(tir.length > 500, 'projUpdate n\'a pas été retrouvée');
   assert.match(tir, /C\.critShot\(/, 'la règle du critique reste celle de WBCore');
   assert.strictEqual(tir.split('C.critShot(').length - 1, 1, 'et il n\'y en a qu\'une');
@@ -2888,10 +2890,9 @@ const HASARD_INTERDIT = ['makeEntity', 'spawnPoints', 'fireSpec', 'hurtBox', 'sp
 // Le cosmétique, et la seule exception qui n'en est pas une : la graine de secours.
 const HASARD_ATTENDU = {
   randomName:  'le pseudo d\'un bot au sas d\'attente, qui ne joue aucune partie',
-  spawnSmoke:  'la position des bouffées d\'un nuage, pure décoration',
+  corpsNuage:  'la position des bouffées d\'un nuage, pure décoration',
   floatText:   'le décalage horizontal d\'un nombre flottant à l\'écran',
-  kill:        'quelle vanne un bot poste après un kill',
-  botCashOut:  'quelle vanne un bot poste en encaissant',
+  rendreEvenements: 'quelle vanne un bot poste sur un kill ou un encaissement',
   startMatch:  'la graine LOCALE de secours, qui doit précisément ne PAS être reproductible',
 };
 test('aucun Math.random dans les fonctions du chemin de simulation', () => {
@@ -2952,11 +2953,14 @@ test('et les fonctions qui gardent Math.random le gardent pour une raison écrit
   assert.strictEqual(compte(debut, /Math\.random\(/g), 1, 'startMatch ne doit tirer qu\'une fois librement');
   const ligne = debut.split('\n').find(l => l.includes('Math.random('));
   assert.match(ligne, /graineLocale/, 'le seul tirage libre de startMatch doit être la graine de secours');
-  // Les vannes des bots sont du texte à l'écran, jamais un fait de partie : chaque tirage restant
-  // dans `kill` et `botCashOut` doit poster quelque chose, et rien d'autre.
+  // Les vannes des bots sont du texte à l'écran, jamais un fait de partie. `kill` et `botCashOut`
+  // sont descendues dans SIM au module 4 et n'ont plus le droit de tirer du tout ; le tirage a
+  // suivi la vanne, du côté qui la PRONONCE, et chaque tirage qui reste doit poster quelque chose.
   for (const nom of ['kill', 'botCashOut'])
-    for (const l of sansCommentaires(corpsDe(nom)).split('\n').filter(l => l.includes('Math.random(')))
-      assert.ok(/botSay\(|sendEmote\(/.test(l), `${nom} : un tirage libre qui ne sert pas à parler — ${l.trim()}`);
+    assert.strictEqual(compte(sansCommentaires(corpsDe(nom)), /Math\.random\(/g), 0,
+      `${nom} vit dans SIM : un tirage libre y rendrait la partie irrejouable`);
+  for (const l of sansCommentaires(corpsDe('rendreEvenements')).split('\n').filter(l => l.includes('Math.random(')))
+    assert.ok(/botSay\(|sendEmote\(/.test(l), `rendreEvenements : un tirage libre qui ne sert pas à parler — ${l.trim()}`);
 });
 
 console.log('La géométrie tirée de la seule graine, sans transcendantes');
@@ -3340,6 +3344,542 @@ test('le corpus gelé discrimine vraiment : il contient les deux réponses de ch
   }
   for (const [nom, n] of Object.entries({ murs, libres, vus, caches, buissons, fumes }))
     assert.ok(n >= 20, `le corpus ne contient que ${n} cas de « ${nom} » : il ne prouverait presque rien`);
+});
+
+console.log('Les faits : projectiles balayés, dégâts, mort, butin et flux d\'événements');
+// CE QUE CETTE SECTION PROUVE, ET CE QU'ELLE NE PROUVE PAS. Elle fait tourner le VRAI code de
+// combat, de mort et de butin — celui du bloc SIM, chargé depuis index.html — sur de vraies cartes.
+// Elle ne fait PAS jouer une partie : les bots et le joueur descendent au module 5, et ce qui les
+// remplace ici est une conduite de quelques lignes. Ce qu'elle couvre est donc l'ARITHMÉTIQUE de la
+// partie, pas sa dramaturgie : qui perd combien, où l'argent va, ce qui touche quoi.
+const PAS = C.SIM.stepS;
+
+// Un banc de partie : une vraie carte, un vrai plan de gaz, vingt vraies entités, de vraies
+// caisses, et les fonctions de SIM appelées telles quelles.
+function bancNeuf(mode, stake, graine, t0){
+  const cells = C.generateMap(graine);
+  const plan = C.zonePlan(graine, mode);
+  const G = { cells, time: t0 || 0, pas: 0, evts: [], running: true, stake, modeCfg: mode,
+              alea: C.makeFlux(graine), nextEid: 0, zonePlan: plan,
+              ents: [], boxes: [], pickups: [], projs: [], zones: [], turrets: [], smokes: [], nades: [],
+              dmgDealt: 0, looted: 0, lostPouch: 0, encaisse: 0,
+              zone: { cx: plan.startCx, cz: plan.startCz, r: plan.startR, dps: 0 } };
+  // Les caisses sont posées comme `startMatch` les pose, dans le même flux et dans le même ordre.
+  const aleaCaisses = G.alea('butin/position'), aleaBots = G.alea('bots/identite');
+  for (let i = 0; i < (mode.boxes || C.BOXES); i++){
+    let x, z, t = 0;
+    do { x = 3 + Math.floor(aleaCaisses() * (C.MAP - 6)) + 0.5; z = 3 + Math.floor(aleaCaisses() * (C.MAP - 6)) + 0.5; t++; }
+    while ((SIMU.cellAt(G, x, z) !== 0 || Math.abs(C.dist(x - C.MAP / 2, z - C.MAP / 2) - C.MAP * 0.42) < 3) && t < 40);
+    G.boxes.push({ x, z, hp: C.BOX_HP, ph: aleaCaisses() * 6.283 });
+  }
+  const pts = SIMU.spawnPoints(G, G.alea('apparition'), mode.teams, mode.teamSize);
+  const bids = Object.keys(C.BRAWLERS), slot = pts.findIndex(p => p.team === 0);
+  pts.forEach((pt, i) => {
+    const br = C.BRAWLERS[bids[Math.floor(aleaBots() * bids.length)]];
+    const e = SIMU.makeEntity(G, 'b' + i, pt.x, pt.z, stake, i === slot, br, 0.6, pt.team);
+    e.lives = C.livesFor(mode);
+    G.ents.push(e);
+    if (i === slot) G.player = e;
+  });
+  return G;
+}
+// Un pas de banc. Tout ce qui décide d'un chiffre passe par SIM ; ce qui reste ici est ce que le
+// module 5 descendra — la conduite des bots — et le gaz, resté dans `Game`, rejoué à partir de
+// `C.zoneAt`, c'est-à-dire de la même règle et pas d'une seconde copie.
+function pasDeBanc(G){
+  const dt = PAS;
+  G.pas++; G.time += dt;
+  const a = C.zoneAt(G.zonePlan, G.time);
+  G.zone.cx = a.cx; G.zone.cz = a.cz; G.zone.r = a.r; G.zone.dps = a.dps;
+  for (const e of G.ents) if (e.respawnT > 0){ e.respawnT -= dt; if (e.respawnT <= 0) SIMU.respawn(G, e); }
+  for (const e of G.ents){
+    if (!e.alive) continue;
+    if (SIMU.dashUpdate(G, e, dt)) continue;
+    e.fireCd -= dt; e.stealthT -= dt;
+    if (e.ammo < 3){ e.ammoT += dt; if (e.ammoT >= e.brawler.ammoReload){ e.ammo++; e.ammoT = 0; } }
+    e.gadget = C.smokeTick(e.gadget, dt);
+    if (e.invuln > 0) e.invuln -= dt;
+    if (e.flash > 0) e.flash -= dt;
+    if (G.modeCfg.cashout) e.cashLock = Math.max(0, (e.cashLock || 0) - dt);
+    let t = null, bd = 1e9;
+    for (const o of G.ents){ if (o === e || !o.alive || o.team === e.team) continue;
+      const d = C.dist(o.x - e.x, o.z - e.z); if (d < bd){ bd = d; t = o; } }
+    let mx = 0, mz = 0;
+    if (t){
+      const dx = (t.x - e.x) / bd, dz = (t.z - e.z) / bd;
+      e.ax = dx; e.az = dz;
+      if (bd > e.brawler.attack.range * 0.7){ mx = dx; mz = dz; } else { mx = -dz; mz = dx; }
+      if (bd < e.brawler.attack.range) SIMU.attack(G, e, dx, dz, bd);
+      if (e.super >= e.brawler.super.cost) SIMU.useSuper(G, e, bd);
+      if (C.canThrowSmoke(e.gadget) && G.alea('bots/objectif')() < dt * 0.4) SIMU.throwSmoke(G, e, bd);
+    }
+    // Personne à portée : on va chercher l'argent tombé. Sans cette ligne le banc ne parcourait
+    // qu'une seule fois en trente mille pas le chemin « la sacoche tombe, quelqu'un la ramasse »,
+    // et l'assertion qui le garde n'aurait tenu qu'à un cheveu.
+    if (!t || bd > e.brawler.attack.range){
+      let sac = null, sd = 14;
+      for (const pk of G.pickups){ if (pk.kind !== 'cash') continue;
+        const d = C.dist(pk.x - e.x, pk.z - e.z); if (d < sd){ sd = d; sac = pk; } }
+      if (sac && sd > 0.1){ mx = (sac.x - e.x) / sd; mz = (sac.z - e.z) / sd; }
+    }
+    if (!SIMU.inZone(G, e.x, e.z, 1.5)){ mx = G.zone.cx - e.x; mz = G.zone.cz - e.z; }
+    SIMU.moveEntity(G, e, mx, mz, dt);
+    for (let i = G.pickups.length - 1; i >= 0; i--){ const pk = G.pickups[i];
+      if (C.dist(pk.x - e.x, pk.z - e.z) < 0.9) SIMU.collect(G, e, pk); }
+    // Le seuil du jeu est de quatre mises ; ici il en faut deux, et le tirage est plus large :
+    // sans cela aucune partie de vingt-cinq secondes ne verrait jamais un encaissement, et le
+    // troisième chemin de la sacoche ne serait jamais parcouru par ce banc.
+    if (G.modeCfg.cashout && !e.isPlayer && e.pouch >= G.stake * 2 && C.cashoutReady(e.cashLock || 0)
+        && G.alea('bots/encaissement')() < dt * 2) SIMU.botCashOut(G, e);
+  }
+  SIMU.projUpdate(G, dt); SIMU.zonesUpdate(G, dt); SIMU.nadesUpdate(G, dt); SIMU.smokesUpdate(G, dt);
+  for (const e of G.ents) if (e.alive && !SIMU.inZone(G, e.x, e.z, 0)){
+    e.hp -= G.zone.dps * SIMU.maxHp(e) * dt; e.lastDamageT = G.time;
+    if (e.hp <= 0) SIMU.kill(G, e, e.lastHitBy && e.lastHitBy.alive ? e.lastHitBy : null, 'gas');
+  }
+  const evts = G.evts; G.evts = [];
+  return evts;
+}
+// Tout l'argent de la table, où qu'il se trouve : dans les sacoches, tombé au sol, ou sorti de la
+// partie par un encaissement. Il n'y a pas de quatrième endroit, et c'est exactement ce qu'on teste.
+function argentTotal(G){
+  let somme = 0;
+  for (const e of G.ents) somme += e.pouch;
+  for (const pk of G.pickups) if (pk.kind === 'cash') somme += pk.amount;
+  return somme + (G.encaisse || 0);
+}
+
+test('l\'argent se conserve à CHAQUE PAS de la VRAIE simulation, sur les quatre tables et les cinq modes', () => {
+  // Jusqu'ici cette conservation n'était prouvée que sur un modèle pur des transferts écrit dans ce
+  // fichier — un modèle est d'accord avec lui-même par construction. C'est elle qui fonde
+  // `purseBound`, donc le SEUL plafond de paiement qui existe : elle doit se vérifier sur le code
+  // qui décide vraiment, pas sur une paraphrase.
+  let kills = 0, auSol = 0, encaissements = 0, plusGrosse = 0, ramasses = 0;
+  const modes = Object.values(C.MODES);
+  for (let mi = 0; mi < modes.length; mi++){
+    const mode = modes[mi];
+    for (let ti = 0; ti < C.TIERS.length; ti++){
+      const stake = C.TIERS[ti].stake, seats = C.seatsOf(mode);
+      const totalCents = C.toCents(stake) * seats;
+      // Une moitié des combinaisons part du coup d'envoi, l'autre d'un gaz déjà bien refermé :
+      // sans cela, aucune partie de vingt-cinq secondes ne verrait jamais une mort par le gaz.
+      const tard = ti % 2 === 1 ? C.zoneTotalS(C.zonePlan(700 + mi * 4 + ti, mode)) * 0.62 : 0;
+      const G = bancNeuf(mode, stake, 700 + mi * 4 + ti, tard);
+      const ou = n => `${mode.id} · ${stake}$ · départ ${Math.round(tard)}s · pas ${n}`;
+      assert.strictEqual(C.toCents(argentTotal(G)), totalCents, `${mode.id} · ${stake}$ : la mise de départ`);
+      for (let n = 0; n < 1500; n++){
+        const evts = pasDeBanc(G);
+        assert.strictEqual(C.toCents(argentTotal(G)), totalCents,
+          `${ou(n)} : de l'argent apparaît ou disparaît`);
+        for (const e of G.ents){
+          assert.ok(e.cubes <= C.CUBE.max, `${ou(n)} : ${e.name} porte ${e.cubes} cubes`);
+          assert.ok(e.pouch >= 0 && C.toCents(e.pouch) <= totalCents, `${ou(n)} : sacoche hors borne (${e.pouch})`);
+          if (e.pouch > plusGrosse) plusGrosse = e.pouch;
+        }
+        for (const ev of evts){
+          if (ev.type === 'mort' && ev.sacoche > 0){ if (ev.transfert) kills++; else auSol++; }
+          if (ev.type === 'encaissement') encaissements++;
+          if (ev.type === 'ramassage' && ev.kind === 'cash') ramasses++;
+        }
+      }
+    }
+  }
+  // Sans ces bornes, le test passerait sur une partie où personne ne touche personne.
+  assert.ok(kills > 20, `seulement ${kills} sacoches transférées par un kill`);
+  assert.ok(auSol > 0, `aucune sacoche lâchée au sol en ${1500} pas × 20 combinaisons`);
+  assert.ok(encaissements > 0, `aucun encaissement de bot`);
+  // Les seuils restent bas à dessein : une partie est un système chaotique, une différence d'un
+  // dernier bit sur `Math.sin` au premier pas change tout ce qui suit. Ce qu'ils gardent, c'est que
+  // le banc a bien PARCOURU les quatre chemins, pas qu'il les parcourt un nombre de fois donné.
+  assert.ok(ramasses > 0, `aucune sacoche ramassée au sol`);
+  assert.ok(plusGrosse > C.TIERS[3].stake, 'aucune sacoche n\'a jamais grossi');
+});
+
+// Un banc NU : une arène vide, sans mur, sans caisse, sans gaz, où l'on pose exactement ce dont on
+// a besoin. Les tests qui suivent parlent d'une règle à la fois, et une carte tirée d'une graine y
+// ajouterait du bruit sans rien prouver de plus.
+function areneNue(mode, stake){
+  const cells = new Uint8Array(C.MAP * C.MAP);
+  const G = { cells, time: 20, pas: 0, evts: [], running: true, stake: stake === undefined ? 0.5 : stake,
+              modeCfg: mode || C.MODES.solo, alea: C.makeFlux(99), nextEid: 0,
+              ents: [], boxes: [], pickups: [], projs: [], zones: [], turrets: [], smokes: [], nades: [],
+              dmgDealt: 0, looted: 0, lostPouch: 0, encaisse: 0,
+              zonePlan: C.zonePlan(99, mode || C.MODES.solo),
+              zone: { cx: C.MAP / 2, cz: C.MAP / 2, r: C.MAP, dps: 0 } };
+  return G;
+}
+function poser(G, nom, x, z, team, brawler, isPlayer){
+  const e = SIMU.makeEntity(G, nom, x, z, G.stake, !!isPlayer, brawler || C.BRAWLERS.bolt, 0.6, team);
+  e.lives = C.livesFor(G.modeCfg);
+  G.ents.push(e);
+  if (isPlayer || !G.player) G.player = G.player || e;
+  return e;
+}
+
+test('les trois chemins de la sacoche : un kill la transfère entière, le gaz la lâche au sol, l\'encaissement la met à zéro', () => {
+  const mise = 0.5;
+  // 1. LE KILL. La sacoche passe entière à qui a porté le coup, et rien ne tombe par terre.
+  {
+    const G = areneNue(C.MODES.solo, mise);
+    const tueur = poser(G, 'tueur', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+    const mort = poser(G, 'mort', 62.5, 60.5, 1, C.BRAWLERS.bolt);
+    mort.pouch = 3.5; tueur.pouch = 1;
+    const avant = argentTotal(G);
+    SIMU.kill(G, mort, tueur, 'shot');
+    assert.strictEqual(tueur.pouch, 4.5, 'la sacoche doit passer ENTIÈRE');
+    assert.strictEqual(mort.pouch, 0);
+    assert.strictEqual(G.pickups.filter(p => p.kind === 'cash').length, 0, 'rien ne tombe quand il y a quelqu\'un à créditer');
+    assert.strictEqual(argentTotal(G), avant);
+  }
+  // 2. LE GAZ. Personne à créditer : elle tombe au sol, pour le montant exact, et l'argent reste
+  // dans la partie — c'est la seule chose qui empêche une mort de faire disparaître de l'argent.
+  {
+    const G = areneNue(C.MODES.solo, mise);
+    const v = poser(G, 'gazé', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+    poser(G, 'autre', 70.5, 70.5, 1, C.BRAWLERS.bolt);
+    v.pouch = 2.5;
+    const avant = argentTotal(G);
+    SIMU.kill(G, v, null, 'gas');
+    assert.strictEqual(v.pouch, 0);
+    const sacs = G.pickups.filter(p => p.kind === 'cash');
+    assert.strictEqual(sacs.length, 1, 'la sacoche doit tomber au sol');
+    assert.strictEqual(sacs[0].amount, 2.5);
+    assert.strictEqual(argentTotal(G), avant, 'le gaz ne doit pas manger d\'argent');
+    // et elle se ramasse, entière, par n'importe qui
+    const r = G.ents[1]; r.x = sacs[0].x; r.z = sacs[0].z;
+    SIMU.collect(G, r, sacs[0]);
+    assert.strictEqual(r.pouch, mise + 2.5);
+    assert.strictEqual(argentTotal(G), avant);
+  }
+  // 3. L'ENCAISSEMENT. La sacoche sort de la partie : elle est mise à zéro ET comptée dans
+  // `G.encaisse`. Sans ce compteur, la conservation serait fausse dès le premier bot qui encaisse.
+  {
+    const G = areneNue(C.MODES.resurgence, mise);
+    poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+    const b = poser(G, 'bot', 64.5, 60.5, 1, C.BRAWLERS.bolt);
+    b.pouch = 7;
+    const avant = argentTotal(G);
+    SIMU.botCashOut(G, b);
+    assert.strictEqual(b.pouch, 0);
+    assert.strictEqual(b.cashedOut, true);
+    assert.strictEqual(G.encaisse, 7);
+    assert.strictEqual(argentTotal(G), avant, 'l\'argent encaissé doit rester compté quelque part');
+  }
+});
+
+test('aucun dégât ne passe pendant GRACE, ni sur un coéquipier, ni sur un invulnérable', () => {
+  const G = areneNue();
+  const a = poser(G, 'a', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+  const b = poser(G, 'b', 62.5, 60.5, 1, C.BRAWLERS.bolt);
+  const c = poser(G, 'c', 60.5, 62.5, 0, C.BRAWLERS.bolt);
+  const plein = b.hp;
+  // La protection d'apparition est une durée de PARTIE, pas d'horloge : elle se lit sur G.time.
+  G.time = C.GRACE - 0.001;
+  SIMU.damage(G, b, 40, a);
+  assert.strictEqual(b.hp, plein, 'un dégât est passé pendant la protection d\'apparition');
+  G.time = C.GRACE;
+  SIMU.damage(G, c, 40, a);
+  assert.strictEqual(c.hp, plein, 'un coéquipier a pris des dégâts');
+  b.invuln = 1;
+  SIMU.damage(G, b, 40, a);
+  assert.strictEqual(b.hp, plein, 'un invulnérable a pris des dégâts');
+  b.invuln = 0;
+  SIMU.damage(G, b, 40, a);
+  assert.ok(b.hp < plein, 'et hors de ces trois cas, le dégât doit passer');
+  // Aucun des trois refus n'a produit d'événement : ce qui n'arrive pas ne s'affiche pas.
+  assert.strictEqual(G.evts.filter(e => e.type === 'degat').length, 1);
+});
+
+test('les dégâts comptés au joueur sont plafonnés aux points de vie restants de sa cible', () => {
+  const G = areneNue();
+  const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+  const lui = poser(G, 'lui', 62.5, 60.5, 1, C.BRAWLERS.bolt);
+  lui.hp = 12;
+  SIMU.damage(G, lui, 500, moi);
+  assert.strictEqual(G.dmgDealt, 12, 'le surplus d\'un coup de grâce ne doit pas gonfler la statistique');
+  assert.strictEqual(lui.alive, false);
+});
+
+test('les cubes ne dépassent jamais CUBE.max, et les points de vie suivent', () => {
+  const G = areneNue();
+  const e = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+  for (let i = 0; i < C.CUBE.max + 8; i++){
+    G.pickups.push({ kind: 'cube', x: e.x, z: e.z, amount: 1, owner: null, ph: 0 });
+    SIMU.collect(G, e, G.pickups[G.pickups.length - 1]);
+  }
+  assert.strictEqual(e.cubes, C.CUBE.max);
+  assert.strictEqual(e.hp, C.maxHp(e.brawler, C.CUBE.max));
+  // Et un cube ramassé au-delà du plafond ne soigne pas non plus : sinon il deviendrait un cœur.
+  e.hp = 10;
+  G.pickups.push({ kind: 'cube', x: e.x, z: e.z, amount: 1, owner: null, ph: 0 });
+  SIMU.collect(G, e, G.pickups[G.pickups.length - 1]);
+  assert.strictEqual(e.hp, 10);
+});
+
+test('le critique reste la règle des trois tirs de critShot, et personne n\'en a écrit une seconde', () => {
+  // On ne relit pas le code : on tire. Le troisième tir qui touche la même cible dans la fenêtre
+  // passe à x1.5, et le quatrième repart de zéro. C'est `C.critShot` qui le dit, et le test le
+  // vérifie contre elle, pas contre un nombre recopié ici.
+  const G = areneNue();
+  const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.bolt, true);
+  const lui = poser(G, 'lui', 64.5, 60.5, 1, C.BRAWLERS.bolt);
+  lui.hp = 1e6;
+  const crits = [];
+  for (let tir = 0; tir < 9; tir++){
+    moi.fireCd = 0; moi.ammo = 3;
+    SIMU.attack(G, moi, 1, 0, 4);
+    for (let n = 0; n < 60 && G.projs.length; n++) SIMU.projUpdate(G, PAS);
+    const d = G.evts.filter(e => e.type === 'degat');
+    G.evts = [];
+    assert.ok(d.length > 0, `le tir ${tir} n'a rien touché`);
+    crits.push(d.some(e => e.crit));
+  }
+  // La rafale compte pour UN tir : `attack` incrémente `shotId` une fois, et la première balle qui
+  // touche décide pour toute la série.
+  const attendu = [];
+  let etat = null;
+  for (let tir = 0; tir < 9; tir++){
+    const r = C.critShot(etat, lui.id, G.time, C.critWindow(moi.brawler));
+    etat = r.state; attendu.push(r.crit);
+  }
+  assert.deepStrictEqual(crits, attendu, 'la série des critiques ne suit plus critShot');
+  assert.deepStrictEqual(crits.slice(0, 6), [false, false, true, false, false, true],
+    'la règle des trois tirs a changé sans que personne ne le dise');
+  // Et une seule règle décide : un seul appel à critShot dans tout le fichier hors de WBCore.
+  assert.strictEqual(compte(sim + JEU, /critShot\(/g), 1, 'une seconde règle de critique est apparue');
+  assert.ok(!html.includes('CRIT_TEST'), 'CRIT_TEST est de retour');
+  assert.ok(!html.includes('BOT_CRIT ='), 'un second interrupteur de critique est apparu');
+});
+
+// ---------- la collision balayée ----------
+// Reconstruction de l'ANCIEN test, ponctuel, tel qu'il était avant ce module : on avance la balle
+// d'un pas entier, puis on regarde si son centre est à moins de 0,62 du corps. Elle vit ici, dans
+// le test, pour que « la balle ne traverse plus » soit une affirmation vérifiable et pas une
+// intention : sans elle, un test qui touche ne prouverait pas que l'ancien code, lui, manquait.
+function ancienTestPonctuel(x0, z0, dx, dz, spd, portee, cx, cz, rayon){
+  const step = spd * PAS;
+  let x = x0, z = z0, parcouru = 0;
+  for (let n = 0; n < 4000; n++){
+    x += dx * step; z += dz * step; parcouru += step;
+    if (parcouru >= portee) return false;
+    if (C.dist(cx - x, cz - z) < rayon) return true;
+  }
+  return false;
+}
+function tirer(G, tireur, spec, dx, dz){
+  SIMU.spawnProjectile(G, tireur, dx, dz, spec, false, 0);
+  for (let n = 0; n < 4000 && G.projs.length; n++) SIMU.projUpdate(G, PAS);
+}
+
+test('collision balayée : le cas qui tunnellait — un tir rapide ne frôle plus un corps sans le toucher', () => {
+  // LE CAS, en clair. Le super de HEX vole à 36 blocs par seconde : au pas fixe il avance de 0,6
+  // bloc par pas. Un brawler posté à 0,58 bloc sur le côté de la trajectoire, à mi-chemin entre
+  // deux pas, est à 0,66 de chacun des deux points échantillonnés — donc hors des 0,62 du test
+  // ponctuel — alors que le SEGMENT parcouru passe à 0,58 de lui. L'ancien code le manquait ; le
+  // nouveau le touche, parce qu'il teste le trajet et non deux instantanés.
+  const spec = C.BRAWLERS.hex.super;
+  const step = spec.speed * PAS;
+  const G = areneNue();
+  const moi = poser(G, 'moi', 40.5, 60.5, 0, C.BRAWLERS.hex, true);
+  const x0 = moi.x + 0.6;                                   // la balle naît 0,6 devant son tireur
+  const cible = poser(G, 'lui', x0 + step * 2.5, 60.5 + 0.58, 1, C.BRAWLERS.bolt);
+  const pv = cible.hp;
+  assert.ok(!ancienTestPonctuel(x0, moi.z, 1, 0, spec.speed, spec.range, cible.x, cible.z, 0.62),
+    'le cas choisi ne tunnellait pas : le test ne prouverait rien');
+  tirer(G, moi, spec, 1, 0);
+  assert.ok(cible.hp < pv, 'le tir passe encore à travers le corps');
+});
+
+test('collision balayée : à toute vitesse, même bien au-delà de ce que le jeu embarque, la balle ne traverse plus', () => {
+  // Le pas fixe du module 1 a BORNÉ le tunnel, il ne l'a pas supprimé, et il l'a rendu
+  // déterministe. Ce test le dit autrement : la collision ne doit plus dépendre du pas du tout.
+  // Les vitesses au-delà de 36 ne sont embarquées par aucun brawler aujourd'hui — elles sont là
+  // pour que la propriété tienne le jour où quelqu'un en écrira une, ou changera SIM.stepS.
+  let tunnelsAvant = 0;
+  for (const spd of [26, 36, 60, 120, 300]){
+    const spec = { n: 1, dmg: 30, speed: spd, range: 40, kind: 'burst' };
+    const G = areneNue();
+    const moi = poser(G, 'moi', 20.5, 60.5, 0, C.BRAWLERS.hex, true);
+    const cible = poser(G, 'lui', 20.5 + 0.6 + spd * PAS * 3.5, 60.5, 1, C.BRAWLERS.brick);
+    const pv = cible.hp;
+    if (!ancienTestPonctuel(moi.x + 0.6, moi.z, 1, 0, spd, spec.range, cible.x, cible.z, 0.62)) tunnelsAvant++;
+    tirer(G, moi, spec, 1, 0);
+    assert.ok(cible.hp < pv, `à ${spd} blocs par seconde, le tir traverse encore le corps`);
+  }
+  assert.ok(tunnelsAvant >= 2, 'aucune des vitesses testées ne tunnellait : le test ne prouve rien');
+});
+
+test('collision balayée : un mur d\'UNE case arrête la balle, et personne n\'est touché derrière', () => {
+  for (const spd of [36, 120, 300]){
+    const spec = { n: 1, dmg: 40, speed: spd, range: 40, kind: 'burst' };
+    const G = areneNue();
+    G.cells[70 * C.MAP + 60] = 1;                            // un seul bloc de pierre, sur le trajet
+    const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.hex, true);
+    const derriere = poser(G, 'lui', 75.5, 60.5, 1, C.BRAWLERS.brick);
+    const pv = derriere.hp;
+    tirer(G, moi, spec, 1, 0);
+    assert.strictEqual(derriere.hp, pv, `à ${spd} blocs par seconde, la balle passe à travers un mur d'une case`);
+    assert.strictEqual(G.projs.length, 0, 'la balle doit mourir, pas survivre au mur');
+  }
+  // Et elle meurt AU mur, pas derrière : sinon l'impact se verrait de l'autre côté de la pierre.
+  const spec = { n: 1, dmg: 40, speed: 300, range: 40, kind: 'burst' };
+  const G = areneNue();
+  G.cells[70 * C.MAP + 60] = 1;
+  const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.hex, true);
+  SIMU.spawnProjectile(G, moi, 1, 0, spec, false, 0);
+  const p = G.projs[0];
+  for (let n = 0; n < 4000 && G.projs.length; n++) SIMU.projUpdate(G, PAS);
+  // Le mur commence à x=70. Le balayage échantillonne tous les quarts de case : la balle meurt
+  // donc au plus un quart de case DANS la pierre, jamais de l'autre côté — à 300 blocs par
+  // seconde, un pas entier en vaut cinq.
+  assert.ok(p.x >= 70 && p.x <= 70.26, `la balle est morte à ${p.x}, et le mur occupe [70, 71)`);
+});
+
+test('collision balayée : les tourelles et les caisses sont balayées elles aussi', () => {
+  const spec = { n: 1, dmg: 40, speed: 200, range: 40, kind: 'burst' };
+  {
+    const G = areneNue();
+    const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.hex, true);
+    poser(G, 'lui', 90.5, 90.5, 1, C.BRAWLERS.bolt);
+    G.boxes.push({ x: 68.5, z: 60.5, hp: C.BOX_HP, ph: 0 });
+    tirer(G, moi, spec, 1, 0);
+    assert.ok(G.boxes[0].hp < C.BOX_HP, 'la balle traverse encore une caisse');
+  }
+  {
+    const G = areneNue();
+    const moi = poser(G, 'moi', 60.5, 60.5, 0, C.BRAWLERS.hex, true);
+    const autre = poser(G, 'lui', 90.5, 90.5, 1, C.BRAWLERS.bolt);
+    G.turrets.push({ x: 68.5, z: 60.5, ax: 0, az: 0, hp: 200, maxHp: 200, owner: autre,
+                     life: 20, cd: 1, spec: C.BRAWLERS.ward.super.shot, fireRate: 1, flash: 0, name: 't' });
+    tirer(G, moi, spec, 1, 0);
+    assert.ok(G.turrets[0].hp < 200, 'la balle traverse encore une tourelle');
+  }
+});
+
+test('l\'ordre de résolution est figé : ni tri, ni parcours de Set, ni clé d\'objet dans le bloc SIM', () => {
+  // Le déterminisme du rejeu tient à ce qu'un même pas résolve toujours les mêmes touches dans le
+  // même ordre. Trois façons de le perdre en silence, et les trois sont interdites ici.
+  const s = sansCommentaires(sim);
+  assert.strictEqual(compte(s, /\.sort\(/g), 0,
+    'un tri est apparu dans SIM : sa stabilité n\'est pas une propriété sur laquelle un rejeu peut s\'appuyer');
+  assert.strictEqual(compte(s, /\bfor\s*\(\s*(?:const|let|var)\s+[\w$]+\s+in\s/g), 0,
+    'un for..in est apparu : l\'ordre des clés d\'un objet ne décide de rien');
+  assert.strictEqual(compte(s, /Object\.(keys|values|entries)\(/g), 0,
+    'SIM parcourt les clés d\'un objet : ce n\'est pas un ordre sur lequel s\'appuyer');
+  // `p.hit` et `e.dashHit` sont des Set, et ils ne servent QU'À l'appartenance. Les parcourir
+  // ferait dépendre une résolution de l'ordre d'insertion d'un ensemble, ce que rien ne garantit
+  // d'un moteur à l'autre.
+  for (const m of s.match(/\.(hit|dashHit)\b[^\s]?/g) || [])
+    assert.ok(/\.(hit|dashHit)[.=]/.test(m), `un Set est manipulé autrement que par appartenance : ${m}`);
+  for (const m of s.match(/\.(hit|dashHit)\.\w+/g) || [])
+    assert.ok(/\.(has|add)$/.test(m), `${m} : un Set ne doit servir qu'à \`has\` et \`add\``);
+  assert.strictEqual(compte(s, /of\s+\w+\.(hit|dashHit)/g), 0, 'un Set est parcouru pour décider d\'un ordre');
+  // Et l'ordre des candidats est bien celui de l'insertion, avec une clé TOTALE : distance le long
+  // du segment, puis rang d'insertion. Sans le second terme, deux touches à égalité seraient
+  // départagées par le hasard de l'implémentation.
+  assert.match(s, /c\.t===m\.t&&c\.ordre<m\.ordre/, 'la clé d\'ordre a perdu son départage');
+});
+
+test('le flux d\'événements : SIM ne sonne plus, il RACONTE — et chaque événement est horodaté en pas', () => {
+  // La panne que cette garde empêche est SILENCIEUSE : une seule ligne de rendu qui survit dans
+  // une règle, et le bloc cesse de tourner dans Node sans que rien ne casse dans le navigateur.
+  for (const interdit of ['snd(', 'floatText(', 'feed(', 'endMatch(', 'botSay(', 'sendEmote(', 'deathSting(', 'critFx('])
+    assert.ok(!sim.includes(interdit), `« ${interdit} » a survécu dans le code descendu dans SIM`);
+  // Les dix-huit fonctions du module vivent dans SIM et NULLE PART ailleurs. `corpsDe` lance si
+  // l'une d'elles est déclarée dans les deux blocs — le patron du `respawn()` défini deux fois.
+  for (const nom of ['attack', 'fireSpec', 'spawnProjectile', 'projUpdate', 'explode', 'useSuper',
+                     'dashUpdate', 'zonesUpdate', 'damage', 'kill', 'hurtBox', 'spawnPickup',
+                     'collect', 'respawn', 'botCashOut', 'hurtTurret', 'checkTeams', 'doCashOut'])
+    assert.ok(sim.includes('\nfunction ' + nom + '('), `${nom} n'est pas descendue dans SIM`);
+  // Et il tourne : une vraie partie de banc produit les cinq familles que la spécification exige.
+  const G = bancNeuf(C.MODES.solo, 0.5, 31);
+  // Une grenade dans la poche de chacun : elles ne tombent que des caisses, à une sur cinq, et
+  // sans ce coup de pouce le banc pourrait ne jamais en voir une en deux mille pas.
+  for (const e of G.ents) e.gadget = C.smokePicked(e.gadget);
+  const vus = new Map();
+  for (let n = 0; n < 2200; n++){
+    for (const ev of pasDeBanc(G)){
+      assert.strictEqual(ev.pas, G.pas, `un événement ${ev.type} horodaté ${ev.pas} au pas ${G.pas}`);
+      assert.ok(Number.isInteger(ev.pas) && ev.pas > 0, 'un événement doit être horodaté EN PAS');
+      vus.set(ev.type, (vus.get(ev.type) || 0) + 1);
+    }
+  }
+  for (const nom of ['tir', 'degat', 'mort', 'ramassage', 'nuage'])
+    assert.ok(vus.get(nom) > 0, `aucun événement « ${nom} » en 2200 pas`);
+  // Les noms sont FERMÉS : un type inconnu ne serait traduit par personne, en silence.
+  const connus = new Set(['tir', 'degat', 'mort', 'ramassage', 'nuage', 'explosion', 'super',
+                          'gadget', 'detruit', 'encaissement', 'reapparition', 'fin']);
+  for (const nom of vus.keys()) assert.ok(connus.has(nom), `événement inconnu : ${nom}`);
+  // Le bloc `Game` traduit chacun de ces noms, et rien d'autre : un événement produit et jamais lu
+  // serait un son qui disparaît sans que rien ne casse.
+  const lecteur = sansCommentaires(corpsDe('rendreEvenements'));
+  for (const nom of connus) assert.ok(lecteur.includes(`case '${nom}'`), `le rendu ne lit pas « ${nom} »`);
+});
+
+test('un seul écrivain par table annexe : syncMeshes, syncMonde et hudFast, et personne d\'autre', () => {
+  // Le module 3 avait posé la règle pour les corps de brawlers. Les corps des projectiles, des
+  // caisses, du butin, des zones, des tourelles, des grenades et des nuages la rejoignent ici, et
+  // les étiquettes du DOM au-dessus des têtes avec eux — `e.lbl` était le dernier pointeur de
+  // rendu posé sur un fait de partie.
+  const jeu = sansCommentaires(JEU);
+  assert.strictEqual(compte(jeu, /VIS\.get\(/g), 1, 'un second site lit la table des corps annexes');
+  assert.strictEqual(compte(jeu, /LABELS\.get\(/g), 1, 'un second site lit la table des étiquettes');
+  assert.ok(sansCommentaires(corpsDe('syncMonde')).includes('VIS.get('), 'l\'unique lecteur de VIS doit être syncMonde');
+  assert.ok(sansCommentaires(corpsDe('etiquette')).includes('LABELS.get('), 'l\'unique lecteur de LABELS doit être hudFast, par etiquette');
+  assert.strictEqual(compte(jeu, /\bsyncMonde\(/g), 2, 'syncMonde doit être déclarée une fois et appelée une fois');
+  assert.ok(sansCommentaires(corpsDe('loop')).includes('syncMonde(dt);'), 'la recopie se fait une fois par image');
+  // Et plus une seule fonction de simulation ne porte de pointeur de rendu.
+  for (const nom of ['projUpdate', 'hurtBox', 'spawnPickup', 'zonesUpdate', 'spawnSmoke', 'nadesUpdate',
+                     'smokesUpdate', 'useSuper', 'hurtTurret', 'throwSmoke', 'collect', 'explode'])
+    for (const attache of ['.mesh', '.lbl', 'world.', 'discard('])
+      assert.ok(!sansCommentaires(corpsDe(nom)).includes(attache),
+        `${nom} touche de nouveau au rendu (${attache})`);
+});
+
+test('bac à sable : le combat, la mort et le butin tournent avec document, window, THREE, Math.random, Date.now et performance indéfinis', () => {
+  // La même garde que le module 3, étendue à ce que ce module a descendu. Le bloc ne se contente
+  // pas de se CHARGER là-dedans : il y joue une escarmouche complète.
+  const sansRandom = new Proxy(Math, { get: (t, p) => p === 'random' ? undefined : Reflect.get(t, p) });
+  const sansNow = new Proxy(Date, { get: (t, p) => p === 'now' ? undefined : Reflect.get(t, p) });
+  const bac = new Function('module', 'exports', 'WBCore', 'document', 'window', 'THREE', 'performance',
+                           'localStorage', 'fetch', 'requestAnimationFrame', 'Math', 'Date', sim);
+  const m = { exports: {} };
+  bac(m, m.exports, C, undefined, undefined, undefined, undefined, undefined, undefined, undefined, sansRandom, sansNow);
+  const Z = m.exports;
+  const cells = new Uint8Array(C.MAP * C.MAP);
+  const G = { cells, time: 20, pas: 0, evts: [], running: true, stake: 0.5, modeCfg: C.MODES.resurgence,
+              alea: C.makeFlux(5), nextEid: 0, ents: [], boxes: [], pickups: [], projs: [], zones: [],
+              turrets: [], smokes: [], nades: [], dmgDealt: 0, looted: 0, lostPouch: 0, encaisse: 0,
+              zone: { cx: C.MAP / 2, cz: C.MAP / 2, r: C.MAP, dps: 0 } };
+  const a = Z.makeEntity(G, 'a', 60.5, 60.5, 0.5, true, C.BRAWLERS.hex, 0.6, 0);
+  const b = Z.makeEntity(G, 'b', 64.5, 60.5, 0.5, false, C.BRAWLERS.brick, 0.6, 1);
+  a.lives = 3; b.lives = 3; G.ents.push(a, b); G.player = a;
+  G.boxes.push({ x: 62.5, z: 60.5, hp: C.BOX_HP, ph: 0 });
+  for (let n = 0; n < 900; n++){
+    G.pas++; G.time += C.SIM.stepS;
+    for (const e of G.ents){
+      if (!e.alive) continue;
+      e.fireCd -= C.SIM.stepS;
+      if (e.ammo < 3){ e.ammoT += C.SIM.stepS; if (e.ammoT >= e.brawler.ammoReload){ e.ammo++; e.ammoT = 0; } }
+      const o = e === a ? b : a; if (!o.alive) continue;
+      const d = C.dist(o.x - e.x, o.z - e.z) || 1;
+      Z.attack(G, e, (o.x - e.x) / d, (o.z - e.z) / d, d);
+      if (e.super >= e.brawler.super.cost) Z.useSuper(G, e, d);
+      Z.throwSmoke(G, e, d);
+      for (let i = G.pickups.length - 1; i >= 0; i--) Z.collect(G, e, G.pickups[i]);
+    }
+    Z.projUpdate(G, C.SIM.stepS); Z.zonesUpdate(G, C.SIM.stepS);
+    Z.nadesUpdate(G, C.SIM.stepS); Z.smokesUpdate(G, C.SIM.stepS);
+    for (const e of G.ents) if (e.respawnT > 0){ e.respawnT -= C.SIM.stepS; if (e.respawnT <= 0) Z.respawn(G, e); }
+    G.evts = [];
+  }
+  assert.ok(G.boxes[0].hp < C.BOX_HP, 'la caisse n\'a jamais été touchée : le banc n\'a rien fait');
+  assert.ok(a.kills + b.kills > 0, 'personne n\'est mort : le bac à sable n\'a pas vraiment joué');
+  // Et rien de tout cela n'a posé un pointeur de rendu sur un fait de partie.
+  for (const e of G.ents) for (const champ of ['mesh', 'lbl', 'lblMn'])
+    assert.ok(!(champ in e), `une entité porte de nouveau « ${champ} »`);
+  for (const p of G.projs) assert.ok(!('mesh' in p), 'un projectile porte un objet de la scène');
+  for (const pk of G.pickups) assert.ok(!('mesh' in pk) && !('shadow' in pk), 'un butin porte un objet de la scène');
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

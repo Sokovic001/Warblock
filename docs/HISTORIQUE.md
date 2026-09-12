@@ -41,6 +41,8 @@ ce qui a suivi découle de ce choix.
 | **L'idempotence est arbitrée par la base, jamais par un `select` préalable** | Même doctrine que `name_key` : demander « est-ce libre ? » puis insérer laisse une fenêtre entre les deux. Trois clés nommées — `(user_id, client_key)`, l'index partiel « un seul billet ouvert », `(match_id)` pour le règlement. La clé fournie par le client n'est pas un détail : sans elle, un `POST` dont la réponse se perd est indistinguable d'un `POST` jamais arrivé. |
 | **Un rapport de partie refuse les champs inconnus ; un profil les ignore** | `PATCH /api/me` peut ignorer le superflu sans conséquence. Sur un corps qui décide d'un montant, le silence est la mauvaise valeur par défaut : tout champ inconnu vaut un refus, avec un code. La même indulgence aux deux endroits aurait été une règle uniforme et fausse. |
 | **Le rendu lit l'état, il ne le produit plus — et il n'a qu'un seul écrivain** | Le module 3 de la phase 02b a sorti la grille, le mouvement et la vue du bloc `Game`. Un troisième `<script>` est une **frontière de portée dure** : le `G` de portée lexicale disparaît et devient un paramètre explicite, ce qui est le coût réel du déplacement. Le reste est une discipline : les corps des entités vivent dans une table annexe du bloc `Game`, indexée par un identifiant d'insertion, et un **unique** `syncMeshes()` les recopie depuis l'état, une fois par image. Laisser la simulation porter un pointeur vers la scène « le temps de la transition » aurait été le patron du `respawn()` défini deux fois : la copie vivante finit du côté que rien n'exécute, et la panne est muette. |
+| **La simulation raconte, elle ne sonne plus** | Le module 4 de la phase 02b a descendu les tirs, les dégâts, la mort et le butin dans `WBSim`. Ces fonctions-là appelaient le synthétiseur, posaient des nombres flottants à l'écran et, pour `kill`, ouvraient directement l'écran de fin. Tant qu'une seule de ces attaches subsiste, le bloc cesse de tourner dans Node — et **rien ne casse dans le navigateur**, donc personne ne s'en aperçoit. Elles rendent désormais une liste d'**événements** horodatés en pas, aux douze noms fermés, que le bloc `Game` traduit. Le corollaire coûte une ligne mais il vaut d'être écrit : le jour où il manquera un bruitage, le premier réflexe sera de rappeler `snd()` depuis SIM, et c'est ce jour-là que la garde tombe. D'où une garde textuelle **permanente**, commentaires compris. |
+| **L'argent qui sort d'une partie doit avoir un compteur** | Un bot qui encaisse voyait sa sacoche remise à zéro, et l'argent disparaissait purement et simplement de la partie. Aucun test ne pouvait le voir : la conservation n'était vérifiée que sur un **modèle** des transferts écrit dans `test.js`, et un modèle est d'accord avec lui-même par construction. Le module 4 a fait tourner la vraie simulation et la conservation a demandé un `G.encaisse` pour tomber juste. C'est la même leçon que le pot forfaitaire ressuscité : **une propriété se vérifie contre le code qui décide, jamais contre une paraphrase de ce code.** |
 | **Un déplacement de code se prouve par un corpus gelé, jamais par ses invariants** | Les tests d'invariants diraient la même chose d'un code qui aurait changé en restant juste. La seule preuve qu'un code a bougé **sans changer** est une capture faite **avant** le déplacement, comparée exactement après. `corpus-grille.json` est donc une **donnée**, pas un test : le régénérer le viderait de tout sens. Il dit aussi ce qu'il ne couvre pas — rien du combat, rien des bots, rien de ce que le joueur voit. |
 | **Le chemin de secours du client se teste comme un cas normal, et s'écrit en premier** | `seedFor`, `matchFlow`, `reportFrom` et `checkReport` ont été livrées avant les routes, précisément pour geler le contrat que le serveur devrait servir. Le module qui branche le jeu est le dernier et porte tout le risque : s'il glissait, trois modules de serveur restaient du code mort que personne n'aurait vu tourner. |
 
@@ -317,25 +319,31 @@ la doublure prouve la doublure.
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
-- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 3 livrés sur sept. Le
+- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 4 livrés sur sept. Le
   serveur possède l'identité d'une partie, pas son déroulement. Ce qui a bougé : le pas est fixe,
-  le hasard de la simulation descend de la graine, et le bloc `WBSim` existe — la grille, le
-  mouvement, la vue, les points de départ et l'état d'une entité y vivent, et tournent dans Node.
-  Ce qui n'a pas bougé : **tirs, dégâts, butin et bots** vivent toujours dans le bloc `Game`, hors
-  de toute partie testée, et le solde reste modifiable depuis la console. Le verdict de 02a est une
-  **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter comme un
-  premier étage d'anti-triche.
+  le hasard de la simulation descend de la graine, le bloc `WBSim` existe, et les tirs, les dégâts,
+  la mort, le butin et le fumigène y sont descendus avec un flux d'événements que le rendu lit.
+  Ce qui n'a pas bougé : **les bots** vivent toujours dans le bloc `Game`, aucune partie entière ne
+  se joue encore sans navigateur, et le solde reste modifiable depuis la console. Le verdict de 02a
+  est une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter comme
+  un premier étage d'anti-triche.
 - **Aucune base n'a jamais tourné.** Les contraintes qui arbitrent l'unicité n'ont été éprouvées
   que contre une doublure.
 - **Aucun test ne regarde le jeu tourner.** Deux bugs de ce journal n'ont été trouvés que par un
   test navigateur, et il n'en existe pas de harnais. Depuis le module 3 de la phase 02b, `node
   test.js` fait bouger de vraies entités sur une vraie carte — mais des entités synthétiques, sur
-  des directions scriptées : c'est la couche mouvement qui est couverte, pas une partie. Le trou se
-  referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
+  des directions scriptées : c'est la couche mouvement qui est couverte, pas une partie. Depuis le
+  module 4, un **banc** fait aussi tirer, mourir, lâcher et ramasser vingt brawlers avec le vrai
+  code, sur les quatre tables et les cinq modes : c'est l'arithmétique de la partie qui est
+  couverte, pas sa dramaturgie — les bots y sont remplacés par une conduite de quelques lignes. Le
+  trou se referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
   ennuyeuses reste un humain qui joue une partie entière.
 - **La session de jeu réelle due après le module 1 n'a toujours pas eu lieu**, et elle a désormais
-  deux changements de ressenti à juger : le pas fixe, et la personnalité des bots qui a changé
-  d'un coup au module 2. Le module 3 n'en ajoute pas — c'est un déplacement, pas une règle.
+  **trois** changements de ressenti à juger : le pas fixe, la personnalité des bots qui a changé
+  d'un coup au module 2, et depuis le module 4 la portée réelle des tirs — la collision balayée
+  fait toucher des tirs qui frôlaient, surtout de près et surtout avec les armes rapides, et les
+  bots en profitent autant que le joueur. Le module 3 n'en ajoute pas : c'est un déplacement, pas
+  une règle. La spécification exige cette session **avant le module 5**.
 - **Cadre légal** avant tout argent réel, et la décision d'exploitation ci-dessus — la maison est
   la contrepartie de chaque pot — à trancher avant la phase 04.
 - **Icône définitive** : plusieurs directions explorées, décision non figée.

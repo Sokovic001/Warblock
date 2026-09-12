@@ -300,6 +300,27 @@ patron du `respawn()` défini deux fois — la copie vivante finit du côté que
 est textuelle et permanente, comme celle qui interdit un second lecteur du plan de zone : entre les
 marqueurs, ni `mesh`, ni `THREE`, ni `document`, ni `$(`, ni `snd(`, ni `floatText(`, ni `feed(`.
 
+*Fait au module 4, et c'est le contrat à ne pas laisser s'effriter.* `step()` ne sonne plus et
+n'écrit plus à l'écran : il remplit une liste d'événements horodatés **en pas**, que le bloc `Game`
+traduit. Les douze noms sont **fermés** — `tir`, `degat`, `mort`, `ramassage`, `nuage`, `explosion`,
+`super`, `gadget`, `detruit`, `encaissement`, `reapparition`, `fin` — et un test vérifie à la fois
+qu'aucun type inconnu n'est produit et que le lecteur les traduit tous : un événement émis que
+personne ne lit serait un son qui disparaît sans que rien ne casse. La garde textuelle du bloc
+s'étend à `endMatch(`, `botSay(`, `sendEmote(`, `deathSting(` et `critFx(` en plus des trois noms
+d'origine, parce que ce sont ceux-là que `kill` appelait. Deux conséquences à connaître : les
+vannes des bots se tirent désormais **du côté qui les prononce**, dans le lecteur d'événements, et
+`G.encaisse` est né — l'argent d'un bot qui encaisse quitte la partie, et sans un compteur pour le
+recevoir la conservation serait fausse dès le premier encaissement.
+
+Les corps des projectiles, des caisses, du butin, des zones, des tourelles, des grenades et des
+nuages ont rejoint le patron de la table annexe, dans `VIS`, balayée une fois par image par un
+unique `syncMonde()`. La table est indexée par **l'objet de simulation lui-même** : ces objets-là
+n'ont pas d'identifiant, ils vivent quelques secondes, et une clé inventée pour l'occasion aurait
+été une occasion de plus de se tromper de correspondance. Enfin `e.lbl` — le nœud DOM de
+l'étiquette au-dessus des têtes, dernier pointeur de rendu posé sur un fait de partie, signalé
+comme dette au module 3 — vit dans une troisième table, `LABELS`, dont `hudFast` est l'unique
+lecteur.
+
 *Fait au module 3, pour les entités, avec la précision qui manquait.* La table annexe est indexée
 par `eid`, un **compteur d'insertion neuf**, et non par `id`. C'est important et ce n'était écrit
 nulle part : `id` n'est pas un identifiant, c'est la **personnalité** d'un bot — un nombre tiré du
@@ -320,6 +341,20 @@ le **segment** parcouru dans le pas, corps comme murs.
 C'est une correction, pas un supplément, et elle change le jeu : des tirs qui traversaient vont
 toucher. Elle arrive dans le module du combat, nommée, pour qu'on sache à quoi imputer un changement
 de ressenti.
+
+*Fait au module 4, avec la mesure qui manquait et qui nuance la phrase ci-dessus.* Le pas est
+désormais fixe à 1/60 : le projectile le plus rapide du jeu, le super de HEX à 36 blocs par seconde,
+avance de **0,6 bloc par pas**, pas de 1,2. Une balle ne peut donc plus traverser de part en part un
+corps de 0,62 de rayon aux vitesses embarquées aujourd'hui — le module 1 a déjà fermé ce cas-là. Ce
+que le balayage corrige réellement, et qui reste entier sans lui : (1) le **frôlement** — un brawler
+posté à 0,58 bloc du trajet est à plus de 0,62 des deux instantanés qui l'encadrent, donc le test
+ponctuel le manquait alors que le segment passe à travers lui ; (2) le **mur pris en écharpe**, que
+deux échantillons distants de 0,6 pouvaient enjamber par un coin ; (3) le **dernier pas**, qui
+mourait de portée avant de tester quoi que ce soit et ne blessait donc jamais personne. S'y ajoute
+la seule chose qui compte pour la suite : la collision ne dépend plus du pas, donc plus de
+`SIM.stepS`. Les tests l'éprouvent jusqu'à 300 blocs par seconde, bien au-delà de tout ce que le jeu
+embarque, et ils reconstruisent l'ancien test ponctuel pour vérifier qu'il manquait bien le cas
+choisi — sans quoi un test qui touche ne prouverait rien.
 
 ### `CRIT_TEST` meurt
 
@@ -452,14 +487,14 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 | Ajouter un tirage à un endroit ne déplace rien ailleurs | un flux par usage : tirer N fois de plus dans `bots/visee` ne change pas la suite rendue par `butin/contenu` |
 | La géométrie tirée de la seule graine n'appelle aucune transcendante | garde textuelle sur `generateMap`, `generateBiomes`, `zonePlan`, `zoneAt`, `spawnPoints` : aucun `Math.cos`, `Math.sin`, `Math.hypot`, `Math.pow`, `Math.atan2`, `Math.exp` ; bac à sable où ces fonctions **lancent** |
 | Même graine et même trace donnent le même état final et la même empreinte | deux fois dans le processus et une fois dans un processus fils — le patron déjà employé pour `zonePlan` ; et changer **un seul** pas de la trace change l'empreinte, sans quoi elle ne prouve rien |
-| L'ordre de résolution est figé | `G.ents` garde un ordre d'insertion stable ; aucune itération de `Set`, de `Map` ou de clés d'objet ne décide d'un ordre de résolution ; aucun tri instable ; garde textuelle sur les sites concernés |
+| L'ordre de résolution est figé | `G.ents` garde un ordre d'insertion stable ; aucune itération de `Set`, de `Map` ou de clés d'objet ne décide d'un ordre de résolution ; aucun tri instable ; garde textuelle sur les sites concernés. *Livré au module 4 : dans le bloc SIM, zéro `.sort(`, zéro `for..in`, zéro `Object.keys/values/entries`, et `p.hit` comme `e.dashHit` ne connaissent que `has` et `add`. Les touches d'un même pas se résolvent par une clé **totale** — distance le long du segment, puis rang d'insertion — extraite par minimum successif plutôt que par un tri* |
 | Le code a bougé sans changer | corpus **gelé avant le déplacement** : les requêtes de grille et `moveEntity` rendent exactement les mêmes positions qu'avant, sur une trace capturée et figée dans `corpus-grille.json`, lue par `test.js`. *Livré au module 3 : huit graines, cent pas de `moveEntity` sur douze entités synthétiques, le glissement le long des murs, la ligne de vue de près comme de loin, et `spawnPoints` sur les cinq modes — comparés **exactement**, sans tolérance. Un second test vérifie que le corpus contient les deux réponses de chaque règle, sans quoi il passerait sur n'importe quel code* |
 | Une seule copie de chaque règle | `critShot`, `hexDamage`, `dmgMult`, `boxDrop`, `bucketAfterKill`, `cashoutPayout`, `segmentHitsDisc` restent **appelées** depuis `WBCore` ; garde textuelle contre une seconde règle de critique et contre le retour de `CRIT_TEST` ; `api/sim.js` charge le bloc depuis `index.html`, garde bruyante au démarrage |
-| Un seul écrivain de mesh dans `Game` | garde textuelle : un seul `syncMeshes()` écrit dans la scène ; aucun autre site n'écrit `.mesh.position` |
+| Un seul écrivain de mesh dans `Game` | garde textuelle : un seul `syncMeshes()` pour les corps de brawlers, un seul `syncMonde()` pour tout le reste, un seul `hudFast()` pour les étiquettes du DOM — trois tables annexes, trois lecteurs uniques, tous appelés depuis la boucle d'image et de nulle part ailleurs |
 | Le jeu tourne | sur dix graines et les cinq modes, une partie complète atteint une fin en moins de `zoneTotalS + GRACE`, personne ne termine coincé contre un mur, et le chien de garde `stuckT` est exercé pour de vrai |
-| Les tirs ne traversent plus les corps ni les murs | collision **balayée** par `WBCore.segmentHitsDisc` sur le segment d'un pas, éprouvée aux vitesses de projectile les plus hautes du jeu, corps comme murs |
+| Les tirs ne traversent plus les corps ni les murs | collision **balayée** par `WBCore.segmentHitsDisc` sur le segment d'un pas, corps comme murs. *Livré au module 4 : éprouvée jusqu'à 300 blocs par seconde, avec l'ancien test ponctuel reconstruit dans `test.js` pour prouver qu'il manquait bien le cas choisi, et la mort de la balle **au** mur vérifiée à un quart de case près* |
 | Les points d'apparition placent un corps entier | `spawnPoints` place chaque brawler là où son corps de 0,42 tient, sur deux cents graines et les cinq modes. **Le bug est déjà corrigé dans le code** ; ce qui manque est le test de non-régression, et le module le livre comme tel. *Fait au module 3 : `spawnPoints` étant descendue dans SIM, le test l'appelle telle quelle au lieu d'en extraire la source, et vérifie le placement avec un `free()` réécrit exprès — une seconde opinion, pas la même* |
-| La conservation de l'argent est vraie à chaque pas de la **vraie** simulation | à chaque pas d'une partie complète, sacoches des vivants + sacoches au sol + butin + encaissé = mise × sièges, sur les quatre tables et les cinq modes ; et **assertée une fois de plus au moment du règlement**, sur la partie réellement rejouée |
+| La conservation de l'argent est vraie à chaque pas de la **vraie** simulation | à chaque pas, sacoches + sacoches au sol + encaissé = mise × sièges, sur les quatre tables et les cinq modes ; et **assertée une fois de plus au moment du règlement**, sur la partie réellement rejouée. *Livré au module 4 sur un banc qui appelle les vraies fonctions de SIM — vingt combinaisons, mille cinq cents pas chacune, moitié au coup d'envoi et moitié dans un gaz déjà refermé. Ce n'est pas encore une partie entière : les bots descendent au module 5* |
 | Les trois chemins de la sacoche tiennent | un kill la transfère entière, une mort par gaz la lâche au sol, un encaissement la met à zéro |
 | Aucun montant ne vient du client | `net_cents` sort de la partie rejouée ; un corps dont les kills, la sacoche et la durée sont gonflés écrit une ligne **strictement identique** à celle d'un corps sincère — patron de la 02a étendu des paramètres aux faits |
 | Le rejeu du serveur et celui du jeu rendent la même empreinte | même trace, même empreinte, et le test dit **pourquoi** : c'est le même bloc de code, chargé deux fois |
@@ -492,7 +527,7 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 - **Tout ce qui change le ressenti arrive dans cette phase et rien ne peut le tester** : le pas fixe
   déplace des constantes réglées pour un écran à 60 images par seconde (`Math.min(1,dt*13)`,
   `Math.pow(0.02,dt)`, les rythmes de louvoiement des bots) ; la collision balayée fait toucher des
-  tirs qui traversaient ; les bots changent de source de hasard, donc de personnalité, tous d'un coup.
+  tirs qui frôlaient ; les bots changent de source de hasard, donc de personnalité, tous d'un coup.
   Les trois sont justes séparément. Le jour où le jeu se jouera mal, **rien ne dira lequel en est la
   cause**, et le seul juge est un humain qui joue une partie entière, sur téléphone comme sur
   ordinateur. Ce n'est pas budgétable, donc c'est écrit : une session de jeu réelle après le module 1
@@ -500,7 +535,11 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
   de ces changements — les bots ont tous changé de personnalité d'un coup, puisque leur `id` ne vient
   plus de `Math.random()` : nervosité, distance préférée, rythme d'esquive, et la moitié qui décroche
   contre la moitié qui reste. La session due après le module 1 n'a toujours pas eu lieu et elle a
-  maintenant deux changements à juger, pas un.*
+  maintenant deux changements à juger, pas un.* *Le module 4 a livré le deuxième : la collision balayée
+  fait toucher des tirs qui passaient à côté, surtout de près et surtout avec les armes rapides, et
+  les bots en profitent autant que le joueur. La session due a maintenant **trois** changements à
+  juger — pas fixe, personnalité des bots, portée réelle des tirs — et elle est due **avant le
+  module 5**, comme cette section l'exige depuis le début.*
 - **La trace est une surface d'attaque nouvelle** : corps volumineux, trace adversariale qui maximise
   le coût du rejeu, joueur qui rejoue en boucle. D'où une borne dure sur le nombre de pas, un budget
   de temps de calcul, une route séparée de celle qui règle l'argent, et la limitation de débit
@@ -534,7 +573,12 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
    passé en premier argument. Le corpus gelé — `corpus-grille.json`, capturé sur le code d'avant le
    déplacement — est une **donnée**, pas un test : il ne se régénère pas, sinon il ne prouve plus
    rien. Ce qu'il couvre est écrit à côté de lui dans `test.js`, ce qu'il ne couvre pas aussi.
-4. **Les faits : projectiles balayés, dégâts, mort, butin, flux d'événements.**
+4. **Les faits : projectiles balayés, dégâts, mort, butin, flux d'événements. Fait.** Dix-huit
+   fonctions sont descendues dans SIM — `attack`, `fireSpec`, `spawnProjectile`, `projUpdate`,
+   `explode`, `useSuper`, `dashUpdate`, `zonesUpdate`, `damage`, `kill`, `hurtBox`, `spawnPickup`,
+   `collect`, `respawn`, `botCashOut`, `hurtTurret`, `checkTeams`, `doCashOut` — plus le fumigène
+   entier. La conservation de l'argent se vérifie désormais **à chaque pas du vrai code**, sur les
+   quatre tables et les cinq modes, et plus sur un modèle. La collision est balayée.
 5. **Les bots, et une partie entière sans navigateur.** Le trou le plus ancien du dossier se referme
    **avant** que le serveur n'ait besoin de quoi que ce soit.
 6. **La trace : `api/sim.js`, `sim_version`, enregistrement et route d'insertion seule.** Aucune

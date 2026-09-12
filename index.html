@@ -2593,8 +2593,418 @@ function makeEntity(G,name,x,z,stake,isPlayer,brawler,acc,team){
   return e;
 }
 
+// ---------- le flux d'evenements ----------
+// POURQUOI CE FLUX EXISTE, ET POURQUOI CE N'EST PAS UN CONFORT. `damage` appelait le
+// synthetiseur et posait un nombre flottant a l'ecran, la destruction d'une caisse retirait un
+// objet de la scene, `kill` appelait directement l'ecran de fin : trois attaches au navigateur
+// plantees au milieu de trois regles du jeu. Tant qu'UNE SEULE subsiste, ce bloc cesse de tourner
+// dans Node — et la panne est SILENCIEUSE : rien ne casse dans le navigateur, la phase est
+// simplement perdue, et personne ne s'en apercoit avant le module qui en depend.
+//
+// Les fonctions d'ici ne disent donc plus ce qu'il faut MONTRER. Elles enregistrent ce qui s'est
+// PASSE, horodate en pas de simulation, et le bloc `Game` traduit cette liste en sons, en nombres
+// flottants et en lignes de kill feed. Le jour ou il manquera un bruitage, le premier reflexe sera
+// de rappeler le synthetiseur d'ici : c'est ce jour-la que la garde du bac a sable tombe, et c'est
+// pour ce jour-la que ce paragraphe est ecrit.
+//
+// Les douze noms sont fermes, et ils suffisent : tir, degat, mort, ramassage, nuage, explosion,
+// super, gadget, detruit, encaissement, reapparition, fin.
+function evt(G,type,d){
+  const e=d||{}; e.type=type; e.pas=G.pas|0;
+  (G.evts||(G.evts=[])).push(e);
+  return e;
+}
+
+// ---------- le combat ----------
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+// Les points de vie d'un brawler dependent de ses cubes, et la regle est dans WBCore. Ce raccourci
+// n'en est pas une seconde copie : il l'appelle, et il existe pour que les quinze sites qui en ont
+// besoin ne repetent pas `e.brawler, e.cubes`.
+function maxHp(e){ return C.maxHp(e.brawler,e.cubes); }
+
+function spawnProjectile(G,owner,dirx,dirz,spec,isSuper,delay,origin){
+  const o=origin||owner;
+  // `radius` est une donnee de la balle, pas un objet de la scene : c'est aussi elle qui decidera
+  // un jour de ce qu'elle touche. Le corps qu'on en dessine vit dans la table annexe de `Game`.
+  const pr={ owner,shotId:owner.shotId,x:o.x+dirx*0.6,z:o.z+dirz*0.6,dx:dirx,dz:dirz,spd:spec.speed,range:spec.range,travel:0,dmg:spec.dmg,spec,isSuper,pierce:!!spec.pierce,knock:spec.knock||0,delay:delay||0,hit:new Set(),
+    radius:isSuper?(spec.radius||0.3)*1.3:(spec.radius||0.22) };
+  G.projs.push(pr); return pr;
+}
+function attack(G,e,dirx,dirz,aimDist){
+  if(e.ammo<1||e.dashT>0||e.fireCd>0) return false;
+  // one trigger pull costs one ammo and locks the trigger until the burst has finished plus a beat.
+  // Without this, holding the button emptied all three shots inside a few frames.
+  const spec=e.brawler.attack;
+  // Un tir = une pression sur la gachette. L'identifiant sert a traiter une rafale comme UN seul
+  // tir : la premiere balle qui touche decide du critique, les suivantes heritent du verdict.
+  // Et si le tir precedent n'a jamais rien touche, la serie tombe ici — c'est la contrepartie.
+  if(e.isPlayer){
+    if(e.shotId!==undefined && e.critShotId!==e.shotId) e.critState=null;
+    e.shotId=(e.shotId||0)+1;
+  }
+  e.fireCd = 0.40 + (spec.stagger||0)*Math.max(0,spec.n-1);
+  e.ammo--; e.ammoT=0; e.stealthT=0;
+  fireSpec(G,e,dirx,dirz,e.brawler.attack,false,aimDist);
+  evt(G,'tir',{e,isSuper:false});
+  return true;
+}
+// Le grain de sable sur l'angle de chaque projectile decide de ce qui touche : il sort du flux
+// `tir/dispersion`, joueur compris. La visee elle-meme, elle, vient toujours d'une souris ou d'un
+// stick et garde ses angles — le module 2 ne quantifie que la geometrie tiree de la seule graine.
+function fireSpec(G,e,dirx,dirz,spec,isSuper,aimDist,origin){
+  const base=Math.atan2(dirx,dirz);
+  for(let i=0;i<spec.n;i++){
+    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(G.alea('tir/dispersion')()-0.5)*0.02;
+    const pr=spawnProjectile(G,e,Math.sin(a),Math.cos(a),spec,isSuper,i*(spec.stagger||0),origin);
+    if(spec.kind==='lob'){ pr.lob=true; pr.explodeAt=clamp(aimDist||spec.range,1.5,spec.range); }
+  }
+}
+function explode(G,x,z,radius,dmg,owner,knock){
+  for(const t of G.ents){ if(t===owner||!t.alive||t.team===owner.team) continue; const d=Math.hypot(t.x-x,t.z-z); if(d<radius){ damage(G,t,dmg,owner); if(knock){ const k=knock/Math.max(0.3,d); t.knockx+=(t.x-x)*k*3; t.knockz+=(t.z-z)*k*3; } } }
+  for(const bx of G.boxes){ if(Math.hypot(bx.x-x,bx.z-z)<radius) hurtBox(G,bx,dmg,owner); }
+  for(const tu of G.turrets){ if(tu.owner.team!==owner.team&&Math.hypot(tu.x-x,tu.z-z)<radius) hurtTurret(G,tu,dmg); }
+  evt(G,'explosion',{x,z,r:radius});
+}
+function useSuper(G,e,aimDist){
+  const s=e.brawler.super; if(e.super<s.cost||!e.alive||e.dashT>0) return false; e.super=0;
+  let soin=0;
+  switch(s.kind){
+    case 'slam': explode(G,e.x,e.z,s.radius,s.dmg,e,s.knock); break;
+    case 'zone': { const d=clamp(aimDist||s.range,1,s.range); const x=e.x+e.ax*d, z=e.z+e.az*d;
+      G.zones.push({x,z,r:s.radius,dps:s.dps,owner:e,life:s.life,tick:0}); break; }
+    case 'heal': { const before=e.hp; e.hp=Math.min(maxHp(e),e.hp+maxHp(e)*s.amount); soin=e.hp-before; break; }
+    case 'stealth': e.stealthT=s.duration; if(!e.isPlayer) e.target=null; break;
+    case 'dash': e.dashT=s.dist/22; e.dashX=e.ax; e.dashZ=e.az; e.dashHit=new Set(); e.dashDmg=s.dmg; break;
+    // `ax`/`az` partent a zero et non a la visee du poseur : la tourelle ne pivote qu'une fois
+    // qu'elle a vraiment quelqu'un en joue, exactement comme avant.
+    case 'turret': { let x=e.x+e.ax*1.4, z=e.z+e.az*1.4; if(!free(G,x,z)){ x=e.x; z=e.z; }
+      G.turrets.push({x,z,ax:0,az:0,hp:s.hp,maxHp:s.hp,owner:e,life:s.life,cd:0.3,spec:s.shot,fireRate:s.fireRate,flash:0,name:e.name+"'s turret"}); break; }
+    default: fireSpec(G,e,e.ax,e.az,s,true,aimDist);
+  }
+  evt(G,'super',{e,kind:s.kind,soin});
+  return true;
+}
+// A turret has always taken fire — projectiles and blasts both reach it. What it never did was
+// say so: 140 hp came off in complete silence and the thing simply vanished, which reads as
+// invulnerable right up to the moment it is not. Damage now punches the body, prints a number
+// and moves a health bar, so you can tell that shooting it is worth your ammo.
+function hurtTurret(G,tu,dmg){
+  if(tu.hp<=0) return;
+  tu.hp-=dmg; tu.flash=0.14;
+  evt(G,'degat',{cible:tu,src:null,dmg,crit:false,sur:'tourelle'});
+  if(tu.hp<=0){
+    const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1);
+    evt(G,'detruit',{x:tu.x,z:tu.z,quoi:'tourelle',parJoueur:false});
+  }
+}
+function dashUpdate(G,e,dt){
+  if(e.dashT<=0) return false; e.dashT-=dt;
+  const step=22*dt; if(free(G,e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
+  for(const t of G.ents){ if(t===e||!t.alive||t.team===e.team||e.dashHit.has(t)) continue; if(Math.hypot(t.x-e.x,t.z-e.z)<1.1){ e.dashHit.add(t); damage(G,t,e.dashDmg,e); t.knockx+=e.dashX*6; t.knockz+=e.dashZ*6; } }
+  e.vx=e.dashX*8; e.vz=e.dashZ*8; return true;
+}
+function zonesUpdate(G,dt){
+  for(let i=G.zones.length-1;i>=0;i--){ const z=G.zones[i]; z.life-=dt; z.tick-=dt;
+    if(z.tick<=0){ z.tick=0.25; for(const t of G.ents){ if(t===z.owner||!t.alive||t.team===z.owner.team) continue; if(Math.hypot(t.x-z.x,t.z-z.z)<z.r) damage(G,t,z.dps*0.25,z.owner); } }
+    if(z.life<=0) G.zones.splice(i,1); }
+  for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
+    if(tu.life<=0||!tu.owner.alive){ G.turrets.splice(i,1); continue; }
+    if(tu.flash>0) tu.flash-=dt;
+    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(G,tu.x,tu.z,t.x,t.z)&&!(inBush(G,t)&&d>2.5)&&!smokeAt(G,tu.x,tu.z,t.x,t.z,tu.owner.team)){ bd=d; best=t; } }
+    if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.ax=dx; tu.az=dz; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(G,tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
+  }
+}
+
+// ---------- la collision BALAYEE ----------
+// Ou le segment entre-t-il dans un mur ? Rendu en FRACTION du pas, pour que la balle meure AU mur
+// et non derriere lui. Le pas d'echantillonnage de 0,25 est inferieur au demi-cote d'une case :
+// aucun mur d'une case ne peut se glisser entre deux echantillons. -1 veut dire « aucun mur ».
+function murSurSegment(G,ax,az,bx,bz){
+  const d=C.dist(bx-ax,bz-az);
+  if(!(d>0)) return isWall(G,ax,az)?0:-1;
+  const n=Math.ceil(d/0.25);
+  for(let i=1;i<=n;i++){ const t=i/n; if(isWall(G,ax+(bx-ax)*t,az+(bz-az)*t)) return t; }
+  return -1;
+}
+// La fraction du segment la plus proche du centre d'un disque. Ce N'EST PAS la regle de collision
+// — celle-la est `C.segmentHitsDisc`, appelee depuis WBCore et recopiee nulle part — c'est
+// seulement la cle qui ORDONNE les touches d'un meme pas, de la plus proche a la plus lointaine.
+function paramSurSegment(ax,az,bx,bz,cx,cz){
+  const dx=bx-ax, dz=bz-az, l2=dx*dx+dz*dz; if(!(l2>0)) return 0;
+  const t=((cx-ax)*dx+(cz-az)*dz)/l2; return t<0?0:t>1?1:t;
+}
+// LE TEST DE COLLISION EST BALAYE, ET C'EST UNE CORRECTION, PAS UN SUPPLEMENT. L'ancien test etait
+// PONCTUEL : on avancait la balle d'un pas entier, puis on regardait si son centre etait a moins
+// de 0,62 d'un corps, et si sa position finale tombait dans un mur. Le super de HEX vole a 36
+// blocs par seconde ; a 30 images par seconde il avancait de 1,2 bloc par pas contre un corps de
+// 0,62 de rayon, et sautait par-dessus les murs d'une case. Le pas fixe du module 1 a rendu ce
+// defaut DETERMINISTE, il ne l'a pas supprime. On teste desormais le SEGMENT parcouru dans le pas,
+// corps comme murs, avec `C.segmentHitsDisc` — la fonction de WBCore qui sert deja a la fumee.
+// Des tirs qui traversaient vont donc toucher : c'est un changement de ressenti, et il est nomme.
+//
+// L'ORDRE DE RESOLUTION EST FIGE, et c'est lui qui rend un rejeu possible. Les candidats sont
+// collectes dans un ordre d'insertion STABLE — tourelles, puis entites, puis caisses, chacun dans
+// l'ordre de son tableau — et resolus du plus proche au plus lointain le long du segment,
+// l'egalite etant tranchee par ce meme ordre d'insertion. Aucun tri, aucune iteration de `Set`, de
+// `Map` ni de cles d'objet ne decide de quoi que ce soit ici : `p.hit` ne sert qu'a
+// l'APPARTENANCE, il n'est jamais parcouru.
+function projUpdate(G,dt){
+  for(let i=G.projs.length-1;i>=0;i--){
+    const p=G.projs[i];
+    if(p.delay>0){ p.delay-=dt; continue; }
+    const step=p.spd*dt;
+    // Les lobs ne touchent personne en route : ils explosent la ou on les a envoyes. Rien ne
+    // change pour eux, ni le vol ni la detonation.
+    if(p.lob){
+      p.x+=p.dx*step; p.z+=p.dz*step; p.travel+=step;
+      if(p.travel>=p.explodeAt){ explode(G,p.x,p.z,p.spec.aoe,p.dmg,p.owner,p.isSuper?2:0); G.projs.splice(i,1); }
+      continue;
+    }
+    const sx=p.x, sz=p.z;
+    // Le pas est coupe d'abord par la PORTEE, puis par le premier MUR rencontre. Ce qui suit ne
+    // parle plus que de la portion reellement parcourue : au-dela, la balle n'existe plus, donc
+    // elle ne touche plus rien — l'ancien code, lui, faisait le pas entier puis mourait.
+    let tFin=1, fini=false;
+    const reste=p.range-p.travel;
+    if(reste<=step){ tFin=step>0?Math.max(0,reste/step):0; fini=true; }
+    let ex=sx+p.dx*step*tFin, ez=sz+p.dz*step*tFin;
+    const tMur=murSurSegment(G,sx,sz,ex,ez);
+    if(tMur>=0){ tFin*=tMur; fini=true; ex=sx+p.dx*step*tFin; ez=sz+p.dz*step*tFin; }
+    // Un segment de longueur nulle — la balle est nee DANS un mur, a bout portant contre la pierre
+    // — ne touche personne. L'ancien code non plus : il mourait au premier pas sans rien faire.
+    const cands=[];
+    if(tFin>0){
+      for(const tu of G.turrets){ if(tu.owner.team===p.owner.team||p.hit.has(tu)) continue;
+        if(C.segmentHitsDisc(sx,sz,ex,ez,tu.x,tu.z,0.8))
+          cands.push({t:paramSurSegment(sx,sz,ex,ez,tu.x,tu.z),ordre:cands.length,quoi:'tourelle',o:tu}); }
+      for(const e of G.ents){ if(e===p.owner||!e.alive||e.team===p.owner.team||p.hit.has(e)) continue;
+        if(C.segmentHitsDisc(sx,sz,ex,ez,e.x,e.z,0.62))
+          cands.push({t:paramSurSegment(sx,sz,ex,ez,e.x,e.z),ordre:cands.length,quoi:'brawler',o:e}); }
+      for(const bx of G.boxes){ if(bx.hp<=0||p.hit.has(bx)) continue;
+        if(C.segmentHitsDisc(sx,sz,ex,ez,bx.x,bx.z,0.75))
+          cands.push({t:paramSurSegment(sx,sz,ex,ez,bx.x,bx.z),ordre:cands.length,quoi:'caisse',o:bx}); }
+    }
+    // Extraction du minimum plutot qu'un tri : un comparateur est une occasion de dependre d'une
+    // stabilite que la norme n'a longtemps pas garantie, et il n'y a jamais plus d'une poignee de
+    // candidats. La cle est totale — distance le long du segment, puis ordre d'insertion — donc
+    // deux moteurs resolvent forcement dans le meme ordre.
+    let n=cands.length, arrete=false;
+    while(n>0&&!arrete){
+      let k=0;
+      for(let j=1;j<n;j++){ const c=cands[j], m=cands[k]; if(c.t<m.t||(c.t===m.t&&c.ordre<m.ordre)) k=j; }
+      const c=cands[k]; cands[k]=cands[n-1]; n--;
+      if(c.quoi==='tourelle') hurtTurret(G,c.o,p.dmg);
+      else if(c.quoi==='caisse') hurtBox(G,c.o,p.dmg,p.owner);
+      else {
+        const e=c.o;
+        let dmg=p.dmg; if(p.spec.dmgFar!==undefined&&!p.isSuper) dmg=C.hexDamage(p.spec,p.travel+step*tFin*c.t);
+        // Pas de critique au super, ni sur une cible intouchable ou encore sous protection, et
+        // seul le JOUEUR en porte : on juge d'abord l'effet et l'equilibre de son cote.
+        if(p.owner.isPlayer&&!p.isSuper&&e.invuln<=0&&G.time>=C.GRACE){
+          // UNE SEULE REGLE DE CRITIQUE, et elle est dans WBCore. C'est le bug de conception le
+          // plus cher du journal — deux regles qui decident du meme nombre — et ce module est
+          // precisement celui qui rendrait une seconde copie possible.
+          if(p.owner.critShotId!==p.shotId){
+            const r=C.critShot(p.owner.critState,e.id,G.time,C.critWindow(p.owner.brawler));
+            p.owner.critState=r.state; p.owner.critShotId=p.shotId; p.owner.critNow=r.crit;
+          }
+          if(p.owner.critNow){ dmg*=C.CRIT.mult; G.critTarget=e; }
+        }
+        damage(G,e,dmg,p.owner); if(p.knock){ e.knockx+=p.dx*p.knock*3; e.knockz+=p.dz*p.knock*3; }
+      }
+      if(p.pierce) p.hit.add(c.o); else arrete=true;
+    }
+    p.x=ex; p.z=ez; p.travel+=step*tFin;
+    if(fini||arrete) G.projs.splice(i,1);
+  }
+}
+
+// ---------- degats, mort, butin ----------
+function damage(G,t,dmg,src){
+  // Consomme le drapeau des l'entree : si l'un des retours anticipes ci-dessous coupe court, il
+  // ne doit pas rester arme et decorer le prochain coup porte a quelqu'un d'autre.
+  const critique = G.critTarget===t; G.critTarget=null;
+  if(!t.alive||G.time<C.GRACE) return;
+  if(t.invuln>0) return;                       // just came back: a moment to move before taking fire
+  if(src&&src!==t&&src.team===t.team) return;
+  dmg=Math.round(dmg*(src?C.dmgMult(src.cubes):1));
+  // End-screen stat. Counted after the cube bonus and capped at what the target still has, so
+  // overkill on the last shot does not inflate the number.
+  if(src&&src.isPlayer) G.dmgDealt+=Math.max(0,Math.min(dmg,t.hp));
+  t.hp-=dmg; t.lastDamageT=G.time; t.lastHitBy=src; t.flash=0.12; if(G.modeCfg&&G.modeCfg.cashout) t.cashLock=C.CASHOUT.lock;
+  if(src&&src.alive) src.super=Math.min(src.brawler.super.cost,src.super+dmg);
+  evt(G,'degat',{cible:t,src:src||null,dmg,crit:critique,sur:'brawler'});
+  if(t.hp<=0) kill(G,t,src,'shot');
+}
+function hurtBox(G,bx,dmg,src){
+  if(bx.hp<=0) return;
+  bx.hp-=dmg;
+  if(bx.hp<=0){
+    spawnPickup(G,C.boxDrop(G.alea('butin/contenu')),bx.x,bx.z,1,null);
+    evt(G,'detruit',{x:bx.x,z:bx.z,quoi:'caisse',parJoueur:!!(src&&src.isPlayer)});
+  }
+}
+// L'endroit ou un objet tombe decide du chemin que quelqu'un devra faire pour le ramasser : il
+// sort du flux `butin/position`. Le dephasage `ph` du ballottement est, lui, purement decoratif,
+// et il se tire du MEME flux : couper une fonction en deux moities dont l'une garderait un tirage
+// libre rendrait la frontiere illisible, et le tirage ne coute rien.
+function spawnPickup(G,kind,x,z,amount,owner){
+  const aleaPos=G.alea('butin/position');
+  let px=x+(aleaPos()-0.5)*1.4, pz=z+(aleaPos()-0.5)*1.4; if(isWall(G,px,pz)){ px=x; pz=z; }
+  G.pickups.push({kind,x:px,z:pz,amount,owner,ph:aleaPos()*6.283});
+}
+function removePickup(G,pk){
+  const i=G.pickups.indexOf(pk); if(i<0) return false;
+  G.pickups.splice(i,1);
+  return true;
+}
+function collect(G,e,pk){
+  if(pk.kind==='heart' && e.hp>=maxHp(e)) return;        // full health: walk over it, leave it there
+  if(pk.kind==='smoke' && !C.smokeRoom(e.gadget)) return;// pouch full: leave it for someone else
+  if(!removePickup(G,pk)) return;
+  let got=0;
+  if(pk.kind==='smoke') e.gadget=C.smokePicked(e.gadget);
+  else if(pk.kind==='cube'){
+    const before=maxHp(e);
+    e.cubes=Math.min(C.CUBE.max,e.cubes+pk.amount);
+    e.hp=Math.min(maxHp(e),e.hp+(maxHp(e)-before));      // the bonus health comes with the cube
+  }
+  else if(pk.kind==='heart'){
+    // an instant top-up: the same job as regeneration, only much faster. La borne « deja au
+    // maximum » est celle du tout premier test : passe elle, il reste forcement de quoi soigner.
+    got=Math.min(maxHp(e)-e.hp, Math.round(maxHp(e)*C.HEART.heal));
+    e.hp+=got;
+  }
+  else { e.pouch+=pk.amount; if(e.isPlayer) G.looted+=pk.amount; }
+  evt(G,'ramassage',{e,kind:pk.kind,amount:pk.amount,owner:pk.owner,got});
+}
+function botCashOut(G,b){
+  b.alive=false; b.cashedOut=true;
+  // L'ARGENT QUITTE LA PARTIE ICI, et il doit etre compte quelque part. Sans `G.encaisse`, la
+  // conservation « sacoches + butin tombe + encaisse = mise x sieges » serait fausse des le
+  // premier bot qui encaisse — et c'est cette conservation qui fonde le seul plafond de paiement
+  // que le serveur possede.
+  G.encaisse=(G.encaisse||0)+b.pouch;
+  b.pouch=0; b.respawnT=0;
+  evt(G,'encaissement',{e:b});
+  // a banked brawler is out for good: teammates waiting on them stop waiting
+  if(!G.ents.some(e=>e.team===b.team&&e.alive)) for(const e of G.ents) if(e.team===b.team) e.respawnT=0;
+  checkTeams(G,b,'Cash out');
+}
+// still in the match while you have lives left, even while waiting to respawn
+const inPlay = e => !e.cashedOut && (e.alive || e.lives > 0);
+function aliveTeams(G){ const t=new Set(); for(const e of G.ents) if(inPlay(e)) t.add(e.team); return t; }
+function playersLeft(G){ return G.ents.filter(inPlay).length; }
+function kill(G,victim,killer,cause){
+  if(!victim.alive) return;
+  victim.alive=false; victim.stealthT=0; victim.dashT=0; victim.invuln=0;
+  // whatever you carried always drops, on every death — that is what keeps the money moving
+  // The pouch now goes straight to whoever put them down, in both games. Dropping it as a bag in
+  // MAXWIN meant walking back through the fight you had just won to collect it, and often
+  // somebody else reached it first. A death with nobody to credit — the gas, an abandon — still
+  // drops on the ground, otherwise that money would simply leave the match.
+  const instant=killer&&killer.alive, sacoche=victim.pouch;
+  if(instant){
+    killer.pouch=C.bucketAfterKill(killer.pouch,victim.pouch);
+    if(G.modeCfg.cashout) killer.cashLock=C.CASHOUT.lock;
+  } else if(victim.pouch>0) spawnPickup(G,'cash',victim.x,victim.z,victim.pouch,victim.name);
+  if(C.BOT.dropCubesOnKill) for(let i=0;i<victim.cubes;i++) spawnPickup(G,'cube',victim.x,victim.z,1,null);
+  // grenades are kit, not knowledge: whatever was still in the pouch goes back on the ground
+  for(let i=0;i<((victim.gadget&&victim.gadget.charges)||0);i++) spawnPickup(G,'smoke',victim.x,victim.z,1,null);
+  victim.gadget=C.smokeStart();
+  // kill() wipes the pouch, so the end screen would always read zero for a dead player. Keep
+  // what they were carrying at the moment they went down.
+  if(victim.isPlayer) G.lostPouch=victim.pouch;
+  victim.pouch=0; victim.cubes=0;
+  if(killer) killer.kills++;
+  const who=killer?killer.name:(cause==='abandoned'?'Abandon':'The gas');
+  victim.lives = cause==='abandoned' ? 0 : Math.max(0, victim.lives-1);
+  if(victim.lives>0) victim.respawnT=C.RESPAWN;
+  const elimine=victim.lives<=0;
+  evt(G,'mort',{victime:victim,tueur:killer||null,cause,who,sacoche,transfert:!!instant,lives:victim.lives,elimine});
+  // Le rang annonce est celui du JOUEUR, pas celui de son equipe : un coequipier qui se bat encore
+  // fait un rang de plus, et la 02a a deja elargi sa borne pour cela.
+  if(elimine&&victim.isPlayer){ evt(G,'fin',{gagne:false,killer:who,rang:aliveTeams(G).size+1}); return; }
+  checkTeams(G,victim,who);
+}
+function checkTeams(G,victim,who){
+  const at=aliveTeams(G);
+  if(!at.has(G.player.team)&&!(G.player.respawnT>0)){ evt(G,'fin',{gagne:false,killer:who||'The gas',rang:at.size+1}); return; }
+  if(at.size===1&&at.has(G.player.team)) evt(G,'fin',{gagne:true});
+}
+function doCashOut(G){
+  const p=G.player; if(!G.modeCfg.cashout||!p.alive||!G.running||!C.cashoutReady(p.cashLock||0)) return false;
+  p.cashedOut=true; evt(G,'fin',{gagne:true,cashedOut:true}); return true;
+}
+function respawn(G,e){
+  // come back somewhere safe inside the current circle, as far as possible from whoever is shooting
+  // Le point de retour est un FAIT de la partie : il decide de qui le revenant croise en premier.
+  // Il sort donc du flux `apparition`. L'angle, lui, garde `Math.cos`/`Math.sin` : il ne vient pas
+  // que de la graine — le cercle de gaz en cours depend de tout ce qui s'est passe avant — et
+  // l'interdiction des transcendantes s'arrete a la geometrie tiree de la seule graine.
+  const alea=G.alea('apparition');
+  let x=G.zone.cx, z=G.zone.cz, best=-1;
+  for(let t=0;t<40;t++){
+    const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-3);
+    const nx=clamp(G.zone.cx+Math.cos(a)*r,2,N-2), nz=clamp(G.zone.cz+Math.sin(a)*r,2,N-2);
+    if(!free(G,nx,nz)) continue;
+    let nearest=1e9;
+    for(const o of G.ents){ if(o===e||!o.alive||o.team===e.team) continue; nearest=Math.min(nearest,Math.hypot(o.x-nx,o.z-nz)); }
+    if(nearest>best){ best=nearest; x=nx; z=nz; if(nearest>14) break; }
+  }
+  e.x=x; e.z=z; e.vx=0; e.vz=0; e.alive=true; e.hp=maxHp(e); e.ammo=3; e.ammoT=0; e.super=0;
+  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.gadget=C.smokeStart();
+  evt(G,'reapparition',{e,x,z});
+}
+
+// ---------- le fumigene : la boite en l'air, puis le nuage ----------
+// Ce que le nuage FAIT est decide dans WBCore, et lu par `smokeAt` plus haut. Ce qui est ici est
+// l'etat du gadget : une grenade qui vole, un nuage qui vieillit, et rien d'autre.
+function throwSmoke(G,e,aimDist){
+  // nothing is thrown during the 3-2-1: the world is not ticking yet, and a canister would hang
+  // in the air until it does
+  if(!C.SMOKE_READY||!e||!e.alive||G.intro>0||!C.canThrowSmoke(e.gadget)) return false;
+  const l=Math.hypot(e.ax,e.az)||1, ux=e.ax/l, uz=e.az/l;
+  const at=C.smokeLanding(e.x,e.z,ux,uz,aimDist);
+  // never let it bloom inside a wall: walk the throw back until it finds open ground
+  let tx=at.x, tz=at.z;
+  if(isWall(G,tx,tz)){
+    tx=e.x; tz=e.z;
+    for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(G,nx,nz)){ tx=nx; tz=nz; break; } }
+  }
+  e.gadget=C.smokeThrown(e.gadget);
+  G.nades.push({x:e.x,z:e.z,tx,tz,t:0,owner:e});
+  if(e.isPlayer) G.smokeUsed=true;
+  evt(G,'gadget',{e,couvre:C.smokeCoversThrower(at.dist)});
+  return true;
+}
+function nadesUpdate(G,dt){
+  for(let i=G.nades.length-1;i>=0;i--){
+    const n=G.nades[i]; n.t+=dt;
+    if(n.t>=C.SMOKE.flight){ G.nades.splice(i,1); spawnSmoke(G,n.tx,n.tz,n.owner); }
+  }
+}
+function spawnSmoke(G,x,z,owner){
+  const cloud={x,z,age:0,owner,team:owner?owner.team:-1};
+  G.smokes.push(cloud);
+  evt(G,'nuage',{x,z});
+  return cloud;
+}
+function smokesUpdate(G,dt){
+  for(let i=G.smokes.length-1;i>=0;i--){
+    const c=G.smokes[i]; c.age+=dt;
+    // Un rayon nul veut dire « ce nuage n'aveugle plus personne » : c'est WBCore qui le dit, et
+    // c'est la meme regle qui decide de ce qu'on voit a travers.
+    if(C.smokeRadius(c.age)<=0) G.smokes.splice(i,1);
+  }
+}
+
 return { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
-         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity };
+         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity,
+         clamp, maxHp, evt, spawnProjectile, attack, fireSpec, explode, useSuper, hurtTurret,
+         dashUpdate, zonesUpdate, murSurSegment, paramSurSegment, projUpdate, damage, hurtBox,
+         spawnPickup, removePickup, collect, botCashOut, inPlay, aliveTeams, playersLeft, kill,
+         checkTeams, doCashOut, respawn, throwSmoke, nadesUpdate, spawnSmoke, smokesUpdate };
 })();
 if (typeof module!=='undefined') module.exports=WBSim;
 /*SIM-END*/
@@ -2609,9 +3019,11 @@ const C=WBCore, N=C.MAP, B=C.BRAWLERS;
 // se prefixent pas un par un. Ce qui change chez eux, et qui n'a pas de raccourci, c'est l'etat de
 // partie passe en premier argument — SIM n'a plus de `G` de portee lexicale, par construction.
 const { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
-        losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity } = WBSim;
+        losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity,
+        clamp, maxHp, attack, useSuper, throwSmoke, dashUpdate, collect, kill, respawn,
+        projUpdate, zonesUpdate, nadesUpdate, smokesUpdate, doCashOut, botCashOut,
+        aliveTeams, playersLeft } = WBSim;
 const $=id=>document.getElementById(id);
-const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 // keep cents when a value has them ($0.50), drop them when it is round ($1,600)
 const money=n=>{ const v=Math.round(n*100)/100;
   return '$'+v.toLocaleString('en-US',{minimumFractionDigits:Number.isInteger(v)?0:2,maximumFractionDigits:2}); };
@@ -3154,7 +3566,7 @@ addEventListener('keydown',e=>{ if(e.code==='Escape'&&rulesEl.classList.contains
 $('toLobby').onclick=()=>{ $('end').classList.remove('on'); $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); };
 $('again').onclick=()=>{ $('end').classList.remove('on'); if(wallet>=lastStake) enterWaiting(lastStake); else { $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); } };
 $('sndBtn').onclick=e=>{ e.stopPropagation(); setAudio(!MUS.on); };
-$('quit').onclick=()=>{ if(G&&G.running){ if(G.player.alive) kill(G.player,null,'abandoned'); else endMatch(false,{killer:'Abandon',rank:aliveTeams().size+1}); } };
+$('quit').onclick=()=>{ if(G&&G.running){ if(G.player.alive){ kill(G,G.player,null,'abandoned'); rendreEvenements(); } else endMatch(false,{killer:'Abandon',rank:aliveTeams(G).size+1}); } };
 
 // ---------- three ----------
 const canvas=$('c');
@@ -3462,7 +3874,7 @@ function buildWorld(seed){
   while(world.children.length){ const gone=world.children[0]; world.remove(gone); discard(gone); }
   // La scene vient d'etre videe : la table des corps d'entites l'est avec elle, sinon la partie
   // suivante retrouverait des objets que plus rien n'affiche.
-  MESHES.clear();
+  MESHES.clear(); VIS.clear(); LABELS.clear();
   const cells=C.generateMap(seed), biomes=C.generateBiomes(seed), rng=C.makeRng(seed^0x51ed270b);
   const blocks=[], floorTiles=[], props=[], caps=[], shadows=[];
   // Per-biome palette. Walls and bushes are deliberately built from different SHAPES, not just
@@ -3935,44 +4347,56 @@ function syncMeshes(){
     if(rec.lastOp!==op){ rec.lastOp=op; m.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
   }
 }
-const maxHp=e=>C.maxHp(e.brawler,e.cubes);
-
-// ---------- smoke grenade ----------
-// The gadget in three parts: the canister in the air, the cloud it becomes, and the ring on the
-// ground telling you where it will land. What the cloud *does* is decided in WBCore; this draws it.
-function throwSmoke(e,aimDist){
-  // nothing is thrown during the 3-2-1: the world is not ticking yet, and a canister would hang
-  // in the air until it does
-  if(!C.SMOKE_READY||!e||!e.alive||G.intro>0||!C.canThrowSmoke(e.gadget)) return false;
-  const l=Math.hypot(e.ax,e.az)||1, ux=e.ax/l, uz=e.az/l;
-  const at=C.smokeLanding(e.x,e.z,ux,uz,aimDist);
-  // never let it bloom inside a wall: walk the throw back until it finds open ground
-  let tx=at.x, tz=at.z;
-  if(isWall(G,tx,tz)){
-    tx=e.x; tz=e.z;
-    for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(G,nx,nz)){ tx=nx; tz=nz; break; } }
-  }
-  e.gadget=C.smokeThrown(e.gadget);
-  const g=makeNade();
-  g.position.set(e.x,0.9,e.z); world.add(g);
-  const marker=new THREE.Mesh(markGeo,markMat.clone()); marker.position.set(tx,0.05,tz); world.add(marker);
-  G.nades.push({x:e.x,z:e.z,tx,tz,t:0,owner:e,mesh:g,marker});
-  if(e.isPlayer){ G.smokeUsed=true; snd('box',0.09); floatText(e,C.smokeCoversThrower(at.dist)?'☁ COVER':'☁ SMOKE','heal'); }
-  return true;
+// ---------- ce qu'on VOIT du reste de la partie ----------
+// Meme discipline que pour les corps de brawlers, etendue aux projectiles, aux caisses, au butin,
+// aux zones, aux tourelles, aux grenades et aux nuages : l'etat vit dans SIM, le corps vit ici,
+// dans une table annexe, et un SEUL site la lit pour ecrire dans la scene. La table est indexee par
+// l'objet de simulation lui-meme : ces objets-la n'ont pas d'identifiant, ils naissent et meurent en
+// quelques secondes, et une cle inventee pour l'occasion serait une occasion de plus de se tromper
+// de correspondance. Elle n'est JAMAIS parcourue pour decider d'un ordre — seulement pour balayer
+// ce que la simulation a supprime, une fois l'etat lu.
+const VIS=new Map();
+let visTour=0;
+function corpsProjectile(p){
+  const m=new THREE.Mesh(projGeo,p.isSuper?projMatS:(p.owner.isPlayer?projMatP:projMatB));
+  m.scale.setScalar(p.radius); m.visible=false; world.add(m); return {obj:m};
 }
-function nadesUpdate(dt){
-  for(let i=G.nades.length-1;i>=0;i--){
-    const n=G.nades[i]; n.t+=dt;
-    const k=Math.min(1,n.t/C.SMOKE.flight);
-    n.mesh.position.set(n.x+(n.tx-n.x)*k, 0.55+Math.sin(Math.PI*k)*2.4, n.z+(n.tz-n.z)*k);
-    n.mesh.rotation.x+=dt*11; n.mesh.rotation.z+=dt*7;
-    const b=C.SMOKE.radius*(0.55+0.45*k)*(1+Math.sin(G.time*14)*0.05);
-    n.marker.scale.set(b,1,b); n.marker.material.opacity=0.25+0.5*k;
-    if(k>=1){ world.remove(n.mesh); world.remove(n.marker); discard(n.marker); G.nades.splice(i,1); spawnSmoke(n.tx,n.tz,n.owner); }
-  }
+function corpsPickup(pk){
+  const obj =
+      pk.kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
+    : pk.kind==='cube'  ? new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5),cubeMat)
+      // a canister lying in the grass, the same object you see flying when someone throws one
+    : pk.kind==='smoke' ? makeNade()
+    :                     new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
+  obj.position.set(pk.x, pk.kind==='heart'?0.75:0.5, pk.z); world.add(obj);
+  // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
+  // ground for the rest of the match
+  const sh=new THREE.Mesh(shadowGeo,shadowMat);
+  sh.scale.setScalar(0.75); sh.position.set(pk.x,0.03,pk.z); world.add(sh);
+  return {obj,extra:sh};
 }
-function spawnSmoke(x,z,owner){
-  const g=new THREE.Group(); g.position.set(x,0,z); world.add(g);
+function corpsZoneFeu(z){
+  const m=new THREE.Mesh(new THREE.CylinderGeometry(z.r,z.r,0.25,28),fireMat);
+  m.position.set(z.x,0.12,z.z); world.add(m); return {obj:m};
+}
+function corpsTourelle(tu){
+  const g=new THREE.Group();
+  const base=new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.65,0.5,10),turretMat); base.position.y=0.25; g.add(base);
+  const barrel=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.18,0.8),new THREE.MeshLambertMaterial({color:0x1d2340})); barrel.position.set(0,0.65,-0.3); g.add(barrel);
+  const ol=new THREE.Mesh(base.geometry,outlineMat); ol.position.copy(base.position); ol.scale.setScalar(1.08); g.add(ol);
+  g.position.set(tu.x,0,tu.z); world.add(g); return {obj:g};
+}
+function corpsGrenade(n){
+  const g=makeNade(); g.position.set(n.x,0.9,n.z); world.add(g);
+  const marker=new THREE.Mesh(markGeo,markMat.clone()); marker.position.set(n.tx,0.05,n.tz); world.add(marker);
+  return {obj:g,extra:marker};
+}
+// Les bouffees d'un nuage sont du DECOR, et c'est la seule raison pour laquelle elles gardent un
+// tirage libre : leur nombre vient du palier de qualite, donc de la machine, et rien de ce qu'elles
+// font ne decide d'un fait de la partie. Ce que le nuage AVEUGLE est decide dans WBCore, a partir
+// de sa seule position et de son age.
+function corpsNuage(c){
+  const g=new THREE.Group(); g.position.set(c.x,0,c.z); world.add(g);
   // the footprint on the ground is drawn from the same radius that decides who can see whom, so
   // what you read on the floor is exactly the circle that blinds people — never an approximation
   const floor=new THREE.Mesh(cloudFloorGeo,new THREE.MeshBasicMaterial({color:0xeef4f8,transparent:true,opacity:0.3,depthWrite:false}));
@@ -3985,311 +4409,165 @@ function spawnSmoke(x,z,owner){
     puffs.push({ sp, a:i/Q.smoke*Math.PI*2+Math.random()*0.7, rr:i===0?0:0.30+Math.random()*0.48,
                  y:0.40+Math.random()*0.85, sc:1.05+Math.random()*0.55, spin:0.2+Math.random()*0.45, ph:Math.random()*6.283 });
   }
-  const cloud={x,z,age:0,owner,team:owner?owner.team:-1,mesh:g,puffs,floor,edge,op:-1};
-  G.smokes.push(cloud);
-  const d=Math.hypot(x-G.player.x,z-G.player.z);
-  snd('cube',0.10*Math.max(0,1-d/26));
-  return cloud;
+  return {obj:g,puffs,floor,edge,op:-1};
 }
-function smokesUpdate(dt){
-  for(let i=G.smokes.length-1;i>=0;i--){
-    const c=G.smokes[i]; c.age+=dt;
-    const r=C.smokeRadius(c.age);
-    // the per-cloud materials exist only to carry its own fade: they go when the cloud goes
-    if(r<=0){ world.remove(c.mesh); discard(c.mesh); G.smokes.splice(i,1); continue; }
-    const k=r/C.SMOKE.radius, thick=Math.min(1,k*1.5);
+// L'UNIQUE ECRIVAIN DE TOUT CE QUI N'EST PAS UN BRAWLER, et le pendant exact de `syncMeshes()`.
+// Une fois par IMAGE, jamais par pas. Rien ici ne decide de quoi que ce soit : tout se DEDUIT de
+// l'etat que SIM a ecrit — la hauteur d'un lob de son chemin parcouru, l'ecrasement d'une caisse de
+// ses points de vie restants, l'opacite d'un nuage de son age.
+function syncMonde(dt){
+  visTour++;
+  const voir=(cle,faire)=>{ let rec=VIS.get(cle); if(!rec){ rec=faire(); VIS.set(cle,rec); } rec.tour=visTour; return rec; };
+  for(const p of G.projs){
+    const m=voir(p,()=>corpsProjectile(p)).obj;
+    m.visible=p.delay<=0;
+    if(p.lob){ const k=Math.min(1,p.travel/p.explodeAt); m.position.set(p.x,0.9+Math.sin(Math.PI*k)*3.2,p.z); }
+    else m.position.set(p.x,1.0,p.z);
+  }
+  for(const bx of G.boxes){
+    if(bx.hp<=0) continue;                                  // detruite : son corps part au balayage
+    const m=voir(bx,()=>{ const g=makeCrate(); g.position.set(bx.x,0,bx.z); world.add(g); return {obj:g}; }).obj;
+    const k=bx.hp/C.BOX_HP;
+    m.scale.set(1+0.12*(1-k),Math.max(0.7,k*0.3+0.7),1+0.12*(1-k));
+    const b=0.45+0.55*(0.5+0.5*Math.sin(G.time*4.2+bx.ph));
+    for(const q of m.userData.marks) q.material.opacity=b;
+    m.position.y=Math.sin(G.time*2.1+bx.ph)*0.04;
+  }
+  for(const pk of G.pickups){
+    const rec=voir(pk,()=>corpsPickup(pk));
+    if(pk.kind==='heart'){ const b=1+Math.sin(G.time*5+pk.ph)*0.10; rec.obj.scale.set(0.85*b,0.85*b,1); rec.obj.position.y=0.75+Math.sin(G.time*3+pk.ph)*0.10; rec.extra.scale.setScalar(0.75/b); }
+    else { rec.obj.rotation.y+=dt*2; rec.obj.position.y=0.5+Math.sin(G.time*3+pk.ph)*0.08; }
+  }
+  for(const z of G.zones){
+    const m=voir(z,()=>corpsZoneFeu(z)).obj;
+    m.material.opacity=0.3+Math.sin(G.time*14)*0.12;
+  }
+  for(const tu of G.turrets){
+    const m=voir(tu,()=>corpsTourelle(tu)).obj;
+    if(tu.ax||tu.az) m.rotation.y=Math.atan2(tu.ax,tu.az)+Math.PI;
+    if(tu.flash>0) m.scale.setScalar(1+tu.flash*1.1); else if(m.scale.x!==1) m.scale.setScalar(1);
+  }
+  for(const n of G.nades){
+    const rec=voir(n,()=>corpsGrenade(n));
+    const k=Math.min(1,n.t/C.SMOKE.flight);
+    rec.obj.position.set(n.x+(n.tx-n.x)*k, 0.55+Math.sin(Math.PI*k)*2.4, n.z+(n.tz-n.z)*k);
+    rec.obj.rotation.x+=dt*11; rec.obj.rotation.z+=dt*7;
+    const b=C.SMOKE.radius*(0.55+0.45*k)*(1+Math.sin(G.time*14)*0.05);
+    rec.extra.scale.set(b,1,b); rec.extra.material.opacity=0.25+0.5*k;
+  }
+  for(const c of G.smokes){
+    const rec=voir(c,()=>corpsNuage(c));
+    const r=C.smokeRadius(c.age), k=r/C.SMOKE.radius, thick=Math.min(1,k*1.5);
     // A cloud that is still yours has to be see-through on your screen, or the rule that you can
     // see out of it would be a lie the moment the camera hits a wall of white. It thickens back up
     // over half a second when the window closes, so the loss of the advantage is something you
     // watch happen rather than something you find out about by being shot.
     const want=(C.smokeSeeThrough(c,G.player.team)?0.22:0.88)*thick;
-    c.op = c.op<0 ? want : c.op+(want-c.op)*Math.min(1,dt*4);
-    c.floor.scale.set(r,1,r); c.floor.material.opacity=0.30*thick;
-    c.edge.scale.set(r,1,r);  c.edge.material.opacity=0.50*thick;
-    for(const p of c.puffs){
-      const a=p.a+G.time*p.spin*0.4;
-      p.sp.position.set(Math.cos(a)*p.rr*r, p.y*(0.55+0.65*k)+Math.sin(G.time*1.6+p.ph)*0.13, Math.sin(a)*p.rr*r);
-      const s=r*p.sc; p.sp.scale.set(s,s,1);
-      p.sp.material.opacity=c.op;
+    rec.op = rec.op<0 ? want : rec.op+(want-rec.op)*Math.min(1,dt*4);
+    rec.floor.scale.set(r,1,r); rec.floor.material.opacity=0.30*thick;
+    rec.edge.scale.set(r,1,r);  rec.edge.material.opacity=0.50*thick;
+    for(const pf of rec.puffs){
+      const a=pf.a+G.time*pf.spin*0.4;
+      pf.sp.position.set(Math.cos(a)*pf.rr*r, pf.y*(0.55+0.65*k)+Math.sin(G.time*1.6+pf.ph)*0.13, Math.sin(a)*pf.rr*r);
+      const s=r*pf.sc; pf.sp.scale.set(s,s,1);
+      pf.sp.material.opacity=rec.op;
     }
+  }
+  // Le balayage : tout ce que ce tour n'a pas revu n'existe plus dans l'etat, donc son corps s'en
+  // va. C'est ici, et nulle part ailleurs, qu'on defait la scene — un `world.remove` disperse au
+  // milieu d'une regle du jeu est exactement ce que ce module est venu supprimer.
+  for(const [cle,rec] of VIS){
+    if(rec.tour===visTour) continue;
+    world.remove(rec.obj); discard(rec.obj);
+    if(rec.extra){ world.remove(rec.extra); discard(rec.extra); }
+    VIS.delete(cle);
   }
 }
 
-// ---------- projectiles ----------
-function spawnProjectile(owner,dirx,dirz,spec,isSuper,delay,origin){
-  const o=origin||owner; const pr={ owner,shotId:owner.shotId,x:o.x+dirx*0.6,z:o.z+dirz*0.6,dx:dirx,dz:dirz,spd:spec.speed,range:spec.range,travel:0,dmg:spec.dmg,spec,isSuper,pierce:!!spec.pierce,knock:spec.knock||0,delay:delay||0,hit:new Set(),
-    mesh:new THREE.Mesh(projGeo,isSuper?projMatS:(owner.isPlayer?projMatP:projMatB)) };
-  const r=isSuper?(spec.radius||0.3)*1.3:(spec.radius||0.22); pr.mesh.scale.set(r,r,r); pr.mesh.position.set(pr.x,1.0,pr.z); pr.mesh.visible=false; world.add(pr.mesh); G.projs.push(pr); return pr;
+// ---------- le rendu LIT le flux d'evenements ----------
+// SIM ne sait plus faire de bruit ni ecrire a l'ecran : il rend une liste de ce qui s'est PASSE
+// pendant le pas, et c'est ici, et seulement ici, que ca devient un son, un nombre qui monte ou une
+// ligne de kill feed. Rien dans cette fonction ne decide d'un fait de la partie — si une ligne
+// d'ici venait a modifier une entite, la partie ne serait plus rejouable et rien ne le signalerait.
+function popPouch(){ const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
+function anneau(x,z,r0,r1,segs,couleur,vie){
+  const ring=new THREE.Mesh(new THREE.RingGeometry(r0,r1,segs),new THREE.MeshBasicMaterial({color:couleur,transparent:true,opacity:0.7,side:THREE.DoubleSide}));
+  ring.rotation.x=-Math.PI/2; ring.position.set(x,0.06,z); world.add(ring); G.fx.push({mesh:ring,life:vie,max:vie});
 }
-function attack(e,dirx,dirz,aimDist){
-  if(e.ammo<1||e.dashT>0||e.fireCd>0) return false;
-  // one trigger pull costs one ammo and locks the trigger until the burst has finished plus a beat.
-  // Without this, holding the button emptied all three shots inside a few frames.
-  const spec=e.brawler.attack;
-  // Un tir = une pression sur la gachette. L'identifiant sert a traiter une rafale comme UN seul
-  // tir : la premiere balle qui touche decide du critique, les suivantes heritent du verdict.
-  // Et si le tir precedent n'a jamais rien touche, la serie tombe ici — c'est la contrepartie.
-  if(e.isPlayer){
-    if(e.shotId!==undefined && e.critShotId!==e.shotId) e.critState=null;
-    e.shotId=(e.shotId||0)+1;
-  }
-  e.fireCd = 0.40 + (spec.stagger||0)*Math.max(0,spec.n-1);
-  e.ammo--; e.ammoT=0; e.stealthT=0;
-  fireSpec(e,dirx,dirz,e.brawler.attack,false,aimDist); snd('shot',e.isPlayer?0.14:0.06*Math.max(0,1-Math.hypot(e.x-G.player.x,e.z-G.player.z)/30)); return true;
-}
-// Le grain de sable sur l'angle de chaque projectile décide de ce qui touche : il sort du flux
-// `tir/dispersion`, joueur compris. La visée elle-même, elle, vient toujours d'une souris ou d'un
-// stick et garde ses angles — ce module ne quantifie que la géométrie tirée de la seule graine.
-function fireSpec(e,dirx,dirz,spec,isSuper,aimDist,origin){
-  const base=Math.atan2(dirx,dirz);
-  for(let i=0;i<spec.n;i++){
-    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(G.alea('tir/dispersion')()-0.5)*0.02;
-    const pr=spawnProjectile(e,Math.sin(a),Math.cos(a),spec,isSuper,i*(spec.stagger||0),origin);
-    if(spec.kind==='lob'){ pr.lob=true; pr.explodeAt=clamp(aimDist||spec.range,1.5,spec.range); }
-  }
-}
-function explode(x,z,radius,dmg,owner,knock){
-  for(const t of G.ents){ if(t===owner||!t.alive||t.team===owner.team) continue; const d=Math.hypot(t.x-x,t.z-z); if(d<radius){ damage(t,dmg,owner); if(knock){ const k=knock/Math.max(0.3,d); t.knockx+=(t.x-x)*k*3; t.knockz+=(t.z-z)*k*3; } } }
-  for(const bx of G.boxes){ if(Math.hypot(bx.x-x,bx.z-z)<radius) hurtBox(bx,dmg,owner); }
-  for(const tu of G.turrets){ if(tu.owner.team!==owner.team&&Math.hypot(tu.x-x,tu.z-z)<radius) hurtTurret(tu,dmg); }
-  const ring=new THREE.Mesh(new THREE.RingGeometry(0.3,radius,40),new THREE.MeshBasicMaterial({color:0xff7a1a,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.set(x,0.06,z); world.add(ring); G.fx.push({mesh:ring,life:0.35,max:0.35});
-  const dp=Math.hypot(x-G.player.x,z-G.player.z); snd('shot',0.2*Math.max(0,1-dp/30));
-}
-function useSuper(e,aimDist){
-  const s=e.brawler.super; if(e.super<s.cost||!e.alive||e.dashT>0) return false; e.super=0;
-  switch(s.kind){
-    case 'slam': explode(e.x,e.z,s.radius,s.dmg,e,s.knock); break;
-    case 'zone': { const d=clamp(aimDist||s.range,1,s.range); const x=e.x+e.ax*d, z=e.z+e.az*d; const mesh=new THREE.Mesh(new THREE.CylinderGeometry(s.radius,s.radius,0.25,28),fireMat); mesh.position.set(x,0.12,z); world.add(mesh); G.zones.push({x,z,r:s.radius,dps:s.dps,owner:e,life:s.life,tick:0,mesh}); break; }
-    case 'heal': { const before=e.hp; e.hp=Math.min(maxHp(e),e.hp+maxHp(e)*s.amount); floatText(e,'+'+Math.round(e.hp-before),'heal'); const ring=new THREE.Mesh(new THREE.RingGeometry(0.3,1.6,32),new THREE.MeshBasicMaterial({color:0x5ce04b,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.set(e.x,0.06,e.z); world.add(ring); G.fx.push({mesh:ring,life:0.5,max:0.5}); break; }
-    case 'stealth': e.stealthT=s.duration; if(!e.isPlayer) e.target=null; break;
-    case 'dash': e.dashT=s.dist/22; e.dashX=e.ax; e.dashZ=e.az; e.dashHit=new Set(); e.dashDmg=s.dmg; break;
-    case 'turret': { let x=e.x+e.ax*1.4, z=e.z+e.az*1.4; if(!free(G,x,z)){ x=e.x; z=e.z; } const g=new THREE.Group(); const base=new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.65,0.5,10),turretMat); base.position.y=0.25; g.add(base); const barrel=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.18,0.8),new THREE.MeshLambertMaterial({color:0x1d2340})); barrel.position.set(0,0.65,-0.3); g.add(barrel); const ol=new THREE.Mesh(base.geometry,outlineMat); ol.position.copy(base.position); ol.scale.setScalar(1.08); g.add(ol); g.position.set(x,0,z); world.add(g);
-      G.turrets.push({x,z,hp:s.hp,maxHp:s.hp,owner:e,life:s.life,cd:0.3,spec:s.shot,fireRate:s.fireRate,mesh:g,name:e.name+"'s turret"}); break; }
-    default: fireSpec(e,e.ax,e.az,s,true,aimDist);
-  }
-  if(e.isPlayer) snd('super',0.14); return true;
-}
-// A turret has always taken fire — projectiles and blasts both reach it. What it never did was
-// say so: 140 hp came off in complete silence and the thing simply vanished, which reads as
-// invulnerable right up to the moment it is not. Damage now punches the mesh, prints a number
-// and moves a health bar, so you can tell that shooting it is worth your ammo.
-function hurtTurret(tu,dmg){
-  if(tu.hp<=0) return;
-  tu.hp-=dmg; tu.flash=0.14;
-  floatText(tu,'-'+Math.round(dmg),'');
-  if(tu.hp<=0){
-    world.remove(tu.mesh); discard(tu.mesh);
-    if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; }
-    const i=G.turrets.indexOf(tu); if(i>=0) G.turrets.splice(i,1);
-    snd('box',0.12);
-  }
-}
-function dashUpdate(e,dt){
-  if(e.dashT<=0) return false; e.dashT-=dt;
-  const step=22*dt; if(free(G,e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
-  for(const t of G.ents){ if(t===e||!t.alive||t.team===e.team||e.dashHit.has(t)) continue; if(Math.hypot(t.x-e.x,t.z-e.z)<1.1){ e.dashHit.add(t); damage(t,e.dashDmg,e); t.knockx+=e.dashX*6; t.knockz+=e.dashZ*6; } }
-  e.vx=e.dashX*8; e.vz=e.dashZ*8; return true;
-}
-function zonesUpdate(dt){
-  for(let i=G.zones.length-1;i>=0;i--){ const z=G.zones[i]; z.life-=dt; z.tick-=dt; z.mesh.material.opacity=0.3+Math.sin(G.time*14)*0.12;
-    if(z.tick<=0){ z.tick=0.25; for(const t of G.ents){ if(t===z.owner||!t.alive||t.team===z.owner.team) continue; if(Math.hypot(t.x-z.x,t.z-z.z)<z.r) damage(t,z.dps*0.25,z.owner); } }
-    if(z.life<=0){ world.remove(z.mesh); discard(z.mesh); G.zones.splice(i,1); } }
-  for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
-    if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; } G.turrets.splice(i,1); continue; }
-    if(tu.flash>0){ tu.flash-=dt; tu.mesh.scale.setScalar(1+tu.flash*1.1); } else if(tu.mesh.scale.x!==1) tu.mesh.scale.setScalar(1);
-    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(G,tu.x,tu.z,t.x,t.z)&&!(inBush(G,t)&&d>2.5)&&!smokeAt(G,tu.x,tu.z,t.x,t.z,tu.owner.team)){ bd=d; best=t; } }
-    if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.mesh.rotation.y=Math.atan2(dx,dz)+Math.PI; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
-  }
-}
-function projUpdate(dt){
-  for(let i=G.projs.length-1;i>=0;i--){
-    const p=G.projs[i];
-    if(p.delay>0){ p.delay-=dt; continue; }
-    p.mesh.visible=true;
-    const step=p.spd*dt; p.x+=p.dx*step; p.z+=p.dz*step; p.travel+=step;
-    let dead=false;
-    if(p.lob){ const k=Math.min(1,p.travel/p.explodeAt); p.mesh.position.set(p.x,0.9+Math.sin(Math.PI*k)*3.2,p.z); if(k>=1){ explode(p.x,p.z,p.spec.aoe,p.dmg,p.owner,p.isSuper?2:0); dead=true; } }
-    else { p.mesh.position.set(p.x,1.0,p.z); dead=p.travel>=p.range||isWall(G,p.x,p.z); }
-    if(!dead&&!p.lob){
-      for(const tu of G.turrets){ if(tu.owner.team===p.owner.team||p.hit.has(tu)) continue; if(Math.hypot(tu.x-p.x,tu.z-p.z)<0.8){ hurtTurret(tu,p.dmg); if(p.pierce) p.hit.add(tu); else { dead=true; break; } } }
-      if(!dead) for(const e of G.ents){ if(e===p.owner||!e.alive||e.team===p.owner.team||p.hit.has(e)) continue; if(Math.hypot(e.x-p.x,e.z-p.z)<0.62){
-        let dmg=p.dmg; if(p.spec.dmgFar!==undefined&&!p.isSuper) dmg=C.hexDamage(p.spec,p.travel);
-        // Pas de critique au super, ni sur une cible intouchable ou encore sous protection.
-        // BOT_CRIT reste a false : on juge d'abord l'effet et l'equilibre cote joueur.
-        if(p.owner.isPlayer&&!p.isSuper&&e.invuln<=0&&G.time>=C.GRACE){
-          // Une seule regle de critique, et elle est dans WBCore. L'interrupteur de mise au point
-          // qui doublait ce test ici est supprime : du code mort, mais un code mort qui aurait
-          // installe une seconde regle a cote de critShot le jour ou le critique descend dans la
-          // simulation -- le patron du respawn() defini deux fois.
-          if(p.owner.critShotId!==p.shotId){
-            const r=C.critShot(p.owner.critState,e.id,G.time,C.critWindow(p.owner.brawler));
-            p.owner.critState=r.state; p.owner.critShotId=p.shotId; p.owner.critNow=r.crit;
-          }
-          if(p.owner.critNow){ dmg*=C.CRIT.mult; G.critTarget=e; }
+const loinDuJoueur=(x,z)=>Math.hypot(x-G.player.x,z-G.player.z);
+function rendreEvenements(){
+  const evts=G.evts; if(!evts||!evts.length) return;
+  G.evts=[];
+  for(const ev of evts){
+    switch(ev.type){
+      case 'tir':
+        snd('shot',ev.e.isPlayer?0.14:0.06*Math.max(0,1-loinDuJoueur(ev.e.x,ev.e.z)/30));
+        break;
+      case 'degat': {
+        const t=ev.cible;
+        if(ev.sur==='tourelle'){ floatText(t,'-'+Math.round(ev.dmg),''); break; }
+        floatText(t,'-'+ev.dmg,(t.isPlayer?'you':'')+(ev.crit?' crit':''));
+        if(t.isPlayer){ G.player.damageFlash=1; snd('hurt',0.12); }
+        else if(ev.src&&ev.src.isPlayer){ snd(ev.crit?'crit':'hit',ev.crit?0.11:0.06); if(ev.crit) critFx(); }
+        break; }
+      case 'mort': {
+        const v=ev.victime, k=ev.tueur;
+        if(ev.transfert&&k&&k.isPlayer&&ev.sacoche>0){ snd('cash',0.14); feed(`+${money(ev.sacoche)} ${G.modeCfg.cashout?'banked':'taken'} from ${v.name}`,true); floatText(k,'+'+money(ev.sacoche),'heal'); popPouch(); }
+        if(k&&!k.isPlayer&&Math.random()<0.45) sendEmote(k, Math.random()<0.5?'smug':'cool');
+        if(k&&!k.isPlayer&&Math.random()<0.5) botSay(k,'kill');
+        else if(v.isPlayer&&k) botSay(k,'kill');
+        else if(!v.isPlayer&&k&&k.isPlayer&&Math.random()<0.5) botSay(v,'death');
+        const hi=(k&&k.isPlayer)||v.team===G.player.team;
+        if(!ev.elimine){
+          feed(`${ev.who} downed ${v.name} · ${ev.lives} ${ev.lives>1?'lives':'life'} left`,hi);
+          if(v.isPlayer){ deathSting(); $('respawn').style.display='block'; }
+        } else {
+          feed(`${ev.who} eliminated ${v.name}`,hi);
+          if(v.isPlayer) deathSting();
         }
-        damage(e,dmg,p.owner); if(p.knock){ e.knockx+=p.dx*p.knock*3; e.knockz+=p.dz*p.knock*3; }
-        if(p.pierce) p.hit.add(e); else { dead=true; break; } } }
-      if(!dead) for(const bx of G.boxes){ if(bx.hp<=0||p.hit.has(bx)) continue; if(Math.hypot(bx.x-p.x,bx.z-p.z)<0.75){ hurtBox(bx,p.dmg,p.owner); if(p.pierce) p.hit.add(bx); else { dead=true; break; } } }
+        break; }
+      case 'ramassage': {
+        const e=ev.e; if(!e.isPlayer) break;
+        if(ev.kind==='smoke'){ snd('cube',0.12); floatText(e,'☁ SMOKE +1','heal'); }
+        else if(ev.kind==='cube'){ snd('cube',0.1); floatText(e,'⬢ CUBE','heal'); }
+        else if(ev.kind==='heart'){ snd('cube',0.12); floatText(e,'♥ +'+ev.got,'heal'); }
+        else { snd('cash',0.12); feed(`+${money(ev.amount)} from ${ev.owner}`,true); popPouch(); }
+        break; }
+      case 'nuage':
+        snd('cube',0.10*Math.max(0,1-loinDuJoueur(ev.x,ev.z)/26));
+        break;
+      case 'explosion':
+        anneau(ev.x,ev.z,0.3,ev.r,40,0xff7a1a,0.35);
+        snd('shot',0.2*Math.max(0,1-loinDuJoueur(ev.x,ev.z)/30));
+        break;
+      case 'super': {
+        const e=ev.e;
+        if(ev.kind==='heal'){ floatText(e,'+'+Math.round(ev.soin),'heal'); anneau(e.x,e.z,0.3,1.6,32,0x5ce04b,0.5); }
+        if(e.isPlayer) snd('super',0.14);
+        break; }
+      case 'gadget':
+        if(ev.e.isPlayer){ snd('box',0.09); floatText(ev.e,ev.couvre?'☁ COVER':'☁ SMOKE','heal'); }
+        break;
+      case 'detruit':
+        if(ev.quoi==='caisse'){ if(ev.parJoueur) snd('box',0.1); }
+        else snd('box',0.12);
+        break;
+      case 'encaissement': {
+        const b=ev.e, mien=b.team===G.player.team;
+        feed(`${b.name} cashed out${mien?' — you are on your own':''}`,mien);
+        if(Math.random()<0.6) botSay(b,'cashout');
+        break; }
+      case 'reapparition':
+        if(ev.e.isPlayer){ $('respawn').style.display='none'; floatText(ev.e,'RESPAWN','heal'); G.camT.set(ev.x,0,ev.z); }
+        break;
+      case 'fin':
+        endMatch(!!ev.gagne,{killer:ev.killer,rank:ev.rang,cashedOut:!!ev.cashedOut});
+        break;
     }
-    if(dead){ world.remove(p.mesh); discard(p.mesh); G.projs.splice(i,1); }
   }
 }
-
-// ---------- damage / death / loot ----------
-function damage(t,dmg,src){
-  // Consomme le drapeau des l'entree : si l'un des retours anticipes ci-dessous coupe court, il
-  // ne doit pas rester arme et decorer le prochain coup porte a quelqu'un d'autre.
-  const critique = G.critTarget===t; G.critTarget=null;
-  if(!t.alive||G.time<C.GRACE) return;
-  if(t.invuln>0) return;                       // just came back: a moment to move before taking fire
-  if(src&&src!==t&&src.team===t.team) return;
-  dmg=Math.round(dmg*(src?C.dmgMult(src.cubes):1));
-  // End-screen stat. Counted after the cube bonus and capped at what the target still has, so
-  // overkill on the last shot does not inflate the number.
-  if(src&&src.isPlayer) G.dmgDealt+=Math.max(0,Math.min(dmg,t.hp));
-  t.hp-=dmg; t.lastDamageT=G.time; t.lastHitBy=src; t.flash=0.12; if(G.modeCfg&&G.modeCfg.cashout) t.cashLock=C.CASHOUT.lock;
-  if(src&&src.alive) src.super=Math.min(src.brawler.super.cost,src.super+dmg);
-  floatText(t,'-'+dmg,(t.isPlayer?'you':'')+(critique?' crit':''));
-  if(t.isPlayer){ G.player.damageFlash=1; snd('hurt',0.12); }
-  else if(src&&src.isPlayer){ snd(critique?'crit':'hit',critique?0.11:0.06); if(critique) critFx(); }
-  if(t.hp<=0) kill(t,src,'shot');
-}
-function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(C.boxDrop(G.alea('butin/contenu')),bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
-// L'endroit où un objet tombe décide du chemin que quelqu'un devra faire pour le ramasser : il
-// sort du flux `butin/position`. Le déphasage `ph` du ballottement est, lui, purement décoratif,
-// et il se tire du MÊME flux : couper une fonction en deux moitiés dont l'une garderait
-// `Math.random` rendrait la frontière illisible, et le tirage ne coûte rien.
-function spawnPickup(kind,x,z,amount,owner){
-  const mesh =
-      kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
-    : kind==='cube'  ? new THREE.Mesh(new THREE.BoxGeometry(0.5,0.5,0.5),cubeMat)
-      // a canister lying in the grass, the same object you see flying when someone throws one
-    : kind==='smoke' ? makeNade()
-    :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
-  const aleaPos=G.alea('butin/position');
-  let px=x+(aleaPos()-0.5)*1.4, pz=z+(aleaPos()-0.5)*1.4; if(isWall(G,px,pz)){ px=x; pz=z; }
-  mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
-  // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
-  // ground for the rest of the match
-  const shadow=new THREE.Mesh(shadowGeo,shadowMat);
-  shadow.scale.setScalar(0.75); shadow.position.set(px,0.03,pz); world.add(shadow);
-  G.pickups.push({kind,x:px,z:pz,amount,owner,mesh,shadow,ph:aleaPos()*6.283});
-}
-function removePickup(pk){
-  const i=G.pickups.indexOf(pk); if(i<0) return false;
-  G.pickups.splice(i,1);
-  world.remove(pk.mesh); discard(pk.mesh);
-  if(pk.shadow){ world.remove(pk.shadow); discard(pk.shadow); }
-  return true;
-}
-function collect(e,pk){
-  if(pk.kind==='heart' && e.hp>=maxHp(e)) return;        // full health: walk over it, leave it there
-  if(pk.kind==='smoke' && !C.smokeRoom(e.gadget)) return;// pouch full: leave it for someone else
-  if(!removePickup(pk)) return;
-  if(pk.kind==='smoke'){
-    e.gadget=C.smokePicked(e.gadget);
-    if(e.isPlayer){ snd('cube',0.12); floatText(e,'☁ SMOKE +1','heal'); }
-    return;
-  }
-  if(pk.kind==='cube'){
-    const before=maxHp(e);
-    e.cubes=Math.min(C.CUBE.max,e.cubes+pk.amount);
-    e.hp=Math.min(maxHp(e),e.hp+(maxHp(e)-before));      // the bonus health comes with the cube
-    if(e.isPlayer){ snd('cube',0.1); floatText(e,'⬢ CUBE','heal'); }
-  }
-  else if(pk.kind==='heart'){
-    // an instant top-up: the same job as regeneration, only much faster
-    if(e.hp>=maxHp(e)) return;                           // leave it on the ground if already full
-    const got=Math.min(maxHp(e)-e.hp, Math.round(maxHp(e)*C.HEART.heal));
-    e.hp+=got;
-    if(e.isPlayer){ snd('cube',0.12); floatText(e,'♥ +'+got,'heal'); }
-  }
-  else { e.pouch+=pk.amount; if(e.isPlayer){ G.looted+=pk.amount; snd('cash',0.12); feed(`+${money(pk.amount)} from ${pk.owner}`,true); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); } }
-}
-function botCashOut(b){
-  b.alive=false; b.cashedOut=true; b.pouch=0; b.respawnT=0;
-  feed(`${b.name} cashed out${b.team===G.player.team?' — you are on your own':''}`,b.team===G.player.team);
-  if(Math.random()<0.6) botSay(b,'cashout');
-  // a banked brawler is out for good: teammates waiting on them stop waiting
-  if(!G.ents.some(e=>e.team===b.team&&e.alive)) for(const e of G.ents) if(e.team===b.team) e.respawnT=0;
-  checkTeams(b,'Cash out');
-}
-// still in the match while you have lives left, even while waiting to respawn
-const inPlay = e => !e.cashedOut && (e.alive || e.lives > 0);
-function aliveTeams(){ const t=new Set(); for(const e of G.ents) if(inPlay(e)) t.add(e.team); return t; }
-function playersLeft(){ return G.ents.filter(inPlay).length; }
-function kill(victim,killer,cause){
-  if(!victim.alive) return;
-  victim.alive=false; victim.stealthT=0; victim.dashT=0; victim.invuln=0;
-  // whatever you carried always drops, on every death — that is what keeps the money moving
-  // The pouch now goes straight to whoever put them down, in both games. Dropping it as a bag in
-  // MAXWIN meant walking back through the fight you had just won to collect it, and often
-  // somebody else reached it first. A death with nobody to credit — the gas, an abandon — still
-  // drops on the ground, otherwise that money would simply leave the match.
-  const instant=killer&&killer.alive;
-  if(instant){
-    killer.pouch=C.bucketAfterKill(killer.pouch,victim.pouch);
-    if(G.modeCfg.cashout) killer.cashLock=C.CASHOUT.lock;
-    if(killer.isPlayer&&victim.pouch>0){ snd('cash',0.14); feed(`+${money(victim.pouch)} ${G.modeCfg.cashout?'banked':'taken'} from ${victim.name}`,true); floatText(killer,'+'+money(victim.pouch),'heal'); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); }
-  } else if(victim.pouch>0) spawnPickup('cash',victim.x,victim.z,victim.pouch,victim.name);
-  if(C.BOT.dropCubesOnKill) for(let i=0;i<victim.cubes;i++) spawnPickup('cube',victim.x,victim.z,1,null);
-  // grenades are kit, not knowledge: whatever was still in the pouch goes back on the ground
-  for(let i=0;i<((victim.gadget&&victim.gadget.charges)||0);i++) spawnPickup('smoke',victim.x,victim.z,1,null);
-  victim.gadget=C.smokeStart();
-  // kill() wipes the pouch, so the end screen would always read zero for a dead player. Keep
-  // what they were carrying at the moment they went down.
-  if(victim.isPlayer) G.lostPouch=victim.pouch;
-  victim.pouch=0; victim.cubes=0;
-  if(killer) killer.kills++;
-  const who=killer?killer.name:(cause==='abandoned'?'Abandon':'The gas');
-  if(killer&&!killer.isPlayer&&Math.random()<0.45) sendEmote(killer, Math.random()<0.5?'smug':'cool');
-  if(killer&&!killer.isPlayer&&Math.random()<0.5) botSay(killer,'kill');
-  else if(victim.isPlayer&&killer) botSay(killer,'kill');
-  else if(!victim.isPlayer&&killer&&killer.isPlayer&&Math.random()<0.5) botSay(victim,'death');
-
-  victim.lives = cause==='abandoned' ? 0 : Math.max(0, victim.lives-1);
-
-  if(victim.lives>0){
-    victim.respawnT=C.RESPAWN;
-    feed(`${who} downed ${victim.name} · ${victim.lives} ${victim.lives>1?'lives':'life'} left`,(killer&&killer.isPlayer)||victim.team===G.player.team);
-    if(victim.isPlayer){ deathSting(); $('respawn').style.display='block'; }
-  } else {
-    feed(`${who} eliminated ${victim.name}`,(killer&&killer.isPlayer)||victim.team===G.player.team);
-    if(victim.isPlayer){ deathSting(); endMatch(false,{killer:who,rank:aliveTeams().size+1}); return; }
-  }
-  checkTeams(victim,who);
-}
-function checkTeams(victim,who){
-  const at=aliveTeams();
-  if(!at.has(G.player.team)&&!(G.player.respawnT>0)){ endMatch(false,{killer:who||'The gas',rank:at.size+1}); return; }
-  if(at.size===1&&at.has(G.player.team)) endMatch(true,{});
-}
-function doCashOut(){
-  const p=G.player; if(!G.modeCfg.cashout||!p.alive||!G.running||!C.cashoutReady(p.cashLock||0)) return;
-  p.cashedOut=true; endMatch(true,{cashedOut:true});
-}
-$('cashout').addEventListener('click',e=>{ e.stopPropagation(); doCashOut(); });
-$('cashout').addEventListener('touchend',e=>{ e.preventDefault(); e.stopPropagation(); doCashOut(); },{passive:false});
-function respawn(e){
-  // come back somewhere safe inside the current circle, as far as possible from whoever is shooting
-  // Le point de retour est un FAIT de la partie : il décide de qui le revenant croise en premier.
-  // Il sort donc du flux `apparition`. L'angle, lui, garde `Math.cos`/`Math.sin` : il ne vient pas
-  // que de la graine — le cercle de gaz en cours dépend de tout ce qui s'est passé avant — et
-  // l'interdiction des transcendantes s'arrête à la géométrie tirée de la seule graine.
-  const alea=G.alea('apparition');
-  let x=G.zone.cx, z=G.zone.cz, best=-1;
-  for(let t=0;t<40;t++){
-    const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-3);
-    const nx=clamp(G.zone.cx+Math.cos(a)*r,2,N-2), nz=clamp(G.zone.cz+Math.sin(a)*r,2,N-2);
-    if(!free(G,nx,nz)) continue;
-    let nearest=1e9;
-    for(const o of G.ents){ if(o===e||!o.alive||o.team===e.team) continue; nearest=Math.min(nearest,Math.hypot(o.x-nx,o.z-nz)); }
-    if(nearest>best){ best=nearest; x=nx; z=nz; if(nearest>14) break; }
-  }
-  e.x=x; e.z=z; e.vx=0; e.vz=0; e.alive=true; e.hp=maxHp(e); e.ammo=3; e.ammoT=0; e.super=0;
-  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.gadget=C.smokeStart();
-  if(e.isPlayer){ $('respawn').style.display='none'; floatText(e,'RESPAWN','heal'); G.camT.set(x,0,z); }
-}
+$('cashout').addEventListener('click',e=>{ e.stopPropagation(); if(G&&doCashOut(G)) rendreEvenements(); });
+$('cashout').addEventListener('touchend',e=>{ e.preventDefault(); e.stopPropagation(); if(G&&doCashOut(G)) rendreEvenements(); },{passive:false});
 function feed(txt,hi){ const d=document.createElement('div');
   d.innerHTML='<span class="fsk">'+FEED_SKULL+'</span>';
   d.appendChild(document.createTextNode(txt));
@@ -4351,7 +4629,7 @@ function pickGoal(b){
   const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
 }
 function botUpdate(b,dt){
-  if(dashUpdate(b,dt)) return;
+  if(dashUpdate(G,b,dt)) return;
   // Belt and braces. If a brawler is somehow standing where its body does not fit, tryMove()
   // refuses both axes and nothing it decides can ever move it — it just stares at the wall,
   // unshootable, for the rest of the match. Lift it to the nearest spot that does fit.
@@ -4363,7 +4641,7 @@ function botUpdate(b,dt){
       if(done) break; }
   }
   if(G.modeCfg.cashout){ b.cashLock=Math.max(0,(b.cashLock||0)-dt);
-    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&G.alea('bots/encaissement')()<dt*0.25){ botCashOut(b); return; } }
+    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&G.alea('bots/encaissement')()<dt*0.25){ botCashOut(G,b); return; } }
   b.think-=dt; b.fireCd-=dt; b.goalT-=dt; b.aim-=dt; b.stealthT-=dt;
   if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+G.alea('bots/visee')()*0.6); b.target=nt;
     if(!b.target&&(!b.goal||b.goalT<=0||Math.hypot(b.goal.x-b.x,b.goal.z-b.z)<0.8||(b.goal.box&&b.goal.box.hp<=0)||(b.goal.pick&&!G.pickups.includes(b.goal.pick)))){ b.goal=pickGoal(b); b.goalT=8; } }
@@ -4413,14 +4691,14 @@ function botUpdate(b,dt){
       const err=(G.alea('bots/visee')()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
       // lead a little on the player's velocity
       const lead=0.25; const lx=t.x+(t.vx||0)*lead-b.x, lz=t.z+(t.vz||0)*lead-b.z, la=Math.atan2(lx,lz)+err;
-      attack(b,Math.sin(la),Math.cos(la),d);
+      attack(G,b,Math.sin(la),Math.cos(la),d);
       // (stagger||0) comme partout ailleurs. VOLT ne declarait pas de stagger, donc ce calcul
       // rendait NaN — et NaN<=0 vaut faux, pour toujours : le bot tirait une fois au premier
       // contact puis restait planté à regarder sa cible sans jamais rappuyer sur la détente.
       b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
     // smoke is a way out, not an opening: a losing bot drops it on itself and runs, same as you
-    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&G.alea('bots/objectif')()<dt*1.7) throwSmoke(b,0);
+    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&G.alea('bots/objectif')()<dt*1.7) throwSmoke(G,b,0);
     const sp=b.brawler.super;
     if(b.super>=sp.cost){
       // A super's reach depends on its shape: a burst or a lob flies `range`, a thrown zone
@@ -4432,14 +4710,14 @@ function botUpdate(b,dt){
       const reach=(sp.kind==='burst'||sp.kind==='lob'||sp.kind==='zone')?(sp.range||atk.range)
                  :(sp.radius||sp.dist||sp.range||atk.range);
       const inR=d<reach*0.9;
-      if(sp.kind==='heal'){ if(low) useSuper(b); }
-      else if(sp.kind==='stealth'){ if(low||d<atk.range) useSuper(b); }
-      else if(sp.kind==='turret'){ useSuper(b); }
-      else if(inR) useSuper(b,d); }
-  } else { if(b.brawler.super.kind==='heal'&&b.super>=b.brawler.super.cost&&b.hp<maxHp(b)*0.5) useSuper(b); }
+      if(sp.kind==='heal'){ if(low) useSuper(G,b); }
+      else if(sp.kind==='stealth'){ if(low||d<atk.range) useSuper(G,b); }
+      else if(sp.kind==='turret'){ useSuper(G,b); }
+      else if(inR) useSuper(G,b,d); }
+  } else { if(b.brawler.super.kind==='heal'&&b.super>=b.brawler.super.cost&&b.hp<maxHp(b)*0.5) useSuper(G,b); }
   if(!b.target&&inZone(G,b.x,b.z,1.5)&&b.goal){
     const d=Math.hypot(b.goal.x-b.x,b.goal.z-b.z);
-    if(b.goal.box){ const bx=b.goal.box; if(d<atk.range*0.9&&losClear(G,b.x,b.z,bx.x,bx.z)){ b.ax=(bx.x-b.x)/d; b.az=(bx.z-b.z)/d; if(b.fireCd<=0&&b.ammo>=1){ attack(b,b.ax,b.az,d); b.fireCd=0.5; } if(d>1.6){ mx=b.ax; mz=b.az; } } else { mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; } }
+    if(b.goal.box){ const bx=b.goal.box; if(d<atk.range*0.9&&losClear(G,b.x,b.z,bx.x,bx.z)){ b.ax=(bx.x-b.x)/d; b.az=(bx.z-b.z)/d; if(b.fireCd<=0&&b.ammo>=1){ attack(G,b,b.ax,b.az,d); b.fireCd=0.5; } if(d>1.6){ mx=b.ax; mz=b.az; } } else { mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; } }
     else if(d>0.5){ mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; }
     if(Math.hypot(mx,mz)>0.01&&!b.goal.box){ b.ax=mx; b.az=mz; }
   }
@@ -4507,7 +4785,7 @@ function zoneUpdate(dt){
   for(let i=0;i<G.gasParts.length;i++){ const gp=G.gasParts[i]; if(!gp.mesh.visible) continue; gp.a+=gp.sp*dt; const R=z.r+gp.off; gp.mesh.position.set(z.cx+Math.cos(gp.a)*R, 0.8+Math.sin(G.time*1.6+gp.ph)*0.5, z.cz+Math.sin(gp.a)*R); gp.mesh.rotation.y+=dt*0.6; }
   for(const e of G.ents){ if(e.alive&&!inZone(G,e.x,e.z,0)){ e.hp-=z.dps*maxHp(e)*dt; e.lastDamageT=G.time; e.gasT=(e.gasT||0)-dt;
     if(e.gasT<=0){ e.gasT=1; floatText(e,'-'+Math.round(z.dps*maxHp(e)),e.isPlayer?'you':''); if(e.isPlayer) snd('hurt',0.1); }
-    if(e.isPlayer) e.gasHurt=true; if(G.modeCfg.cashout) e.cashLock=C.CASHOUT.lock; if(e.hp<=0) kill(e,e.lastHitBy&&e.lastHitBy.alive?e.lastHitBy:null,'gas'); } }
+    if(e.isPlayer) e.gasHurt=true; if(G.modeCfg.cashout) e.cashLock=C.CASHOUT.lock; if(e.hp<=0) kill(G,e,e.lastHitBy&&e.lastHitBy.alive?e.lastHitBy:null,'gas'); } }
 }
 
 // ---------- input ----------
@@ -4535,17 +4813,17 @@ function touchEnd(e){ if(!G) return;
   for(const t of e.changedTouches){
     if(T.move&&T.move.id===t.identifier){ T.move=null; $('stickL').style.display='none'; }
     if(T.aim&&T.aim.id===t.identifier){ const st=T.aim; T.aim=null; $('stickR').style.display='none';
-      if(G.running&&!G.paused&&G.player.alive){ if(!st.moved) autoAim(); else { const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; attack(G.player,a.ax,a.az,clamp(a.dist,0.2,1)*G.player.brawler.attack.range); } } }
+      if(G.running&&!G.paused&&G.player.alive){ if(!st.moved) autoAim(); else { const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; attack(G,G.player,a.ax,a.az,clamp(a.dist,0.2,1)*G.player.brawler.attack.range); } } }
   } }
 canvas.addEventListener('touchend',touchEnd,{passive:true}); canvas.addEventListener('touchcancel',touchEnd,{passive:true});
 $('pauseBtn').addEventListener('click',()=>{ if(G&&G.running&&!G.paused) pause(); });
 
 addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==='Escape'){ if(G.paused) resume(); else pause(); return; } if(G.paused) return; keys[e.code]=true;
-  if(e.code==='Space'){ e.preventDefault(); useSuper(G.player,G.aimDist); } if(e.code==='KeyQ') autoAim();
+  if(e.code==='Space'){ e.preventDefault(); useSuper(G,G.player,G.aimDist); } if(e.code==='KeyQ') autoAim();
   // G porte les deux usages : on relache tot et la grenade tombe a ses pieds pour decrocher, on
   // maintient et on vise, elle part au loin au relachement. Rien ne part sur l'appui lui-meme.
   if(e.code==='KeyG'){ e.preventDefault(); if(!e.repeat && gDownAt<0) gDownAt=performance.now(); }
-  if(e.code==='KeyC') doCashOut();
+  if(e.code==='KeyC'){ if(G&&doCashOut(G)) rendreEvenements(); }
   if(e.code==='KeyE'){ e.preventDefault(); openWheel(!wheelOpen); }
   if(/^Digit[1-8]$/.test(e.code)){ e.preventDefault(); sendEmote(G.player, C.EMOTE_WHEEL[+e.code.slice(5)-1]); openWheel(false); }
   if(e.code==='Enter'||e.code==='KeyT'){ e.preventDefault(); if(isTouch){ buildQuickChat(); quickChat(!quickOpen); } else openChat(true); }   // one-shot
@@ -4553,7 +4831,7 @@ addEventListener('keydown',e=>{ if(!G||!G.running||typing()) return; if(e.code==
 addEventListener('keyup',e=>{ keys[e.code]=false;
   if(e.code==='KeyG'&&gDownAt>=0){
     const held=(performance.now()-gDownAt)/1000; gDownAt=-1;
-    if(G&&G.running&&!G.paused&&!typing()) throwSmoke(G.player,C.smokeHoldDist(held,clamp(G.aimDist,1,C.SMOKE.range)));
+    if(G&&G.running&&!G.paused&&!typing()) throwSmoke(G,G.player,C.smokeHoldDist(held,clamp(G.aimDist,1,C.SMOKE.range)));
   }
 });
 canvas.addEventListener('mousemove',e=>{ if(isTouch) return; mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1; });
@@ -4562,16 +4840,16 @@ canvas.addEventListener('mousedown',e=>{ if(isTouch||!G||!G.running||G.paused) r
     // one press fires exactly one shot; holding only starts repeating after HOLD_REPEAT seconds,
     // so a click that lingers a little can never cost two rounds
     mouse.down=true; mouse.held=0;
-    if(G.player.alive) attack(G.player,G.player.ax,G.player.az,G.aimDist);
+    if(G.player.alive) attack(G,G.player,G.player.ax,G.player.az,G.aimDist);
   }
-  if(e.button===2) useSuper(G.player,G.aimDist);
+  if(e.button===2) useSuper(G,G.player,G.aimDist);
 });
-$('superwrap').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) useSuper(G.player,G.aimDist); });
+$('superwrap').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) useSuper(G,G.player,G.aimDist); });
 $('superwrap').addEventListener('touchstart',e=>{ if(!G||!G.running||G.paused) return; e.preventDefault(); e.stopPropagation(); const t=e.changedTouches[0]; T.superT={id:t.identifier,ox:t.clientX,oy:t.clientY,dx:0,dy:0,moved:false}; },{passive:false});
 $('superwrap').addEventListener('touchmove',e=>{ if(!T.superT) return; e.preventDefault(); const t=[...e.changedTouches].find(t=>t.identifier===T.superT.id); if(!t) return; const st=T.superT; st.dx=t.clientX-st.ox; st.dy=t.clientY-st.oy; clampStick(st); if(Math.hypot(st.dx,st.dy)>16) st.moved=true; },{passive:false});
 $('superwrap').addEventListener('touchend',e=>{ const st=T.superT; if(!st) return; T.superT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
-  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; useSuper(G.player,clamp(a.dist,0.2,1)*(G.player.brawler.super.range||G.player.brawler.attack.range)); }
-  else useSuper(G.player,G.aimDist); },{passive:true});
+  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; useSuper(G,G.player,clamp(a.dist,0.2,1)*(G.player.brawler.super.range||G.player.brawler.attack.range)); }
+  else useSuper(G,G.player,G.aimDist); },{passive:true});
 // The quick input always smokes you where you stand; the deliberate one places the cloud.
 // On a mouse that is G versus a click on the button, which throws at the cursor. On a phone it is
 // a tap versus a drag, exactly like the right thumb taps to shoot and drags to aim.
@@ -4581,12 +4859,12 @@ let gDownAt=-1;
 const gHold=()=> gDownAt<0 ? 0 : (performance.now()-gDownAt)/1000;
 $('gadget').addEventListener('mouseenter',()=>{ gadgetHover=true; });
 $('gadget').addEventListener('mouseleave',()=>{ gadgetHover=false; });
-$('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) throwSmoke(G.player,clamp(G.aimDist,0,C.SMOKE.range)); });
+$('gadget').addEventListener('mousedown',e=>{ if(e.sourceCapabilities&&e.sourceCapabilities.firesTouchEvents) return; e.stopPropagation(); if(G&&G.running&&!G.paused) throwSmoke(G,G.player,clamp(G.aimDist,0,C.SMOKE.range)); });
 $('gadget').addEventListener('touchstart',e=>{ if(!G||!G.running||G.paused) return; e.preventDefault(); e.stopPropagation(); const t=e.changedTouches[0]; T.gadgetT={id:t.identifier,ox:t.clientX,oy:t.clientY,dx:0,dy:0,moved:false}; },{passive:false});
 $('gadget').addEventListener('touchmove',e=>{ if(!T.gadgetT) return; e.preventDefault(); const t=[...e.changedTouches].find(t=>t.identifier===T.gadgetT.id); if(!t) return; const st=T.gadgetT; st.dx=t.clientX-st.ox; st.dy=t.clientY-st.oy; clampStick(st); if(Math.hypot(st.dx,st.dy)>16) st.moved=true; },{passive:false});
 $('gadget').addEventListener('touchend',e=>{ const st=T.gadgetT; if(!st) return; T.gadgetT=null; if(!G||!G.running||G.paused||!G.player.alive) return;
-  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; throwSmoke(G.player,clamp(a.dist,0.2,1)*C.SMOKE.range); }
-  else throwSmoke(G.player,0); },{passive:true});
+  if(st.moved){ const a=aimFromStick(st); G.player.ax=a.ax; G.player.az=a.az; throwSmoke(G,G.player,clamp(a.dist,0.2,1)*C.SMOKE.range); }
+  else throwSmoke(G,G.player,0); },{passive:true});
 addEventListener('mouseup',e=>{ if(e.button===0){ mouse.down=false; mouse.held=0; } });
 addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('blur',()=>pause());
@@ -4612,7 +4890,7 @@ function buildQualityUI(){
 }
 function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; gDownAt=-1; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
 function mouseWorld(){ raycaster.setFromCamera(mouse,camera); const p=new THREE.Vector3(); return raycaster.ray.intersectPlane(groundPlane,p)?p:null; }
-function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(G,p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(p,p.ax,p.az,d); } }
+function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(G,p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(G,p,p.ax,p.az,d); } }
 
 // ---------- player ----------
 function playerUpdate(dt){
@@ -4634,11 +4912,11 @@ function playerUpdate(dt){
   if(drag){ const a=aimFromStick(drag); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ p.ax=dx/d; p.az=dz/d; } G.aimDist=d; } }
   p.stealthT-=dt;
-  if(dashUpdate(p,dt)) return;
+  if(dashUpdate(G,p,dt)) return;
   let mx=(keys.KeyD?1:0)-(keys.KeyA?1:0), mz=(keys.KeyS?1:0)-(keys.KeyW?1:0);
   if(T.move){ mx=T.move.dx/STICK_R; mz=T.move.dy/STICK_R; }
   moveEntity(G,p,mx,mz,dt);
-  if(mouse.down){ mouse.held+=dt; if(mouse.held>HOLD_REPEAT) attack(p,p.ax,p.az,G.aimDist); }
+  if(mouse.down){ mouse.held+=dt; if(mouse.held>HOLD_REPEAT) attack(G,p,p.ax,p.az,G.aimDist); }
   // aim guide
   p.fireCd=Math.max(0,(p.fireCd||0)-dt);
   p.damageFlash=Math.max(0,(p.damageFlash||0)-dt*2);
@@ -4723,7 +5001,7 @@ function commonUpdate(e,dt){
   // image. Ce qui reste de ces deux lignes est leur seule part de simulation, le decompte.
   if(e.invuln>0) e.invuln-=dt;
   if(e.flash>0) e.flash-=dt;
-  for(let i=G.pickups.length-1;i>=0;i--){ const pk=G.pickups[i]; if(Math.hypot(pk.x-e.x,pk.z-e.z)<0.9) collect(e,pk); }
+  for(let i=G.pickups.length-1;i>=0;i--){ const pk=G.pickups[i]; if(Math.hypot(pk.x-e.x,pk.z-e.z)<0.9) collect(G,e,pk); }
 }
 
 // ---------- emotes ----------
@@ -4842,6 +5120,17 @@ $('chatInput').addEventListener('keydown',e=>{ e.stopPropagation();
 
 // ---------- HUD ----------
 const mapCtx=$('map').getContext('2d');
+// La TROISIEME table annexe, et la derniere : les etiquettes du DOM posees au-dessus des tetes.
+// Elles vivaient jusqu'ici sur l'entite elle-meme (`e.lbl`), ce qui est exactement l'anti-patron
+// que le module 3 avait chasse pour les corps — un noeud du navigateur accroche a un fait de
+// partie. Les entites sont indexees par `eid`, et jamais par `id` : `id` est la PERSONNALITE d'un
+// bot, deux bots peuvent la partager, et deux brawlers auraient partage une barre de vie sans que
+// rien ne casse. Les tourelles, qui n'ont pas d'identifiant, sont indexees par elles-memes.
+// UN SEUL lecteur de cette table, `hudFast`, comme `syncMeshes` pour les corps et `syncMonde`
+// pour le reste.
+const LABELS=new Map();
+let etiTour=0;
+function etiquette(cle,faire){ let rec=LABELS.get(cle); if(!rec){ rec=faire(); LABELS.set(cle,rec); } rec.tour=etiTour; return rec; }
 function hudFast(){
   const p=G.player;
   $('vignette').style.boxShadow=`inset 0 0 120px 40px rgba(229,72,77,${((p.damageFlash||0)*0.8+(p.hp<maxHp(p)*0.3?0.25:0)).toFixed(2)})`;
@@ -4862,29 +5151,32 @@ function hudFast(){
   let riche=null;
   for(const e of G.ents) if(e.alive&&e.pouch>0&&(!riche||e.pouch>riche.pouch)) riche=e;
   G.riche=riche;
+  etiTour++;
   for(const e of G.ents){
-    if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':'')+'<span class="mn"></span>'; L.appendChild(e.lbl); }
-    const hidden=!e.alive||obscured(G,p,e); if(hidden){ e.lbl.style.display='none'; continue; }
-    const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ e.lbl.style.display='none'; continue; }
-    e.lbl.style.display='block'; e.lbl.style.left=s.sx+'px'; e.lbl.style.top=s.sy+'px';
-    const bub=e.lbl.children[0], showing=e.emoteT>0;
+    const rec=etiquette(e.eid,()=>{ const el=document.createElement('div'); el.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); el.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':'')+'<span class="mn"></span>'; L.appendChild(el); return {el,mn:el.querySelector('.mn')}; });
+    const lbl=rec.el;
+    const hidden=!e.alive||obscured(G,p,e); if(hidden){ lbl.style.display='none'; continue; }
+    const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ lbl.style.display='none'; continue; }
+    lbl.style.display='block'; lbl.style.left=s.sx+'px'; lbl.style.top=s.sy+'px';
+    const bub=lbl.children[0], showing=e.emoteT>0;
     if(showing!==(bub.dataset.on==='1')){
       bub.dataset.on=showing?'1':'0';
       bub.classList.toggle('on',showing);
       if(showing) bub.innerHTML=avatarSVG({id:'e'+Math.random().toString(36).slice(2,7), brawler:e.brawler.id, emote:e.emote});
     }
     // your own username above your head, like everyone else's
-    e.lbl.children[1].textContent=e.name;
+    lbl.children[1].textContent=e.name;
     // Le montant coiffe le nom : c'est lui qu'on cherche en balayant l'ecran du regard, pas le
-    // pseudo. Le noeud est retrouve par classe et garde sur l'entite — le chercher a chaque image
-    // pour vingt brawlers ferait mille deux cents requetes par seconde pour rien.
-    if(!e.lblMn) e.lblMn=e.lbl.querySelector('.mn');
-    if(e.lblMn){ const v=(!e.isPlayer&&e.pouch>0)?money(e.pouch):'';
-      if(e.lblMn.textContent!==v) e.lblMn.textContent=v; }
+    // pseudo. Le noeud est retrouve par classe une seule fois et garde dans la fiche d'etiquette —
+    // le chercher a chaque image pour vingt brawlers ferait mille deux cents requetes par seconde
+    // pour rien. Il est range LA et non sur l'entite : un noeud du DOM pose sur un fait de partie
+    // est le meme anti-patron que le corps pose sur un brawler.
+    if(rec.mn){ const v=(!e.isPlayer&&e.pouch>0)?money(e.pouch):'';
+      if(rec.mn.textContent!==v) rec.mn.textContent=v; }
     // power cubes and remaining lives, each as its own labelled badge — a bare "◆8" told nobody anything
     // your own cubes and lives live in the top bar; over your head they were just noise
     // Le joueur ne voit pas son propre magot ici : il l'a deja en haut a gauche, en plus gros.
-    e.lbl.children[2].innerHTML = e.isPlayer ? ''
+    lbl.children[2].innerHTML = e.isPlayer ? ''
       // La barre affiche les PV absolus : un adversaire cube se trahit deja par son nombre, 280
       // au lieu de 140. Le badge ne repete donc son endurance pour rien — ce qu'il ajoute, ce
       // sont ses degats, qui doublent sans que rien d'autre le signale. Sous trois cubes l'ecart
@@ -4892,31 +5184,35 @@ function hudFast(){
       : (e.cubes >= 3 ? `<span class="cb">⬢${e.cubes}</span>` : '')
       + (e.lives < C.livesFor(G.modeCfg) ? `<span class="lv">❤${e.lives}</span>` : '');
     const roi = e===G.riche;
-    if(roi !== (e.lbl.dataset.roi==='1')){
-      e.lbl.dataset.roi = roi ? '1' : '0';
-      const dejaLa = e.lbl.querySelector('.crown');
+    if(roi !== (lbl.dataset.roi==='1')){
+      lbl.dataset.roi = roi ? '1' : '0';
+      const dejaLa = lbl.querySelector('.crown');
       // beforeend, jamais afterbegin : l'etiquette est lue par index — children[1] est le nom,
       // children[3] la barre de vie — et inserer en tete decalerait tout d'un cran.
-      if(roi && !dejaLa) e.lbl.insertAdjacentHTML('beforeend','<span class="crown">'+CROWN+'</span>');
+      if(roi && !dejaLa) lbl.insertAdjacentHTML('beforeend','<span class="crown">'+CROWN+'</span>');
       else if(!roi && dejaLa) dejaLa.remove();
     }
-    const bar=e.lbl.children[3];
+    const bar=lbl.children[3];
     bar.firstChild.style.width=(clamp(e.hp/maxHp(e),0,1)*100)+'%';
     bar.lastChild.textContent=Math.ceil(Math.max(0,e.hp));
-    if(e.isPlayer){ const am=e.lbl.children[4].children; for(let i=0;i<3;i++) am[i].className=i<e.ammo?'on':(i===e.ammo?(e.ammoT/e.brawler.ammoReload>0.5?'on':''):''); }
-    const s2=toScreen(e.x,2.9,e.z); e.lbl.style.top=s2.sy+'px';
+    if(e.isPlayer){ const am=lbl.children[4].children; for(let i=0;i<3;i++) am[i].className=i<e.ammo?'on':(i===e.ammo?(e.ammoT/e.brawler.ammoReload>0.5?'on':''):''); }
+    const s2=toScreen(e.x,2.9,e.z); lbl.style.top=s2.sy+'px';
   }
   // Same treatment for turrets. They were the only thing on the map you could shoot without any
   // idea whether it was working — green bar for your own, red for one that is shooting at you.
   for(const tu of G.turrets){
-    if(!tu.lbl){ tu.lbl=document.createElement('div'); tu.lbl.className='lbl'+(tu.owner.team===p.team?' you':''); tu.lbl.innerHTML='<div class="bar"><i></i><b></b></div>'; L.appendChild(tu.lbl); }
+    const tl=etiquette(tu,()=>{ const el=document.createElement('div'); el.className='lbl'+(tu.owner.team===p.team?' you':''); el.innerHTML='<div class="bar"><i></i><b></b></div>'; L.appendChild(el); return {el}; }).el;
     const st=toScreen(tu.x,2.1,tu.z);
-    if(!st.ok||st.sx<-80||st.sx>innerWidth+80||st.sy<-40||st.sy>innerHeight+40){ tu.lbl.style.display='none'; continue; }
-    tu.lbl.style.display='block'; tu.lbl.style.left=st.sx+'px'; tu.lbl.style.top=st.sy+'px';
-    const tb=tu.lbl.firstChild;
+    if(!st.ok||st.sx<-80||st.sx>innerWidth+80||st.sy<-40||st.sy>innerHeight+40){ tl.style.display='none'; continue; }
+    tl.style.display='block'; tl.style.left=st.sx+'px'; tl.style.top=st.sy+'px';
+    const tb=tl.firstChild;
     tb.firstChild.style.width=(clamp(tu.hp/tu.maxHp,0,1)*100)+'%';
     tb.lastChild.textContent=Math.ceil(Math.max(0,tu.hp));
   }
+  // Le balayage des etiquettes, exactement comme celui des corps : une tourelle detruite a disparu
+  // de l'etat, donc sa barre de vie s'en va avec elle. Les entites, elles, ne quittent jamais
+  // `G.ents` et sont toujours revues a ce tour.
+  for(const [cle,rec] of LABELS){ if(rec.tour===etiTour) continue; rec.el.remove(); LABELS.delete(cle); }
 }
 // Icônes du HUD dessinées en SVG plutôt qu'en emoji : ⬢ et ☠ dépendaient de la police du
 // système, changeaient d'un poste à l'autre et ne s'alignaient jamais dans leur badge.
@@ -4976,8 +5272,8 @@ function hud(){
   // a life and can come back. With three lives, only showing the latter looked frozen at 20.
   const p=G.player, team=G.modeCfg.teamSize>1;
   const standing=G.ents.filter(e=>e.alive).length;
-  const remaining=team?aliveTeams().size:playersLeft();
-  const alive=team?aliveTeams().size:standing;
+  const remaining=team?aliveTeams(G).size:playersLeft(G);
+  const alive=team?aliveTeams(G).size:standing;
   $('pouchAmt').textContent=money(p.pouch); $('killsAmt').textContent=p.kills; $('killsAmt2').textContent=p.cubes;
   const maxLives=C.livesFor(G.modeCfg);
   // Redessiner trois SVG à chaque image serait du gâchis : on ne le fait que si le compte change.
@@ -5184,8 +5480,8 @@ function startMatch(stake){
   // sort plus de `buildWorld` : il est consomme par le feuillage des buissons, dont le nombre vient
   // du palier de qualite, donc de la machine. Le laisser decider des caisses, des points de depart
   // et des bots faisait que deux appareils ne jouaient pas la meme partie sur la meme graine.
-  G={ running:true,paused:true,stake,tier,seed,alea:C.makeFlux(seed),time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
-       dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
+  G={ running:true,paused:true,stake,tier,seed,alea:C.makeFlux(seed),time:0,pas:0,evts:[],hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
+       dmgDealt:0,looted:0,survivedT:0,lostPouch:0,encaisse:0 };
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
   $('cashout').className=mode.cashout?'on':'';
@@ -5197,7 +5493,7 @@ function startMatch(stake){
   G.zone={cx:G.zonePlan.startCx,cz:G.zonePlan.startCz,r:G.zonePlan.startR,phase:0,timer:G.zonePlan.phases[0].waitS,shrinking:false,warned:false,dps:0};
   const aleaCaisses=G.alea('butin/position'), aleaBots=G.alea('bots/identite');
   for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(aleaCaisses()*(N-6))+0.5; z=3+Math.floor(aleaCaisses()*(N-6))+0.5; t++; }while((cellAt(G,x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
-    const mesh=makeCrate(); mesh.position.set(x,0,z);  world.add(mesh); G.boxes.push({x,z,hp:C.BOX_HP,mesh,ph:aleaCaisses()*6.283}); }
+    G.boxes.push({x,z,hp:C.BOX_HP,ph:aleaCaisses()*6.283}); }
   // Le nom d'un bot EN PARTIE fait partie de son identite : il apparait dans le kill feed et dans
   // le rapport de fin. Celui du sas d'attente, lui, reste cosmetique et garde Math.random.
   const pts=spawnPoints(G,G.alea('apparition'),mode.teams,mode.teamSize), names=C.melangeSeme(BOT_NAMES.slice(),aleaBots), bids=Object.keys(B);
@@ -5575,12 +5871,17 @@ function simPas(){
   // « banniere effacee ».
   if(G.intro>0){ G.intro-=dt; if(G.intro<=0) G.intro=-1e-9; return; }
   if(G.intro<0){ G.intro-=dt; if(G.intro<=-0.7) G.intro=0; }
+  // Les evenements sont horodates EN PAS, jamais sur une horloge : c'est le seul repere qu'un
+  // rejeu partage avec la partie d'origine.
+  G.pas=(G.pas|0)+1;
   G.time+=dt;
   playerUpdate(dt);
-  for(const e of G.ents) if(e.respawnT>0){ e.respawnT-=dt; if(e.respawnT<=0) respawn(e); }
+  for(const e of G.ents) if(e.respawnT>0){ e.respawnT-=dt; if(e.respawnT<=0) respawn(G,e); }
   for(const e of G.ents) if(!e.isPlayer&&e.alive) botUpdate(e,dt);
   for(const e of G.ents) commonUpdate(e,dt);
-  projUpdate(dt); zonesUpdate(dt); nadesUpdate(dt); smokesUpdate(dt); zoneUpdate(dt);
+  projUpdate(G,dt); zonesUpdate(G,dt); nadesUpdate(G,dt); smokesUpdate(G,dt); zoneUpdate(dt);
+  // Le pas est joue ; ce qui s'y est PASSE devient maintenant du son et des nombres a l'ecran.
+  rendreEvenements();
 }
 function loop(now){
   if(!G) return; const dt=Math.min(0.05,(now-last)/1000); last=now;
@@ -5600,6 +5901,7 @@ function loop(now){
     // au rendu, et un seul ecrivain est ce qui empeche une seconde copie de s'installer du cote
     // que rien n'execute.
     syncMeshes();
+    syncMonde(dt);
   }
   // Une pause ne se rattrape pas : l'accumulateur repart de zero, sans quoi la reprise executerait
   // d'un coup tous les pas d'un jeu qui ne tournait pas.
@@ -5629,14 +5931,10 @@ function loop(now){
       if(idleChatCd<=0){ idleChatCd=C.CHAT.idleEvery*(0.6+Math.random()*0.9);
         const alive=G.ents.filter(e=>e.alive&&!e.isPlayer);
         if(alive.length) botSay(alive[Math.floor(Math.random()*alive.length)],'idle'); }
-      for(const bx of G.boxes){ if(bx.hp<=0) continue; const b=0.45+0.55*(0.5+0.5*Math.sin(G.time*4.2+bx.ph));
-        for(const q of bx.mesh.userData.marks) q.material.opacity=b;
-        bx.mesh.position.y=Math.sin(G.time*2.1+bx.ph)*0.04; }
+      // Le ballottement des caisses et du butin est parti dans `syncMonde()` : leur corps n'est
+      // plus range sur l'objet de simulation, et un second site qui irait le chercher serait le
+      // deuxieme ecrivain que ce module existe pour empecher.
       for(const bm of G.bushMeshes){ const t=G.time*1.1+bm.userData.sway; bm.position.x=Math.sin(t)*0.045; bm.position.z=Math.cos(t*0.8)*0.035; }
-      for(const pk of G.pickups){
-        if(pk.kind==='heart'){ const b=1+Math.sin(G.time*5+pk.ph)*0.10; pk.mesh.scale.set(0.85*b,0.85*b,1); pk.mesh.position.y=0.75+Math.sin(G.time*3+pk.ph)*0.10; if(pk.shadow) pk.shadow.scale.setScalar(0.75/b); }
-        else { pk.mesh.rotation.y+=dt*2; pk.mesh.position.y=0.5+Math.sin(G.time*3+pk.ph)*0.08; }
-      }
       hudFast(); G.hudT-=dt; if(G.hudT<=0){ G.hudT=0.08; hud(); }
     }
   }
