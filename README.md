@@ -24,7 +24,7 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 358 tests sur le jeu + 119 sur l'API, sans dépendance
+npm test        # 365 tests sur le jeu + 128 sur l'API, sans dépendance
 ```
 
 Les règles du jeu vivent dans deux blocs purs à l'intérieur de `index.html`, sans DOM ni WebGL :
@@ -46,7 +46,7 @@ index.html              le jeu entier
 test.js                 harnais Node du jeu
 corpus-grille.json      corpus gelé : la preuve que le code a bougé sans changer
 api/                    serveur Node, testable sans base : comptes et profils (phase 01),
-                        billet et verdict de partie (phase 02a), trace de partie (phase 02b)
+                        billet de partie (phase 02a), rejeu de la partie (phase 02b)
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage
@@ -76,9 +76,11 @@ Tables : $0,50 · $1 · $5 · $10.
 Deux chantiers avant d'envisager de l'argent réel, détaillés dans
 [docs/DEPLOY.md](docs/DEPLOY.md) :
 
-1. **Serveur autoritaire.** Toute la logique tourne dans le navigateur du joueur ; n'importe qui
-   peut modifier son solde depuis la console. Mouvement, tirs, butin et paiements devront passer
-   côté serveur.
+1. **Le grand livre.** Le serveur **rejoue** désormais la partie et recalcule lui-même durée, kills,
+   rang et sacoche (phase 02b) : le vol de temps est fermé. Restent le vol de *précision* — aimbot et
+   ESP, entiers et structurels — et le solde, qui est encore une variable du navigateur. Aucun euro
+   n'entre avant la phase 03, et faire tourner une vraie Postgres au moins une fois en est un
+   prérequis.
 2. **Cadre légal.** Miser de l'argent réel sur ce type de jeu relève du droit des jeux d'argent
    dans la plupart des juridictions. À faire trancher par un avocat spécialisé avant tout
    branchement de paiement.

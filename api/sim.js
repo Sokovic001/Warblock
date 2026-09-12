@@ -31,7 +31,12 @@ new Function('module', 'exports', 'WBCore', html.slice(a, b))(mod, mod.exports, 
 // d'`api/test.js` compare les deux : toute route qui appellera un nouveau nom de `WBSim` l'ajoute
 // ici, sans quoi la panne se déplace du démarrage vers le premier joueur.
 const ATTENDUS = ['SIM_VERSION', 'EMPREINTE_PAS', 'newMatch', 'step', 'drainer', 'condenseEtat',
-                  'empreinte', 'appliquerActe', 'rejouer'];
+                  'empreinte', 'appliquerActe', 'rejouer',
+                  // Le rejeu du module 7 : ce qui dit qu'une partie est FINIE, ce qu'elle rend
+                  // comme faits, et l'argent qu'elle porte encore. Trois règles du jeu, chargées
+                  // depuis le jeu — les recopier ici en ferait une seconde version, qui finirait
+                  // par juger une autre partie que celle que le joueur a vue.
+                  'terminal', 'faits', 'argentCents'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBSim n'exporte plus ${nom}.`);
 }

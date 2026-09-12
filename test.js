@@ -1574,7 +1574,7 @@ test('reportFrom rend des faits propres, et un montant absent ne devient pas zé
   const r = C.reportFrom({ seconds: 214.7, kills: '3', deaths: -2, rank: 0, cubes: 4.4, damage: 5120.6,
                            cashedOut: 1, purseCents: 200.9, declaredNetCents: 0 });
   assert.deepStrictEqual(r, { seconds: 215, kills: 3, deaths: 0, rank: 1, cubes: 4, damage: 5121,
-                              cashedOut: true, purseCents: 200, declaredNetCents: 0 });
+                              cashedOut: true, purseCents: 200, declaredNetCents: 0, digests: '' });
   // Un compte absent vaut zéro : le fait n'a pas eu lieu. Un montant absent vaut null, comme
   // `toCents` rend null — un zéro silencieux se paie, une valeur absente se repère.
   for (const vide of [undefined, null, {}, 'rapport', 42, []]) {
@@ -2504,21 +2504,28 @@ test('le sas d\'attente ne regarde jamais le réseau pour lancer la partie', () 
   for (const interdit of ['await', 'fetch', 'Auth.', 'ticket', 'billet'])
     assert.ok(!tick.includes(interdit), `le décompte du sas ne doit pas connaître ${interdit}`);
 });
-test('le rapport part par reportFrom, et les montants par toCents', () => {
+test('le rapport part par reportFrom, et les faits par WBSim.faits', () => {
   const fin = JEU.slice(JEU.indexOf('function endMatch('), JEU.indexOf('// ---------- live wins ticker'));
   assert.ok(fin.length > 2000, 'endMatch n\'a pas été retrouvée');
   assert.match(fin, /Match\.fin\(\{/, 'la fin de partie passe par le module du billet');
   const rapport = fin.slice(fin.indexOf('Match.fin({'), fin.indexOf('setTimeout('));
-  assert.match(rapport, /purseCents:C\.toCents\(p\.pouch\)/);
+  // LES FAITS VIENNENT DE SIM, PAS DU RENDU. Le serveur recalcule les mêmes champs en rejouant la
+  // partie : les redéfinir ici ferait deux idées de ce qu'est une durée ou un rang, et le rejeu
+  // jugerait une autre partie que celle que l'écran vient d'afficher.
+  assert.match(rapport, /\.\.\.faits\(G\)/, 'endMatch redéfinit les faits au lieu de les lire dans SIM');
   assert.match(rapport, /declaredNetCents:C\.toCents\(netGagne\)/);
+  assert.match(rapport, /digests:C\.digestsEncode\(G\.empreintes\)/);
   // Aucun montant construit à la main : la conversion dollars → centimes a UN seul point, et
   // c'est toCents. Une multiplication par 100 ici serait un second, exactement celui que la
   // couche monétaire existe pour empêcher.
   const dur = rapport.split('\n').filter(l => !l.trim().startsWith('//') && /[*/]\s*100\b/.test(l));
   assert.deepStrictEqual(dur, [], 'le rapport convertit à la main au lieu d\'appeler toCents');
-  // Et aucun montant de plus que les deux que REPORT_FIELDS autorise.
+  // Et aucun montant de plus que celui que le rendu a le droit d'ajouter aux faits de SIM.
   const montants = (rapport.match(/\w+Cents:/g) || []).map(s => s.slice(0, -1)).sort();
-  assert.deepStrictEqual(montants, ['declaredNetCents', 'purseCents'], 'un montant de plus part au serveur');
+  assert.deepStrictEqual(montants, ['declaredNetCents'], 'un montant de plus part au serveur');
+  // La sacoche, elle, reste convertie par `toCents` — dans SIM cette fois, qui est le seul endroit
+  // à en connaître la valeur en dollars.
+  assert.match(sim, /purseCents: C\.toCents\(p\.pouch\)/);
   // Et le rapport lui-même est construit par WBCore : le bloc Game ne choisit pas ce qui traverse.
   const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
   assert.ok(module.length > 1000, 'le module du billet n\'a pas été retrouvé');
@@ -4202,6 +4209,166 @@ test('L\'ENVELOPPE DE matchVerdict EST CONFRONTÉE AU CODE DU JEU : cinquante pa
   const rangs = PARTIES.map(r => ({ rang: r.rapport.rank, max: Math.max(1, Math.round(C.seatsOf(r.mode) / r.mode.teamSize)) }));
   assert.ok(rangs.some(x => x.rang > x.max),
     'aucune partie n\'a atteint le rang « nombre d\'équipes + 1 » : le contrôle élargi en 02a n\'est plus éprouvé');
+});
+
+test('L\'ÉTAT TERMINAL EST UN FAIT DE LA PARTIE, et une partie tronquée n\'en a pas', () => {
+  // LA RÈGLE QUI TIENT L'ARGENT DANS UN REJEU DIFFÉRÉ. Le serveur n'écrit un montant que si le
+  // rejeu atteint une fin ; sans elle, couper le réseau juste après un gros kill deviendrait la
+  // meilleure stratégie du jeu le jour où un euro entre. Elle vit dans SIM parce que le jeu et le
+  // serveur doivent en avoir exactement une idée.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  const fins = {};
+  for (const r of PARTIES){
+    const t = SIMU.terminal(r.G);
+    assert.ok(t, `${r.cleMode} · graine ${r.graine} : une partie complète sans état terminal`);
+    fins[t] = (fins[t] || 0) + 1;
+    // Et l'issue que le harnais a constatée de l'extérieur dit la même chose.
+    assert.ok(r.issue === 'vainqueur' || r.issue === 'plan', r.issue);
+  }
+  // Le harnais joue mal et perd toujours : les cinquante parties finissent toutes sur
+  // l'élimination du joueur. C'est écrit plutôt que caché — les trois autres fins sont éprouvées
+  // une par une dans le test suivant, parce qu'aucune ne se commande à un pilote.
+  assert.deepStrictEqual(Object.keys(fins), ['elimination'], JSON.stringify(fins));
+  // Une partie COUPÉE en plein milieu n'est pas terminale, et c'est tout le sujet : elle ne se
+  // règle pas. Trois cents pas, c'est cinq secondes de jeu — le décompte d'intro finit à peine.
+  const G = SIMU.newMatch(4101, C.MODES.solo, 50, C.BRAWLERS.bolt);
+  for (let i = 0; i < 300; i++) SIMU.step(G, {});
+  assert.strictEqual(SIMU.terminal(G), null, 'une partie de cinq secondes est déjà déclarée finie');
+  assert.strictEqual(G.fin, null);
+});
+test('LES QUATRE FINS D\'UNE PARTIE, une par une : encaissement, victoire, élimination, plan', () => {
+  // Chacune ouvre le droit d'écrire un montant, donc chacune se vérifie sur le vrai code plutôt que
+  // sur la lecture de `terminal`. Aucune ne se commande à un pilote : elles se provoquent.
+  const neuf = (cle, brawler) => SIMU.newMatch(4242, C.MODES[cle], 50, C.BRAWLERS[brawler || 'bolt']);
+
+  // ENCAISSEMENT : le joueur sort avec sa sacoche. Il reste vivant, donc rien d'autre ne l'annonce.
+  const enc = neuf('resurgence');
+  for (let i = 0; i < 300; i++) SIMU.step(enc, {});
+  assert.strictEqual(SIMU.terminal(enc), null);
+  assert.strictEqual(SIMU.doCashOut(enc), true);
+  assert.strictEqual(SIMU.terminal(enc), 'encaissement');
+  assert.strictEqual(SIMU.faits(enc).cashedOut, true);
+  assert.strictEqual(SIMU.faits(enc).rank, 1, 'sortir avec l\'argent est une sortie gagnante');
+
+  // VICTOIRE : plus qu'une équipe en jeu, et c'est la sienne. On épuise les vies des dix-neuf
+  // autres par la vraie fonction de mort.
+  const vic = neuf('solo');
+  for (let i = 0; i < 300; i++) SIMU.step(vic, {});
+  // Une vie chacun, puis le gaz : `kill` sort tout de suite sur un mort, donc on ne peut pas
+  // frapper trois fois d'affilée le même — c'est la dernière vie qui élimine, pas le nombre de
+  // coups.
+  for (const e of vic.ents) if (!e.isPlayer){ e.lives = 1; if (e.alive) SIMU.kill(vic, e, null, 'gas'); }
+  assert.strictEqual(SIMU.terminal(vic), 'victoire');
+  assert.strictEqual(SIMU.faits(vic).rank, 1);
+
+  // ÉLIMINATION : le joueur perd toutes ses vies. Il n'y a plus de rejeu à attendre.
+  const eli = neuf('solo');
+  for (let i = 0; i < 300; i++) SIMU.step(eli, {});
+  eli.player.lives = 1;
+  SIMU.kill(eli, eli.player, null, 'gas');
+  assert.strictEqual(SIMU.terminal(eli), 'elimination');
+  assert.ok(SIMU.faits(eli).rank > 1);
+  assert.strictEqual(SIMU.faits(eli).purseCents, 0, 'mourir vide la sacoche');
+
+  // PLAN : le gaz a fini de se refermer et personne n'a gagné. Le joueur est vivant, donc aucun
+  // événement de fin n'a été émis — c'est l'horloge de la partie qui tranche, et elle seule.
+  const fin = neuf('solo');
+  fin.time = C.zoneTotalS(fin.zonePlan);
+  assert.strictEqual(SIMU.terminal(fin), 'plan');
+  fin.time -= 0.001;
+  assert.strictEqual(SIMU.terminal(fin), null, 'la fin du plan se joue à la seconde près');
+});
+test('UNE SEULE DÉFINITION DES FAITS D\'UNE PARTIE : le harnais et WBSim disent la même chose', () => {
+  // `endMatch` rendait ces neuf champs au serveur, le harnais les recopiait, et le serveur allait
+  // les recopier une troisième fois pour son rejeu. Trois copies d'une même définition, dont deux
+  // auraient fini par mentir — et alors le serveur aurait jugé une AUTRE partie que celle que
+  // l'écran du joueur venait d'afficher. `WBSim.faits` est désormais la seule ; le harnais garde
+  // ses propres formules, ce qui en fait une seconde opinion et non une récitation.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  for (const r of PARTIES)
+    assert.deepStrictEqual(
+      C.reportFrom({ ...SIMU.faits(r.G), declaredNetCents: r.rapport.declaredNetCents }),
+      r.rapport, `${r.cleMode} · graine ${r.graine} : SIM et le harnais ne comptent pas pareil`);
+});
+test('L\'ARGENT EN JEU A UN SEUL COMPTEUR, et le serveur l\'assertera avec celui-là', () => {
+  // Le harnais fait sa propre somme à chaque pas — c'est la seconde opinion, et elle reste. Celle
+  // de SIM est celle que le serveur assertera au moment du règlement, sur la partie qu'il vient de
+  // rejouer : les deux doivent tomber sur le même nombre, sinon l'assertion du serveur ne
+  // protégerait rien.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  for (const r of PARTIES)
+    assert.strictEqual(SIMU.argentCents(r.G), r.miseCents * C.seatsOf(r.mode),
+      `${r.cleMode} · graine ${r.graine} : l'argent en jeu à la fin ne vaut pas mise × sièges`);
+});
+test('L\'EMPREINTE VOYAGE EN CONDENSÉS, et la suite dit OÙ deux rejeux s\'écartent', () => {
+  // Un seul nombre final répondrait « d'accord » ou « pas d'accord » ; il ne dirait jamais À PARTIR
+  // DE QUAND. Or la divergence se MESURE — elle ne se punit pas — et une liste d'exclusion dont
+  // personne ne connaît le rendement serait pire que pas de mesure du tout.
+  const un = jouer(9091, 'solo', 100, 'hex');
+  const suite = un.G.empreintes;
+  assert.ok(Array.isArray(suite) && suite.length > 10, `${suite && suite.length} condensés`);
+  // Un condensé tous les EMPREINTE_PAS pas, et pas un de plus.
+  assert.strictEqual(suite.length, Math.floor(un.G.pas / SIMU.EMPREINTE_PAS));
+  for (const v of suite) assert.ok(Number.isInteger(v) && v >= 0 && v <= 0xffffffff, String(v));
+  // L'aller-retour est exact, zéros de tête compris : c'est une pièce de comparaison, pas un
+  // affichage — une valeur qui change en chemin ferait diverger un joueur parfaitement honnête.
+  const texte = C.digestsEncode(suite);
+  assert.strictEqual(texte.length, suite.length * C.DIGESTS_MOT);
+  assert.deepStrictEqual(C.digestsDecode(texte), suite);
+  assert.deepStrictEqual(C.digestsDecode(C.digestsEncode([0, 1, 0xffffffff, 0x80000000])),
+    [0, 1, 0xffffffff, 0x80000000]);
+  // Elle ne LANCE jamais : une suite illisible est une divergence de plus à mesurer, pas un 500 sur
+  // la route qui décide d'un montant.
+  for (const faux of ['', 'abc', texte + 'x', 'A'.repeat(5), '!!!!!!', 42, null, undefined, []])
+    assert.strictEqual(C.digestsDecode(faux), null, JSON.stringify(faux));
+  // Et le rang de la divergence est le PREMIER où les deux suites s'écartent.
+  assert.strictEqual(C.digestsDiff(suite, suite), -1);
+  const autre = suite.slice(); autre[4] = (autre[4] ^ 1) >>> 0;
+  assert.strictEqual(C.digestsDiff(suite, autre), 4);
+  // Une suite plus courte s'écarte à SA fin : une partie tronquée n'est pas la même partie qu'une
+  // partie menée jusqu'au bout.
+  assert.strictEqual(C.digestsDiff(suite, suite.slice(0, 7)), 7);
+  assert.strictEqual(C.digestsDiff(suite.slice(0, 7), suite), 7);
+});
+test('la suite des condensés d\'une partie entière tient sous MAX_BODY, dans les cinq modes', () => {
+  // Elle part avec le rapport, sur la route qui décide d'un montant — celle dont la borne de corps
+  // ne bouge pas d'un octet. Si une partie complète ne tenait pas dedans, le joueur le plus
+  // endurant serait le seul à ne jamais pouvoir prouver sa convergence.
+  const MAX_BODY = 4 * 1024;
+  for (const cle of Object.keys(C.MODES)){
+    let pire = 0;
+    for (const g of [1, 7, 4101, 90210, 4294967295])
+      pire = Math.max(pire, C.traceMaxSteps(C.zonePlan(g, C.MODES[cle])));
+    const caracteres = Math.ceil(pire / SIMU.EMPREINTE_PAS) * C.DIGESTS_MOT;
+    assert.ok(caracteres <= C.DIGESTS_MAX, `${cle} : ${caracteres} caractères pour ${C.DIGESTS_MAX} permis`);
+    // Le rapport entier, condensés compris, doit tenir dans le corps que la route accepte.
+    const rapport = C.reportFrom({ seconds: 999, kills: 99, deaths: 9, rank: 99, cubes: 9,
+                                   damage: 999999, cashedOut: true, purseCents: 999999,
+                                   declaredNetCents: 999999, digests: 'A'.repeat(caracteres) });
+    assert.ok(JSON.stringify(rapport).length < MAX_BODY,
+      `${cle} : un rapport complet pèse ${JSON.stringify(rapport).length} octets pour ${MAX_BODY}`);
+  }
+});
+test('checkReport lit les condensés comme une chaîne bornée, et une chaîne vide est valide', () => {
+  const bon = C.reportFrom({ seconds: 90, kills: 2, deaths: 0, rank: 1, cubes: 3, damage: 900,
+                             cashedOut: true, purseCents: 300, declaredNetCents: 240 });
+  assert.strictEqual(bon.digests, '', 'un rapport sans condensés en porte une chaîne vide');
+  assert.deepStrictEqual(C.checkReport(bon).erreurs, [], 'une chaîne vide doit passer');
+  // Elle n'est pas un fait : son contenu n'est jamais validé, seule sa longueur l'est. Un client
+  // qui envoie n'importe quoi ne triche pas, il ne prouve simplement aucune convergence.
+  assert.deepStrictEqual(C.checkReport({ ...bon, digests: 'nimportequoi' }).erreurs, []);
+  for (const [v, code] of [[42, 'type'], [null, 'manquant'], [{}, 'type'],
+                           ['A'.repeat(C.DIGESTS_MAX + 1), 'borne']]){
+    const { rapport, erreurs } = C.checkReport({ ...bon, digests: v });
+    assert.strictEqual(rapport, null, JSON.stringify(v));
+    assert.ok(erreurs.some(e => e.field === 'digests' && e.code === code),
+      `${JSON.stringify(v)} : ${JSON.stringify(erreurs)}`);
+  }
+  // Et `reportFrom` coupe sur un multiple de la taille d'un condensé : une suite tranchée en plein
+  // mot serait illisible, donc indistinguable d'une suite absente.
+  const trop = C.reportFrom({ digests: 'A'.repeat(C.DIGESTS_MAX + 99) });
+  assert.strictEqual(trop.digests.length % C.DIGESTS_MOT, 0);
+  assert.ok(trop.digests.length <= C.DIGESTS_MAX);
 });
 
 test('REPRODUCTIBILITÉ : même graine et même trace, même état final et même empreinte — deux fois', () => {

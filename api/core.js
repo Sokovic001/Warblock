@@ -29,7 +29,10 @@ new Function('module', 'exports', html.slice(a, b))(mod, mod.exports);
 const ATTENDUS = ['sanitizeName', 'validName', 'nameKey', 'nameOr', 'NAME', 'MODES', 'TIERS',
                   'LOBBY', 'BRAWLERS', 'avatarList', 'toCents', 'tierFor', 'seatsOf', 'zonePlan',
                   'zoneTotalS', 'checkReport', 'matchVerdict',
-                  'TRACE', 'traceMaxSteps', 'traceDecode'];
+                  'TRACE', 'traceMaxSteps', 'traceDecode',
+                  // Le rejeu du module 7 : le rapport qu'il reconstruit depuis la partie rejouée,
+                  // et la comparaison des empreintes qui dit si son rejeu a convergé.
+                  'reportFrom', 'digestsDecode', 'digestsDiff', 'PG_INT4_MAX'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBCore n'exporte plus ${nom}.`);
 }

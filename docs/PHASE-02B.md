@@ -1,7 +1,9 @@
 # Phase 02b — le serveur rejoue la partie
 
-État : **en cours**. Spécification écrite avant le premier module, comme pour la 02a, pour que
-chacun sache ce qu'il construit et surtout ce qu'il n'a pas le droit de casser.
+État : **faite**, les sept modules livrés. Spécification écrite avant le premier module, comme pour
+la 02a, pour que chacun sache ce qu'il construit et surtout ce qu'il n'a pas le droit de casser.
+Les notes *Fait au module N* sont restées en place : elles disent ce que la spécification avait
+prévu juste, et ce qu'elle avait prévu faux.
 
 **La phase 02 n'est pas faite tant que celle-ci ne l'est pas, et aucun euro n'entre avant.** Même
 finie, cette phase n'ouvre aucune table en argent réel : elle ferme le trou que la 02a avait écrit
@@ -649,10 +651,18 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
   Postgres une fois, ne serait-ce qu'à la main, devient un **prérequis de la phase 03**, et c'est
   écrit comme tel.
 - **`match_traces` n'a aucune politique de conservation.** Nommé, renvoyé à la phase 03.
-- **Le dernier module concentre le risque restant**, comme le branchement du jeu en 02a. S'il glisse,
-  les modules 1 à 6 gardent leur valeur propre : le jeu devient déterministe, le pas fixe le rend
-  équitable entre appareils, les tirs cessent de traverser, et le dépôt obtient son premier test qui
-  regarde une partie se jouer. C'est le découpage qui protège.
+- ~~**Le dernier module concentre le risque restant**~~ *Livré.* S'il avait glissé, les modules 1 à 6
+  gardaient leur valeur propre : le jeu devient déterministe, le pas fixe le rend équitable entre
+  appareils, les tirs cessent de traverser, et le dépôt obtient son premier test qui regarde une
+  partie se jouer. C'est le découpage qui protège, et il n'a pas eu à servir.
+- **Ce que le module 7 ne pouvait pas éprouver, et qui est écrit plutôt que tu :** *une victoire
+  MAXWIN réellement jouée*. Le pilote des tests perd les cinquante parties sur cinquante ; la seule
+  sortie gagnante qu'un test puisse commander est l'**encaissement** de Resurgence, et c'est par lui
+  que passe le seul chemin de paiement réellement exercé de bout en bout. Le chemin « victoire » du
+  verdict garde ses tests propres, sur des rapports construits à la main, et `terminal` a le sien sur
+  une partie où les dix-neuf bots sont éliminés par la vraie fonction de mort. Gagner contre
+  dix-neuf bots ne se commande pas à un pilote de vingt lignes, et un test qui en dépendrait finirait
+  par tomber tout seul.
 
 ---
 
@@ -688,8 +698,35 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
    vérité ; le jeu enregistre la trace de ses entrées, quantifiée à la source et compressée par
    plages, et l'envoie à la fin de la partie sur `POST /api/match/:id/trace`, en segments, dans une
    table en **insertion seule**. Aucune décision d'argent n'a changé, et c'est voulu.
-7. **Le rejeu décide.** La route recalcule les faits, l'état terminal devient obligatoire, la
-   divergence se mesure, la documentation rattrape.
+7. **Le rejeu décide. Fait.** `POST /api/match/:id/result` rejoue la partie depuis `seed_public` et
+   la trace lue en base, recalcule durée, kills, morts, rang, cubes et sacoche, et ne donne que ces
+   faits-là à `matchVerdict` — **sans changer une seule route**. L'état terminal est obligatoire, la
+   conservation de l'argent est assertée au règlement, `REPLAY_BUDGET_MS` borne le calcul, la
+   divergence est mesurée sur `digest_match` / `divergence_step` et exposée comme un taux, et huit
+   refus nommés sortent en 400 ou 409 sans jamais laisser un joueur enfermé dans un billet mort.
+
+*Ce que le module 7 a ajouté et que cette spécification n'avait pas prévu.* Le serveur ne peut pas
+dire **où** son rejeu s'est écarté de la partie du joueur s'il ne reçoit qu'un nombre : une empreinte
+finale répond « d'accord » ou « pas d'accord », jamais « à partir d'ici ». `divergence_step` exigeait
+donc que le client envoie la **suite** de ses condensés, pas seulement leur accumulation. C'est un
+dixième champ du rapport, `digests`, six caractères base64url par condensé, au plus un millier de
+caractères pour une partie complète — `MAX_BODY` n'a pas bougé d'un octet. Trois fonctions de plus
+dans `WBCore` (`digestsEncode`, `digestsDecode`, `digestsDiff`) et une liste de plus dans l'état de
+partie (`G.empreintes`).
+
+Deux autres choses ont dû descendre dans `WBSim` plutôt que d'être écrites dans l'API, et c'était la
+seule lecture honnête de « l'API ne recopie jamais une règle du jeu » : **`terminal(G)`**, qui dit
+qu'une partie est finie, et **`faits(G)`**, qui dit ce qu'elle rend comme durée, kills, rang et
+sacoche. `endMatch` les recopiait, le harnais de `test.js` aussi, et le serveur allait le faire une
+troisième fois — trois copies d'une même définition, dont deux auraient fini par juger une autre
+partie que celle que l'écran du joueur venait d'afficher. `argentCents(G)` les rejoint pour la
+conservation. Le harnais garde ses propres formules, ce qui en fait une seconde opinion et non une
+récitation, et un test compare les deux sur les cinquante parties.
+
+Enfin `createApp` reçoit **deux horloges** au lieu d'une. `now` donne une **date** et décide si un
+billet a expiré ; `chrono` mesure une **durée**, celle du rejeu, et c'est elle que `REPLAY_BUDGET_MS`
+borne. Les confondre rendait le budget intestable : une horloge figée à midi ne dépasse jamais deux
+secondes, et une horloge qui avance ferait expirer des billets à chaque pas de simulation.
 
 L'ordre suit la doctrine du dépôt : le dernier module porte le risque, et les précédents gardent leur
 valeur s'il glisse. Le module 5 est le critère de sortie qui compte — une partie entière se joue sans

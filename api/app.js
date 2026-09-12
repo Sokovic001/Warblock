@@ -45,6 +45,34 @@ const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHO
 // n'est en jeu en 02a : on préfère perdre une ligne de statistique que bloquer un joueur.
 const MATCH_MARGE_S = 600;
 
+// LE BUDGET DE CALCUL D'UN REJEU. Il tourne dans le fil de la requête, et une trace adversariale
+// peut chercher à en maximiser le coût : c'est la surface d'attaque que la phase 02b ajoute, et
+// elle se borne ici. Une partie solo complète — neuf mille pas, vingt brawlers — coûte environ
+// trois cents millisecondes sur la machine de développement ; deux secondes laissent donc six fois
+// la marge, tout en refusant de tenir un fil une minute entière. Le dépassement est un code NOMMÉ,
+// jamais une exception, et il s'éprouve avec une horloge injectée, donc sans attendre.
+const REPLAY_BUDGET_MS = 2000;
+
+// LES REFUS DU REJEU, ET LEUR CODE HTTP. Six codes pour la trace — trop longue, malformée,
+// absente, non terminale, produite sous une autre version, trop chère à rejouer — plus deux gardes
+// qu'aucun client honnête ne peut déclencher : un billet dont le mode a disparu du jeu, et une
+// partie rejouée où l'argent ne se conserve pas, qui serait un défaut du serveur et non du joueur.
+//
+// AUCUN N'EST UN 500, ET AUCUN NE LAISSE LA LIGNE SANS ISSUE. C'est la leçon du `22003` : un
+// joueur n'a qu'un billet ouvert à la fois, donc une route qui échoue en laissant la ligne `open`
+// l'enferme jusqu'à l'expiration. Ici la ligne reste ouverte volontairement, sans le moindre
+// montant, et c'est le veilleur de la 02a qui la clôt — un seul endroit clôt sans montant.
+const REJEU_CODES = {
+  trop_de_pas:   400,
+  donnees:       400,
+  trace_absente: 409,
+  non_terminal:  409,
+  sim_version:   409,
+  budget:        409,
+  billet:        409,
+  conservation:  409,
+};
+
 // ---------- limitation de débit ----------
 // Un seau par utilisateur, en mémoire. Volontairement simple : il freine le martèlement d'un pseudo
 // convoité, il ne prétend pas résister à une attaque distribuée. Le jour où l'API tournera sur
@@ -183,7 +211,13 @@ const moi = (u, s) => ({
   // `sum()` rendent un `bigint`, que le pilote Postgres livre en CHAÎNE. Une statistique partie en
   // texte ne se voit qu'à l'écran, longtemps après, et deux lignes coûtent moins qu'une panne
   // silencieuse.
-  stats: { matches: nombre(s.matches), wins: nombre(s.wins), kills: nombre(s.kills), best: nombre(s.best) },
+  // `divergences` EST UN AGRÉGAT, PAS UN AVERTISSEMENT. Les quatre premiers chiffres ne comptent
+  // que les parties dont le rejeu a CONVERGÉ — c'est la garantie écrite dont la phase 03 a besoin,
+  // et un filtre dont personne ne connaît le rendement serait pire que pas de filtre. Le cinquième
+  // dit donc combien de parties réglées ce filtre écarte. Un chiffre, pas un pressentiment. Le
+  // taux se déduit des deux : ce dépôt ne transporte pas de flottant qu'il peut éviter.
+  stats: { matches: nombre(s.matches), wins: nombre(s.wins), kills: nombre(s.kills), best: nombre(s.best),
+           divergences: nombre(s.divergences) },
 });
 
 // Le billet, tel qu'il part au client. Même liste blanche explicite que `moi`, et une raison de
@@ -215,6 +249,14 @@ const reglement = m => ({
   matchId: String(m.id),
   status: m.status,
   issue: ouNul(m.issue),
+  // CE QUE LE REJEU A COÛTÉ ET CE QU'IL A TROUVÉ. On le dit au client pour la même raison qu'on
+  // lui dit le motif d'un refus : une divergence qu'il ne peut pas voir est un bug qu'on ne saura
+  // jamais reproduire. Aucun de ces quatre nombres ne décide d'un montant — `digestMatch` décide
+  // seulement de ce que la phase 03 aura le droit de lire.
+  traceSteps: ouNul(m.trace_steps),
+  digestMatch: m.digest_match === undefined ? null : m.digest_match,
+  divergenceStep: ouNul(m.divergence_step),
+  replayMs: ouNul(m.replay_ms),
   // Le motif d'un refus, et le contrôle d'ENVELOPPE qui l'a prononcé. On le dit au client : une
   // partie refusée sans explication est un bug qu'on ne saura jamais reproduire.
   controle: ouNul(m.controle),
@@ -240,6 +282,12 @@ function createApp({
   randomSecret = () => crypto.randomBytes(16).toString('hex'),
   // L'horloge aussi : l'expiration d'un billet se teste en avançant le temps, pas en attendant.
   now = Date.now,
+  // ET UNE SECONDE HORLOGE, qui n'est pas la même chose. `now` donne une DATE — elle décide si un
+  // billet a expiré, et les tests la figent. `chrono` mesure une DURÉE, celle du rejeu, et c'est
+  // elle que `REPLAY_BUDGET_MS` borne. Les confondre rendait le budget intestable : une horloge
+  // figée à midi ne dépasse jamais deux secondes, et une horloge qui avance ferait expirer des
+  // billets à chaque pas de simulation. Deux rôles, deux robinets.
+  chrono = Date.now,
 }) {
   if (!db || !verifyToken) throw new Error('createApp a besoin de db et verifyToken.');
   const autorises = new Set(origins);
@@ -434,12 +482,136 @@ function createApp({
     }, origin);
   }
 
+  // ---------- LE REJEU : le serveur refait la partie, il ne croit plus aucun fait déclaré ----------
+  // C'est le seul aveu de la 02a que cette phase existe pour lever : « le net vaut
+  // `cashoutCents(sacoche)` dans les cinq modes, et la sacoche est précisément le nombre que le
+  // serveur ne sait pas refaire ». Il sait, désormais : la graine publique du billet lui donne la
+  // carte, le gaz, les caisses et les vingt bots ; la trace lui donne ce que le joueur a fait ; et
+  // le bloc `WBSim` — le MÊME que le navigateur exécute, chargé depuis `index.html` — lui donne
+  // les règles. Il n'y a rien d'autre dans une partie.
+  //
+  // Ce que cette fonction rend : soit un refus NOMMÉ, et alors aucun montant n'est écrit nulle
+  // part, soit les faits recalculés, que `matchVerdict` jugera ensuite. Elle ne lance jamais.
+  function rejouerPartie(ligne, segments, rapport) {
+    const debut = chrono();
+    // Entier et borné par la CAPACITÉ de sa colonne, pas par ce qu'on croit d'une horloge : ce
+    // nombre part dans un `integer`, et une horloge détraquée ne doit pas faire lever `22003` sur
+    // la route qui décide d'un montant. C'est la leçon de la 02a, appliquée d'avance.
+    const ecoule = () => Math.max(0, Math.min(C.PG_INT4_MAX, Math.round(chrono() - debut)));
+    const refus = (code, message, detail) => ({ code, message, detail: detail || null, replayMs: ecoule() });
+
+    // LA VERSION D'ABORD. Une trace produite sous une autre version de la simulation décrit une
+    // AUTRE partie que celle que ce serveur saurait refaire : la juger paierait autre chose que ce
+    // que le joueur a vu. La colonne est figée à l'ouverture du billet, précisément pour que ce
+    // contrôle-là soit possible après un redéploiement.
+    if (ligne.sim_version !== S.SIM_VERSION)
+      return refus('sim_version', `Ce billet a été ouvert sous la version ${ligne.sim_version} de la simulation, et ce serveur exécute la ${S.SIM_VERSION} : il rejouerait une autre partie que la vôtre.`);
+
+    const connu = (table, cle) => (typeof cle === 'string' && Object.prototype.hasOwnProperty.call(table, cle));
+    const mode = connu(C.MODES, ligne.mode) ? C.MODES[ligne.mode] : null;
+    const brawler = connu(C.BRAWLERS, ligne.brawler) ? C.BRAWLERS[ligne.brawler] : null;
+    if (!mode || !brawler)
+      return refus('billet', 'Ce billet désigne un mode ou un brawler que le jeu ne connaît plus : sa partie n\'est plus rejouable.');
+
+    // LA TRACE ABSENTE N'EST PAS UNE PARTIE PERDUE, C'EST UNE PARTIE QU'ON NE PEUT PAS JUGER. Sans
+    // elle le serveur n'écrit aucun montant, et surtout il n'en invente pas un depuis le rapport.
+    if (!segments.length)
+      return refus('trace_absente', 'Aucune trace n\'est arrivée pour cette partie : sans la pièce qui la prouve, le serveur n\'écrit aucun montant.');
+    // Les rangs doivent former 0…n−1 sans trou : un segment manquant recollerait deux morceaux qui
+    // ne se suivent pas, et le rejeu partirait dans une partie qui n'a jamais eu lieu — en silence.
+    const tries = segments.slice().sort((a, b) => a.seq - b.seq);
+    for (let i = 0; i < tries.length; i++)
+      if (tries[i].seq !== i)
+        return refus('donnees', `Il manque le segment ${i} de la trace : les morceaux reçus ne se recollent pas.`, 'segments');
+
+    const maxPas = C.traceMaxSteps(C.zonePlan(ligne.seed_public, mode));
+    const lu = C.traceDecode(tries.map(t => t.data).join(''), maxPas);
+    if (lu.erreur === 'trop_de_pas')
+      return refus('trop_de_pas', `Cette trace dépasse les ${maxPas} pas qu'une partie de ce mode peut durer.`);
+    if (lu.erreur || !lu.pas)
+      return refus('donnees', 'Trace illisible : le serveur ne sait pas ce qu\'elle décrit.', lu.erreur || 'vide');
+
+    // LA PARTIE, REFAITE. Le nom du joueur n'entre pas : il ne décide de rien dans la simulation,
+    // et le faire entrer donnerait au client une prise de plus sur le rejeu pour rien.
+    const G = S.newMatch(ligne.seed_public, mode, ligne.stake_cents, brawler);
+    const trop = () => ecoule() > REPLAY_BUDGET_MS;
+    const abandon = () => refus('budget', `Le rejeu de cette partie a dépassé les ${REPLAY_BUDGET_MS} ms accordées : le serveur ne peut pas la juger.`);
+    let pas = 0;
+    // LE REJEU S'ARRÊTE À LA FIN, exactement où le jeu s'arrête. `endMatch` coupe la boucle du
+    // navigateur sur l'événement de fin ; un serveur qui continuerait à simuler au-delà jugerait
+    // une partie que personne n'a jouée — et pire, un joueur qui encaisse puis rallonge sa trace
+    // verrait sa sacoche continuer de grossir APRÈS l'encaissement. La condition se lit en tête de
+    // boucle et pas seulement après un pas : une fin peut arriver d'une action ponctuelle.
+    for (const it of lu.items) {
+      if (G.fin) break;
+      // Le budget se lit à chaque pas ET à chaque action. Neuf mille lectures d'horloge ne coûtent
+      // rien à côté de neuf mille pas de simulation, et c'est ce qui rend le dépassement exact sous
+      // une horloge injectée plutôt qu'approché à deux cent cinquante-six pas près. Les actions
+      // comptent aussi : leur nombre n'est borné que par la taille du corps, pas par le nombre de
+      // pas, donc une trace d'actions pures échapperait à une borne posée sur les seuls pas.
+      if (trop()) return abandon();
+      if (it.t === 'a') { S.appliquerActe(G, it); continue; }
+      for (let k = (it.n | 0); k > 0; k--) {
+        S.step(G, it);
+        pas++;
+        if (G.fin) break;
+        if (trop()) return abandon();
+      }
+    }
+
+    // L'ÉTAT TERMINAL EST OBLIGATOIRE, ET C'EST LA RÈGLE QUI TIENT L'ARGENT. Sans elle, couper le
+    // réseau juste après un gros kill deviendrait la meilleure stratégie du jeu le jour où un euro
+    // entre : la partie resterait à jamais dans son meilleur instant. Le serveur nomme donc ce qui
+    // lui manque, n'écrit aucun montant, et laisse le billet au veilleur.
+    if (!S.terminal(G))
+      return refus('non_terminal', `Cette trace s'arrête au pas ${pas} sans que la partie soit finie : ni vainqueur, ni encaissement, ni élimination, ni fin du plan de zone. Aucun montant n'est écrit.`);
+
+    // LA CONSERVATION DE L'ARGENT, ASSERTÉE AU MOMENT DU RÈGLEMENT ET SUR LA PARTIE RÉELLEMENT
+    // REJOUÉE : sacoches + butin au sol + encaissé = mise × sièges. Elle ne coûte rien ici, et
+    // c'est elle qui fonde `purseBound`, donc le seul plafond de paiement qui existe. Si elle est
+    // fausse, ce n'est pas le joueur qui triche, c'est le serveur qui se trompe — et un serveur qui
+    // se trompe n'écrit surtout pas de montant.
+    const attendu = ligne.stake_cents * ligne.seats;
+    const enJeu = S.argentCents(G);
+    if (enJeu !== attendu)
+      return refus('conservation', `La partie rejouée porte ${enJeu} centimes pour ${attendu} engagés : le serveur refuse d'écrire un montant sur une partie où l'argent ne se conserve pas.`);
+
+    // LA DIVERGENCE SE MESURE, ELLE NE SE PUNIT PAS. `Math.sin`, `Math.cos` et `Math.exp` ne sont
+    // pas spécifiées à l'ulp près par ECMAScript : un désaccord entre le rejeu du serveur et
+    // l'empreinte du client peut ne prouver qu'une chose, que les deux n'ont pas la même
+    // bibliothèque mathématique. Refuser ce joueur serait le QUATRIÈME contrôle « évident » et faux
+    // de ce dossier. La ligne est donc réglée, marquée, et c'est la phase 03 qui n'ira pas la lire.
+    const siens = C.digestsDecode(rapport.digests);
+    const rang = siens ? C.digestsDiff(G.empreintes, siens) : 0;
+    const digestMatch = siens !== null && rang === -1;
+    return {
+      code: null,
+      // Les faits, et EUX SEULS, sont donnés au verdict. `declaredNetCents` reste ce que le client
+      // croit avoir gagné : une observation, jamais un paiement.
+      faits: C.reportFrom({ ...S.faits(G), declaredNetCents: rapport.declaredNetCents, digests: rapport.digests }),
+      traceSteps: pas,
+      replayDigest: S.empreinte(G),
+      digestMatch,
+      // Le premier pas où les deux empreintes s'écartent, au pas d'empreinte près — le condensé se
+      // prend tous les `EMPREINTE_PAS` pas simulés, pas à chaque pas. Zéro veut dire « aucun
+      // condensé comparable » : un client qui n'en envoie pas ne prouve aucune convergence.
+      divergenceStep: digestMatch ? null : (siens === null ? 0 : (rang + 1) * S.EMPREINTE_PAS),
+      replayMs: ecoule(),
+    };
+  }
+
   // ---------- POST /api/match/:id/result ----------
-  // Le serveur juge le rapport rendu et clôt la ligne. Trois choses ne changent pas ici :
+  // LE SERVEUR REJOUE LA PARTIE, PUIS IL LA JUGE, ET IL CLÔT LA LIGNE. La forme de la route n'a pas
+  // changé d'une virgule depuis la 02a — c'était la promesse écrite là-bas : « on remplace le corps
+  // de `matchVerdict` par une vraie simulation sans changer une seule route ». Ce qui a changé est
+  // ce qu'elle fait de ce qu'on lui envoie : les faits sont RECALCULÉS, plus jamais lus.
+  //
+  // Quatre choses ne changent pas :
   // — `checkReport` passe avant tout, et refuse tout champ inconnu avec un code ;
-  // — `matchVerdict` reçoit une horloge INJECTÉE, jamais `Date.now()` ;
+  // — `matchVerdict` reçoit une horloge INJECTÉE, jamais `Date.now()`, et elle reste ;
   // — aucun montant ne sort d'ailleurs que des fonctions de paiement de WBCore. L'API ne
-  //   recalcule jamais la commission elle-même, pas même « juste pour vérifier ».
+  //   recalcule jamais la commission elle-même, pas même « juste pour vérifier » ;
+  // — `MAX_BODY` reste à 4 Ko : la trace arrive par la route du module 6, jamais dans ce corps.
   async function rendreResultat(req, res, identite, origin, matchId) {
     if (!limiter('result:' + identite.authId))
       return envoyer(res, 429, { erreur: 'Trop de résultats envoyés d\'affilée. Réessaie dans une minute.' }, origin);
@@ -468,7 +640,7 @@ function createApp({
     // réécrire. C'est la clé d'idempotence sur (match_id).
     if (ligne.status !== 'open') return envoyer(res, 200, reglement(ligne), origin);
 
-    const v = C.matchVerdict({
+    const dossier = {
       mode: ligne.mode,
       stakeCents: ligne.stake_cents,
       seats: ligne.seats,
@@ -476,20 +648,70 @@ function createApp({
       seed: ligne.seed_public,
       openedAt: ligne.opened_at,
       expiresAt: ligne.expires_at,
-    }, rapport, now());
+    };
+
+    // UN BILLET PÉRIMÉ SE CLÔT SANS REJOUER. Ce n'est pas une économie de calcul, c'est la
+    // 02a inchangée : la partie qu'il désigne ne se règle plus, quoi qu'ait fait le joueur, et
+    // rejouer coûterait deux secondes de fil pour arriver au même refus. Les faits envoyés au
+    // verdict sont MIS À ZÉRO plutôt que recopiés du corps : même sur un refus, aucun fait déclaré
+    // n'entre en base.
+    const expireMs = new Date(ligne.expires_at).getTime();
+    if (Number.isFinite(expireMs) && now() > expireMs) {
+      const vide = C.reportFrom({ seconds: 0, kills: 0, deaths: 0, rank: 1, cubes: 0, damage: 0,
+                                  cashedOut: false, purseCents: 0,
+                                  declaredNetCents: rapport.declaredNetCents, digests: rapport.digests });
+      const p = C.matchVerdict(dossier, vide, now());
+      const { match } = await db.settleMatch({
+        matchId, userId: user.id,
+        status: p.statut, settledAt: new Date(now()),
+        issue: p.issue, controle: p.controle, motif: p.motif,
+        grossCents: p.grossCents, feeCents: p.feeCents, netCents: p.netCents,
+        purseCents: p.sacocheCents, declaredNetCents: p.declaredNetCents, ecartCents: p.ecartCents,
+        seconds: vide.seconds, kills: vide.kills, deaths: vide.deaths,
+        rank: vide.rank, cubes: vide.cubes, damage: vide.damage, cashedOut: vide.cashedOut,
+        traceSteps: null, replayDigest: null, digestMatch: null, divergenceStep: null, replayMs: null,
+      });
+      if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
+      return envoyer(res, 200, reglement(match), origin);
+    }
+
+    // LE REJEU DÉCIDE. Tout ce que le corps annonçait — durée, kills, morts, rang, cubes, dégâts,
+    // sacoche — est jeté et refait depuis la graine publique du billet et la trace lue en base.
+    // Seul `declaredNetCents` survit au rapport, et seulement pour être comparé.
+    const rj = rejouerPartie(ligne, await db.listTraces({ matchId }), rapport);
+    if (rj.code) {
+      // AUCUN MONTANT, AUCUNE ÉCRITURE, ET LA LIGNE RESTE OUVERTE POUR LE VEILLEUR. C'est le seul
+      // endroit du dossier qui refuse sans clore, et c'est délibéré : clore ici ferait un second
+      // endroit qui ferme une ligne, et un joueur dont la trace s'est perdue en route mérite de
+      // pouvoir la renvoyer tant que son billet vit.
+      return envoyer(res, REJEU_CODES[rj.code] || 409,
+        { erreur: rj.message, code: rj.code, detail: rj.detail, replayMs: rj.replayMs }, origin);
+    }
+    const faits = rj.faits;
+
+    const v = C.matchVerdict(dossier, faits, now());
 
     // Un refus clôt la ligne lui aussi, avec son motif : cette partie-là ne comptera dans aucune
     // statistique, et on veut pouvoir dire pourquoi sans relancer le calcul six mois plus tard.
+    //
+    // `matchVerdict` NE DISPARAÎT PAS AVEC LE REJEU, et c'est le point. Elle reçoit désormais des
+    // faits RECALCULÉS au lieu de faits déclarés, et elle reste pour la raison exacte qui la rendait
+    // insuffisante hier : si le rejeu se trompe, plus rien ne regarderait le montant avant de
+    // l'écrire. L'enveloppe cesse d'être la seule protection, elle devient la seconde.
     const { match } = await db.settleMatch({
       matchId, userId: user.id,
       status: v.statut, settledAt: new Date(now()),
       issue: v.issue, controle: v.controle, motif: v.motif,
       grossCents: v.grossCents, feeCents: v.feeCents, netCents: v.netCents,
       purseCents: v.sacocheCents, declaredNetCents: v.declaredNetCents, ecartCents: v.ecartCents,
-      // Les faits déclarés, tels que le client les a rendus. Ils sont bornés, pas vérifiés.
-      seconds: rapport.seconds, kills: rapport.kills, deaths: rapport.deaths,
-      rank: rapport.rank, cubes: rapport.cubes, damage: rapport.damage,
-      cashedOut: rapport.cashedOut,
+      // Les faits de la partie REJOUÉE. Plus rien ici ne vient du corps de la requête : un corps
+      // gonflé écrit exactement la même ligne qu'un corps sincère.
+      seconds: faits.seconds, kills: faits.kills, deaths: faits.deaths,
+      rank: faits.rank, cubes: faits.cubes, damage: faits.damage,
+      cashedOut: faits.cashedOut,
+      // Ce que le rejeu a coûté et ce qu'il a trouvé.
+      traceSteps: rj.traceSteps, replayDigest: rj.replayDigest,
+      digestMatch: rj.digestMatch, divergenceStep: rj.divergenceStep, replayMs: rj.replayMs,
     });
     if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
     return envoyer(res, 200, reglement(match), origin);
@@ -601,4 +823,4 @@ function createApp({
 }
 
 module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY,
-                   MAX_TRACE_BODY, MATCH_MARGE_S, RESULTAT, TRACE };
+                   MAX_TRACE_BODY, MATCH_MARGE_S, REPLAY_BUDGET_MS, REJEU_CODES, RESULTAT, TRACE };

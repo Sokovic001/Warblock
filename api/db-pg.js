@@ -11,7 +11,9 @@ const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, s
                    // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
                    'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
                    'purse_cents, declared_net_cents, ecart_cents, ' +
-                   'seconds, kills, deaths, rank, cubes, damage, cashed_out';
+                   'seconds, kills, deaths, rank, cubes, damage, cashed_out, ' +
+                   // le rejeu : ce qu'il a coûté, et s'il a convergé avec l'empreinte du client
+                   'trace_steps, replay_digest, digest_match, divergence_step, replay_ms';
 
 // Le pilote Postgres rend les colonnes `bigint` sous forme de CHAÎNE — il ne peut pas garantir
 // qu'elles tiennent dans un nombre JavaScript. La graine PUBLIQUE, elle, tient d'office : son
@@ -22,7 +24,12 @@ const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, s
 // depuis qu'elle fait 128 bits : c'est du texte hexadécimal, et rien ne la lit comme un nombre.
 function ligneMatch(r) {
   if (!r) return r;
-  return { ...r, seed_public: Number(r.seed_public) };
+  // `replay_digest` est un `bigint` pour la même raison que la graine — c'est un entier 32 bits NON
+  // signé — donc le pilote le rend en CHAÎNE, et il repartirait tel quel au client. `null` reste
+  // `null` : une partie non rejouée n'a pas d'empreinte, et zéro n'est pas la même chose.
+  return { ...r, seed_public: Number(r.seed_public),
+           replay_digest: r.replay_digest === null || r.replay_digest === undefined
+             ? r.replay_digest : Number(r.replay_digest) };
 }
 
 function pgDb(connectionString) {
@@ -47,12 +54,24 @@ function pgDb(connectionString) {
   // `wins` retient la victoire ET l'encaissement, parce que le jeu lui-même compte les deux —
   // sortir de Resurgence avec sa sacoche est une sortie gagnante, et le compteur ne doit pas
   // baisser le jour où le joueur se connecte.
+  //
+  // Depuis la phase 02b, LES QUATRE PREMIERS CHIFFRES NE COMPTENT QUE LES PARTIES DONT LE REJEU A
+  // CONVERGÉ (`digest_match`). C'est la garantie écrite dont la phase 03 a besoin, et elle
+  // s'applique déjà ici pour qu'aucun agrégat n'ait à la redécouvrir. `digest_match` vaut NULL sur
+  // une ligne qui n'a pas été rejouée : en SQL, `where digest_match` écarte NULL comme il écarte
+  // faux, et c'est bien ce qu'on veut — on ne compte que ce qu'on a pu vérifier.
+  //
+  // Le cinquième, `divergences`, compte celles que ce filtre écarte. Une liste d'exclusion qui
+  // grandit en silence laisserait la phase 03 hériter d'un filtre dont personne ne connaît le
+  // rendement : le taux de divergence est donc un chiffre exposé, pas un pressentiment.
   async function stats(client, userId) {
     const r = await client.query(`
-      select count(*)                                                     as parties,
-             count(*) filter (where issue in ('victoire', 'encaissement')) as gagnees,
-             coalesce(sum(kills), 0)                                      as tues,
-             coalesce(max(net_cents), 0)                                  as meilleur
+      select count(*) filter (where digest_match)                          as parties,
+             count(*) filter (where digest_match
+                                and issue in ('victoire', 'encaissement')) as gagnees,
+             coalesce(sum(kills) filter (where digest_match), 0)           as tues,
+             coalesce(max(net_cents) filter (where digest_match), 0)       as meilleur,
+             count(*) filter (where digest_match is not true)              as divergentes
         from matches
        where user_id = $1 and status = 'settled'`, [userId]);
     const l = r.rows[0] || {};
@@ -60,7 +79,8 @@ function pgDb(connectionString) {
     // rendent un `bigint`, donc une CHAÎNE. Sans cette conversion, `kills` partirait au client
     // sous forme de texte et `applyAccount` en ferait ce qu'il pourrait — silencieusement.
     const n = v => (Number(v) || 0);
-    return { matches: n(l.parties), wins: n(l.gagnees), kills: n(l.tues), best: n(l.meilleur) };
+    return { matches: n(l.parties), wins: n(l.gagnees), kills: n(l.tues), best: n(l.meilleur),
+             divergences: n(l.divergentes) };
   }
 
   return {
@@ -215,12 +235,15 @@ function pgDb(connectionString) {
              gross_cents = $8, fee_cents = $9, net_cents = $10, purse_cents = $11,
              declared_net_cents = $12, ecart_cents = $13,
              seconds = $14, kills = $15, deaths = $16, rank = $17, cubes = $18, damage = $19,
-             cashed_out = $20
+             cashed_out = $20,
+             trace_steps = $21, replay_digest = $22, digest_match = $23,
+             divergence_step = $24, replay_ms = $25
            where id = $1 and user_id = $2 and status = 'open' and net_cents is null
            returning ${MATCH_COLS}`,
           [r.matchId, r.userId, r.status, r.settledAt, r.issue, r.controle, r.motif,
            r.grossCents, r.feeCents, r.netCents, r.purseCents, r.declaredNetCents, r.ecartCents,
-           r.seconds, r.kills, r.deaths, r.rank, r.cubes, r.damage, r.cashedOut]);
+           r.seconds, r.kills, r.deaths, r.rank, r.cubes, r.damage, r.cashedOut,
+           r.traceSteps, r.replayDigest, r.digestMatch, r.divergenceStep, r.replayMs]);
         if (maj.rows[0]) return { match: ligneMatch(maj.rows[0]), deja: false };
         const deja = await client.query(
           `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [r.matchId, r.userId]);
@@ -264,6 +287,26 @@ function pgDb(connectionString) {
         // Le même piège de pilote que les statistiques : `count()` et `sum()` rendent un `bigint`,
         // donc une CHAÎNE. Une borne comparée à du texte comparerait n'importe quoi.
         return { segments: Number(l.n) || 0, totalSteps: Number(l.total) || 0 };
+      } finally {
+        client.release();
+      }
+    },
+
+    // LA TRACE, RELUE POUR LE REJEU. En lecture seule, dans l'ordre des rangs, et sans le moindre
+    // `update` : c'est la même table en insertion seule, vue de l'autre côté. Le routeur recolle
+    // les segments lui-même et refuse un rang manquant — un trou recollé en silence ferait rejouer
+    // une partie qui n'a jamais eu lieu.
+    async listTraces({ matchId }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          'select seq, sim_version, steps, data from match_traces where match_id = $1 order by seq',
+          [matchId]);
+        // `seq` et `steps` sont des `integer`, donc le pilote les rend en nombres ; `Number` les
+        // couvre quand même, pour la raison écrite partout ailleurs — une panne silencieuse coûte
+        // plus cher que deux conversions.
+        return r.rows.map(t => ({ ...t, seq: Number(t.seq), steps: Number(t.steps),
+                                  sim_version: Number(t.sim_version) }));
       } finally {
         client.release();
       }

@@ -2265,6 +2265,54 @@ const WBCore = (function(){
     return { items, pas, erreur: null };
   }
 
+  // ---- L'EMPREINTE DU CLIENT, TRANSPORTÉE. Le serveur rejoue la partie et veut savoir si son
+  // rejeu a convergé avec ce que le joueur a réellement vu. Un seul nombre final répondrait
+  // « oui » ou « non » ; il ne dirait jamais À PARTIR DE QUAND. Or c'est précisément ce que la
+  // phase 03 aura besoin de mesurer : une divergence est MESURÉE, jamais punie, et une liste
+  // d'exclusion dont personne ne connaît le rendement serait pire que pas de mesure du tout.
+  //
+  // Le client envoie donc la suite entière de ses condensés — un par `WBSim.EMPREINTE_PAS` pas
+  // simulés — et le serveur compare terme à terme. Six caractères base64url par condensé de 32
+  // bits, soit au plus un millier de caractères pour une partie complète : cela tient sous
+  // `MAX_BODY`, qui ne bouge pas d'un octet sur la route qui décide d'un montant.
+  const DIGESTS_MOT = 6;
+  const DIGESTS_MAX = 2048;
+  function digestsEncode(liste) {
+    if (!Array.isArray(liste)) return '';
+    let s = '';
+    for (const v of liste) {
+      const u = v >>> 0;
+      for (let i = DIGESTS_MOT - 1; i >= 0; i--) s += TRACE_ALPHABET[(u >>> (6 * i)) & 63];
+    }
+    return s;
+  }
+  // Ne lance JAMAIS, pour la même raison que `traceDecode` : une suite illisible est une
+  // divergence de plus à mesurer, pas une raison de rendre 500 sur la route du règlement. Elle
+  // rend `null`, que l'appelant lit comme « aucun condensé comparable ».
+  function digestsDecode(texte) {
+    if (typeof texte !== 'string' || !texte.length || texte.length % DIGESTS_MOT) return null;
+    const out = [];
+    for (let i = 0; i < texte.length; i += DIGESTS_MOT) {
+      let v = 0;
+      for (let j = 0; j < DIGESTS_MOT; j++) {
+        const d = TRACE_VAL[texte[i + j]];
+        if (d === undefined) return null;
+        v = v * 64 + d;
+      }
+      out.push(v >>> 0);
+    }
+    return out;
+  }
+  // Le premier rang où deux suites de condensés s'écartent, ou −1 si l'une est exactement l'autre.
+  // Une suite plus courte que l'autre s'écarte à sa propre fin : une partie tronquée n'est pas la
+  // même partie qu'une partie menée jusqu'au bout.
+  function digestsDiff(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) if ((a[i] >>> 0) !== (b[i] >>> 0)) return i;
+    return a.length === b.length ? -1 : n;
+  }
+
   // L'enchaînement d'une partie, bâti comme `authNext` : une table de transitions, et tout
   // événement inconnu laisse l'état où il est. Le tableau ci-dessous EST le contrat ; le code qui
   // l'appelle n'en est que l'usage.
@@ -2356,6 +2404,12 @@ const WBCore = (function(){
     cashedOut:        { kind: 'booleen' },
     purseCents:       { kind: 'entier', min: 0, max: PG_INT4_MAX },
     declaredNetCents: { kind: 'entier', min: 0, max: PG_INT4_MAX },
+    // La suite des condensés d'état du CLIENT, telle que `digestsEncode` la produit. Elle ne
+    // décide d'aucun montant et n'est écrite dans aucune colonne : elle sert au serveur à dire si
+    // son rejeu a convergé, et à quel pas il s'est écarté. Une chaîne vide est acceptée — un
+    // client qui ne sait pas la produire n'est pas un tricheur, sa ligne est simplement marquée
+    // comme non convergée, donc invisible au grand livre de la phase 03.
+    digests:          { kind: 'texte', max: DIGESTS_MAX },
   };
   // Construit le rapport à partir de l'état de fin de partie. La liste blanche est la seule
   // porte : un état de jeu porte la mise, le pot, le portefeuille et bien d'autres montants, et
@@ -2380,6 +2434,10 @@ const WBCore = (function(){
       cashedOut: !!s.cashedOut,
       purseCents: centimes(s.purseCents),
       declaredNetCents: centimes(s.declaredNetCents),
+      // Coupée sur un multiple de la taille d'un condensé, jamais au milieu de l'un d'eux : une
+      // suite tronquée en plein mot serait illisible, donc indistinguable d'une suite absente.
+      digests: typeof s.digests === 'string'
+        ? s.digests.slice(0, DIGESTS_MAX - (DIGESTS_MAX % DIGESTS_MOT)) : '',
     };
   }
   // L'analyseur strict, celui que le serveur opposera au rapport rendu. Il REFUSE tout champ
@@ -2403,8 +2461,15 @@ const WBCore = (function(){
     const propre = {};
     for (const nom of noms) {
       const regle = REPORT_FIELDS[nom], v = report[nom];
+      const vide = regle.kind === 'booleen' ? 'false' : regle.kind === 'texte' ? 'vide' : String(regle.min);
       if (v === undefined || v === null) {
-        erreurs.push({ field: nom, code: 'manquant', message: 'Champ absent « ' + nom + ' » : le rapport doit le porter, même à ' + (regle.kind === 'booleen' ? 'false' : String(regle.min)) + '.' });
+        erreurs.push({ field: nom, code: 'manquant', message: 'Champ absent « ' + nom + ' » : le rapport doit le porter, même à ' + vide + '.' });
+      } else if (regle.kind === 'texte') {
+        // Une chaîne, bornée par sa longueur et par rien d'autre : son contenu n'est pas un fait,
+        // c'est une pièce de comparaison. Illisible, elle vaudra « pas de convergence prouvée ».
+        if (typeof v !== 'string') erreurs.push({ field: nom, code: 'type', message: '« ' + nom + ' » doit être une chaîne, reçu ' + typeof v + '.' });
+        else if (v.length > regle.max) erreurs.push({ field: nom, code: 'borne', message: '« ' + nom + ' » doit faire au plus ' + regle.max + ' caractères, reçu ' + v.length + '.' });
+        else propre[nom] = v;
       } else if (regle.kind === 'booleen') {
         if (typeof v !== 'boolean') erreurs.push({ field: nom, code: 'type', message: '« ' + nom + ' » doit être true ou false, pas ' + typeof v + '.' });
         else propre[nom] = v;
@@ -2677,6 +2742,7 @@ const WBCore = (function(){
            NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            TRACE, TRACE_ALPHABET, traceDir, traceMots, traceEntree, traceQuant, traceViseeMots, traceVisee,
            traceMaxSteps, traceEnregistreur, traceDecode,
+           DIGESTS_MOT, DIGESTS_MAX, digestsEncode, digestsDecode, digestsDiff,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -2821,6 +2887,11 @@ function makeEntity(G,name,x,z,stake,isPlayer,brawler,acc,team){
 function evt(G,type,d){
   const e=d||{}; e.type=type; e.pas=G.pas|0;
   (G.evts||(G.evts=[])).push(e);
+  // LA FIN EST RETENUE SUR L'ETAT, et pas seulement racontee. Un evenement se draine : le bloc
+  // `Game` le lit une fois puis il n'existe plus, alors que « cette partie a une fin, et laquelle »
+  // est un FAIT de la partie — c'est lui que `terminal` et `faits` lisent, et c'est le seul sur
+  // lequel le serveur accepte d'ecrire un montant. Le premier gagne : une fin ne se rejoue pas.
+  if(type==='fin'&&!G.fin) G.fin=e;
   return e;
 }
 
@@ -3511,7 +3582,7 @@ function newMatch(graine, mode, miseCents, brawler, options){
   const seed=graine>>>0, stake=C.fromCents(miseCents), tier=C.tierFor(stake)||C.TIERS[0];
   const G={ running:true, paused:false, seed, stake, miseCents, tier, modeCfg:mode,
             alea:C.makeFlux(seed), time:0, pas:0, intro:0, evts:[], hudT:0, aimDist:5,
-            nextEid:0, feuT:0, empreinte:0, debloques:0,
+            nextEid:0, feuT:0, empreinte:0, empreintes:[], fin:null, debloques:0,
             cells:C.generateMap(seed),
             ents:[], boxes:[], pickups:[], projs:[], fx:[], zones:[], turrets:[], smokes:[], nades:[],
             dmgDealt:0, looted:0, survivedT:0, lostPouch:0, encaisse:0 };
@@ -3565,8 +3636,68 @@ function step(G, entrees){
   for(const e of G.ents) if(!e.isPlayer&&e.alive) botUpdate(G,e,dt);
   for(const e of G.ents) commonUpdate(G,e,dt);
   projUpdate(G,dt); zonesUpdate(G,dt); nadesUpdate(G,dt); smokesUpdate(G,dt); zoneUpdate(G,dt);
-  if(G.pas%EMPREINTE_PAS===0) G.empreinte=mele(G.empreinte,condenseEtat(G));
+  // Le condense est ACCUMULE et RETENU. Accumule, il fait l'empreinte de la partie ; retenu, il
+  // fait la suite que le client envoie au serveur avec son rapport, et sans laquelle un rejeu
+  // divergent ne saurait dire qu'une chose — « pas d'accord » — jamais « a partir d'ici ».
+  if(G.pas%EMPREINTE_PAS===0){
+    const cd=condenseEtat(G);
+    (G.empreintes||(G.empreintes=[])).push(cd);
+    G.empreinte=mele(G.empreinte,cd);
+  }
   return drainer(G);
+}
+// ---------- la fin d'une partie, et ce qu'on en dit ----------
+// L'ETAT TERMINAL. Une partie est finie quand elle a une FIN — un vainqueur, un encaissement du
+// joueur, sa mort definitive — ou quand le plan de zone est epuise, et sinon elle ne l'est pas.
+// Rend le nom de la fin, ou `null`.
+//
+// C'EST LA REGLE QUI TIENT L'ARGENT DANS UN REJEU DIFFERE, et elle vit ici parce que le jeu et le
+// serveur doivent en avoir exactement une idee : sans elle, couper le reseau juste apres un gros
+// kill deviendrait la meilleure strategie du jeu le jour ou un euro entre. Le serveur n'ecrit un
+// montant que si cette fonction rend quelque chose.
+function terminal(G){
+  const f=G.fin;
+  if(f) return f.cashedOut?'encaissement':(f.gagne?'victoire':'elimination');
+  // Une seule equipe encore en jeu et aucun evenement de fin : le joueur a deja quitte la partie
+  // d'une facon que `checkTeams` n'a pas eu a annoncer. C'est terminal quand meme.
+  if(aliveTeams(G).size<=1) return 'vainqueur';
+  if(G.time>=C.zoneTotalS(G.zonePlan)) return 'plan';
+  return null;
+}
+// LES FAITS D'UNE PARTIE FINIE, EN UN SEUL ENDROIT. `endMatch` les rendait au serveur, le harnais
+// de test.js les recopiait, et le serveur allait les recopier une troisieme fois : trois copies
+// d'une meme definition, dont deux auraient fini par mentir. Le rejeu du serveur juge donc EXACTEMENT
+// ce que l'ecran du joueur a affiche, par construction et pas par relecture.
+//
+// `declaredNetCents` n'est PAS ici, et c'est voulu : ce n'est pas un fait de la partie, c'est ce
+// que le client CROIT avoir gagne. Le serveur ne le refait pas, il en mesure l'ecart.
+function faits(G){
+  const p=G.player, f=G.fin, mode=G.modeCfg;
+  return {
+    // La duree se compte EN PAS — `G.time` n'avance que dans `step`, de `C.SIM.stepS` a la fois —
+    // et jamais sur l'horloge d'un navigateur. `survivedT` est l'instant du dernier pas ou le
+    // joueur etait vivant : c'est sa partie a lui qui est mesuree, pas celle des autres.
+    seconds: G.survivedT||G.time,
+    kills: p.kills,
+    // Le jeu ne compte pas les morts : il decompte les vies. Un abandon les met toutes a zero d'un
+    // coup, d'ou le plancher.
+    deaths: Math.max(0,C.livesFor(mode)-p.lives),
+    rank: (f&&f.gagne)?1:(f?f.rang:Math.max(1,aliveTeams(G).size)),
+    cubes: p.cubes,
+    damage: G.dmgDealt,
+    cashedOut: !!(mode.cashout&&f&&f.cashedOut),
+    purseCents: C.toCents(p.pouch),
+  };
+}
+// TOUT L'ARGENT ENCORE EN JEU, EN CENTIMES ENTIERS : les sacoches, les sacoches tombees au sol, et
+// ce que des bots ont deja encaisse. La somme vaut `mise x sieges` a chaque pas, du coup d'envoi a
+// la fin — c'est ce qui fonde `purseBound`, donc le seul plafond de paiement qui existe, et c'est
+// ce que le serveur asserte au moment du reglement sur la partie qu'il vient de rejouer.
+function argentCents(G){
+  let s=0;
+  for(const e of G.ents) s+=e.pouch;
+  for(const pk of G.pickups) if(pk.kind==='cash') s+=pk.amount;
+  return C.toCents(s+(G.encaisse||0));
 }
 // ---------- le rejeu d'une trace ----------
 // LE MEME BLOC DE CODE, APPLIQUE AUX MEMES ENTREES : c'est tout ce que le rejeu du serveur est. Il
@@ -3655,7 +3786,8 @@ return { R, SIM_VERSION, EMPREINTE_PAS, BOT_NAMES,
          spawnPickup, removePickup, collect, botCashOut, inPlay, aliveTeams, playersLeft, kill,
          checkTeams, doCashOut, respawn, throwSmoke, nadesUpdate, spawnSmoke, smokesUpdate,
          findCover, findTarget, pickGoal, botUpdate, joueurUpdate, commonUpdate, zoneUpdate,
-         newMatch, step, drainer, condenseEtat, empreinte, appliquerActe, rejouer };
+         newMatch, step, drainer, condenseEtat, empreinte, appliquerActe, rejouer,
+         terminal, faits, argentCents };
 })();
 if (typeof module!=='undefined') module.exports=WBSim;
 /*SIM-END*/
@@ -3673,7 +3805,7 @@ const { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity,
         clamp, maxHp, attack, useSuper, throwSmoke, dashUpdate, collect, kill, respawn,
         projUpdate, zonesUpdate, nadesUpdate, smokesUpdate, doCashOut, botCashOut,
-        aliveTeams, playersLeft, BOT_NAMES, newMatch, drainer, SIM_VERSION } = WBSim;
+        aliveTeams, playersLeft, BOT_NAMES, newMatch, drainer, faits, SIM_VERSION } = WBSim;
 const $=id=>document.getElementById(id);
 // keep cents when a value has them ($0.50), drop them when it is round ($1,600)
 const money=n=>{ const v=Math.round(n*100)/100;
@@ -6256,18 +6388,17 @@ function endMatch(won,info){
   // en dehors d'une comparaison d'entiers par pas. Sans billet, `TR` est nul et rien ne part.
   const trace=TR?{version:SIM_VERSION,segments:TR.segments(),tronquee:TR.tronquee()}:null;
   TR=null;
+  //
+  // LES FAITS VIENNENT DE `WBSim.faits`, PAS D'ICI. Le serveur rejoue la partie et recalcule les
+  // memes champs : les definir une seconde fois dans le rendu ferait deux idees de ce qu'est une
+  // duree ou un rang, et c'est toujours la seconde qui ment. Ce qui reste au bloc `Game` est ce que
+  // SIM ne peut pas savoir : ce que le joueur CROIT avoir gagne, et la suite de ses condenses.
   Match.fin({
-    seconds:G.survivedT||G.time,
-    kills:p.kills,
-    // Le jeu ne compte pas les morts : il decompte les vies. Un abandon les met toutes a zero
-    // d'un coup, d'ou le plancher.
-    deaths:Math.max(0,C.livesFor(mode)-p.lives),
-    rank:won?1:info.rank,
-    cubes:p.cubes,
-    damage:G.dmgDealt,
-    cashedOut:!!(cash&&info&&info.cashedOut),
-    purseCents:C.toCents(p.pouch),
+    ...faits(G),
     declaredNetCents:C.toCents(netGagne),
+    // La suite des condenses d'etat, un par seconde simulee. Elle ne decide d'aucun montant : elle
+    // dit au serveur si son rejeu a converge, et a partir de quel pas il s'en est ecarte.
+    digests:C.digestsEncode(G.empreintes),
   },trace);
   setTimeout(()=>{
     $('game').style.display='none'; $('end').classList.add('on');

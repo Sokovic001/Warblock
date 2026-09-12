@@ -50,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 358 tests sur le jeu (`node test.js`) et
-  119 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 365 tests sur le jeu (`node test.js`) et
+  128 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -187,6 +187,28 @@ porte : le reste a besoin d'un navigateur pour tourner.
   les routes ; la borne large, `MAX_TRACE_BODY`, ne vaut que sur la route de trace, qui n'écrit
   jamais dans `matches` — c'est ce qui rend structurellement impossible qu'une trace refusée laisse
   un billet bloqué.
+- **Le serveur ne croit plus aucun fait déclaré : il rejoue.** `POST /api/match/:id/result` refait la
+  partie depuis `seed_public` et la trace lue en base, et recalcule durée, kills, morts, rang, cubes
+  et sacoche. Un corps dont les faits sont gonflés écrit une ligne **strictement identique** à celle
+  d'un corps sincère — le patron de la 02a étendu des paramètres aux faits. Seuls
+  `declaredNetCents` et `digests` survivent au corps, et ni l'un ni l'autre ne décide d'un montant.
+- **Une ligne ne se clôt QUE sur un état terminal** — un vainqueur, un encaissement, la mort
+  définitive du joueur, ou la fin du plan de zone. Sinon aucun montant n'est écrit et le billet part
+  au veilleur. Testé sur une trace terminale et chacun de ses préfixes : `net(préfixe) ≤
+  net(complète)`, et `net = 0` sans fin. Sans cette règle, couper le réseau après un gros kill
+  serait la meilleure stratégie du jeu.
+- **`terminal`, `faits` et `argentCents` vivent dans `WBSim`**, pas dans l'API : le jeu, le harnais
+  de test et le serveur doivent avoir exactement une idée de ce qu'est une partie finie et de ce
+  qu'elle rend. Trois copies auraient fini par juger une autre partie que celle que l'écran affiche.
+- **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
+  elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
+- **Une divergence est mesurée, jamais punie.** La ligne est réglée et payée, marquée
+  `digest_match = false`, avec `divergence_step` et `replay_ms`. Le grand livre de la phase 03 ne
+  lira que des lignes convergées, et le **taux de divergence** est un agrégat exposé pour que ce
+  filtre n'ait pas un rendement inconnu.
+- **Le rejeu a un budget**, `REPLAY_BUDGET_MS`, éprouvé avec une horloge injectée : `createApp`
+  reçoit `chrono` (une durée) en plus de `now` (une date). Huit refus nommés, tous en 400 ou 409,
+  aucun en 500, aucun ne laissant un joueur enfermé dans un billet mort.
 
 ## Argent des joueurs
 
@@ -207,23 +229,24 @@ tout solde y est modifiable depuis la console.
     a un compte et une adresse de serveur, tire sa graine de `seedFor`, rend son rapport à la fin, et
     se comporte exactement comme avant dès qu'il manque l'un des deux. Spécification :
     `docs/PHASE-02.md`.
-  - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
-    simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
-    refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
-    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 à 5 sont livrés — pas fixe,
-    arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés, géométrie de
-    la graine sans transcendantes, le bloc SIM qui existe désormais, les tirs, les dégâts, la mort
-    et le butin qui y sont descendus avec leur flux d'événements, et enfin les bots, le joueur et
-    le gaz, si bien qu'une **partie entière se joue désormais sans navigateur** dans `node test.js`.
-    Le module 6 a livré le transport : `api/sim.js`, `sim_version` figée sur le billet, la trace des
-    entrées du joueur enregistrée par le jeu et reçue par une route en insertion seule. **Reste le
-    dernier module, celui qui décide** : le rejeu qui recalcule les faits. `net_cents` vient donc
-    toujours d'une sacoche déclarée par le client.
+  - Phase 02b — le serveur **rejoue** la partie. **Faite**, les sept modules livrés : pas de temps
+    fixe et arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés et
+    géométrie de la graine sans transcendantes, le bloc `/*SIM-START*/` … `/*SIM-END*/` qui contient
+    désormais toute la simulation avec son flux d'événements, une **partie entière jouée sans
+    navigateur** dans `node test.js`, `api/sim.js` qui charge ce bloc côté serveur, `sim_version`
+    figée sur le billet et la trace des entrées du joueur reçue en insertion seule — et enfin le
+    module qui décide : `POST /api/match/:id/result` **rejoue** la partie depuis la graine publique
+    et la trace, recalcule durée, kills, morts, rang, cubes et sacoche, et ne donne que ces faits-là
+    à `matchVerdict`. **`net_cents` sort de la partie rejouée.** La route n'a pas changé de forme.
+    Spécification : `docs/PHASE-02B.md`.
     Ce n'est pas une autorité temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à
     arbitrer en direct.
-  Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de
-  02a est une enveloppe de plausibilité, pas de l'anti-triche, et il n'arrête presque rien en
-  pratique. Une phase 02a « faite » ne doit jamais se lire comme une phase 02 finie.
+  **La phase 02 est donc faite — et elle n'ouvre AUCUNE table en argent réel.** Le vol de *temps*
+  devient impossible ; le vol de *précision* reste entier et il est structurel : la trace porte une
+  direction de visée par pas, et le client qui dessine sa partie connaît tout le butin de la carte.
+  Un rejeu n'est par ailleurs opposable que sur le **même runtime** — les tests prouvent l'égalité
+  entre deux processus Node, jamais entre deux moteurs. Aucun euro n'entre avant que le grand livre
+  de la phase 03 n'existe, et il ne lira que des lignes dont le rejeu a **convergé**.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde.
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**

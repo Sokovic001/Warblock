@@ -1,4 +1,4 @@
-# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), trace de partie (phase 02b)
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
 ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
@@ -18,7 +18,7 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
 | `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, version de simulation, expiration. |
 | `POST /api/match/:id/trace` | Reçoit la **trace des entrées du joueur**, en segments, en insertion seule. |
-| `POST /api/match/:id/result` | Juge le rapport rendu, encadre les montants et **clôt** la ligne. |
+| `POST /api/match/:id/result` | **Rejoue la partie**, recalcule les faits, juge, et **clôt** la ligne. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
 
@@ -169,41 +169,164 @@ route n'écrit jamais dans `matches`, pas même pour clore une ligne périmée, 
 ramasse déjà. Sept codes nommés, chacun testé : `corps`, `seq`, `sim_version`, `donnees`,
 `trop_de_pas`, `billet_clos`, `expire`, plus un `404` pour un billet inconnu ou qui n'est pas le sien.
 
-**Aucune décision d'argent ne change ici.** `net_cents` vient toujours de la sacoche déclarée : le
-rejeu qui décide est le module suivant, et c'est délibéré — le risque reste là-bas.
-
 **La dette, nommée plutôt que tue** : `match_traces` n'a **aucune politique de conservation**, et
 elle est renvoyée à la phase 03. Et comme partout ailleurs dans ce dossier, aucune base n'a jamais
 tourné : la clé primaire `(match_id, seq)` et le premier-écrit-gagne n'ont été éprouvés que contre
 une doublure, et **un test qui passe contre la doublure prouve la doublure**.
 
-## `POST /api/match/:id/result` — le verdict
+## `POST /api/match/:id/result` — le rejeu, puis le verdict
 
 ```
 POST /api/match/12/result   le rapport, tel que WBCore.reportFrom() le produit
 → 200                       { matchId, status, issue, controle, motif,
                               grossCents, feeCents, netCents, purseCents,
-                              declaredNetCents, ecartCents, settledAt }
+                              declaredNetCents, ecartCents, settledAt,
+                              traceSteps, digestMatch, divergenceStep, replayMs }
 ```
 
 Le corps **est** le rapport, sans enveloppe : `seconds`, `kills`, `deaths`, `rank`, `cubes`,
-`damage`, `cashedOut`, `purseCents`, `declaredNetCents`. `WBCore.checkReport()` le lit et **refuse
-tout champ inconnu, avec un code** (`inconnu`, `manquant`, `type`, `borne`, `corps`). Chaque entier
-y porte aussi une **borne haute**, et elle vient du schéma et non du jeu : ces neuf champs finissent
-dans des colonnes `integer`, qui s'arrêtent à 2 147 483 647. Sans elle, un rapport « valide » à
-3 000 000 000 faisait lever `22003` à Postgres, répondre 500 à la route, et **laissait la ligne
-ouverte** — le joueur enfermé dans un billet mort jusqu'à l'expiration, puisqu'il n'en a qu'un à la
-fois. Un refus motivé en 400 vaut mieux qu'un 500 muet : `PATCH
+`damage`, `cashedOut`, `purseCents`, `declaredNetCents`, `digests`. `WBCore.checkReport()` le lit et
+**refuse tout champ inconnu, avec un code** (`inconnu`, `manquant`, `type`, `borne`, `corps`). Chaque
+entier y porte aussi une **borne haute**, et elle vient du schéma et non du jeu : ces champs
+finissent dans des colonnes `integer`, qui s'arrêtent à 2 147 483 647. Sans elle, un rapport
+« valide » à 3 000 000 000 faisait lever `22003` à Postgres, répondre 500 à la route, et **laissait la
+ligne ouverte** — le joueur enfermé dans un billet mort jusqu'à l'expiration, puisqu'il n'en a qu'un
+à la fois. Un refus motivé en 400 vaut mieux qu'un 500 muet : `PATCH
 /api/me` ignore les champs en trop et c'est bien pour un profil, mais sur un rapport qui décide
 d'un montant le silence est la mauvaise valeur par défaut.
 
-### Le verdict est une **enveloppe de plausibilité**, pas de l'anti-triche
+### Le serveur REJOUE la partie, et ne croit plus aucun fait déclaré
+
+**La forme de la route n'a pas changé d'une virgule**, et c'était la promesse écrite en 02a : « on
+remplace le corps de `matchVerdict` par une vraie simulation sans changer une seule route ». Ce qui a
+changé est ce qu'elle fait de ce qu'on lui envoie.
+
+Le serveur prend la **graine publique** du billet — elle lui donne la carte, le gaz, les caisses et
+les vingt bots — et la **trace** lue dans `match_traces` — elle lui donne ce que le joueur a fait —
+puis il refait la partie avec le bloc `WBSim`, le même que le navigateur exécute. Il n'y a rien
+d'autre dans une partie. De cette partie rejouée il tire la **durée** (en pas × `SIM.stepS`, jamais
+sur une horloge), les **kills**, les **morts**, le **rang**, les **cubes**, les **dégâts** et la
+**sacoche**. Ces faits-là, et eux seuls, vont à `matchVerdict` puis en base.
+
+Deux champs du corps survivent, et aucun ne décide d'un montant :
+
+- `declaredNetCents`, ce que le client **croit** avoir gagné. Il garde exactement son rôle de la
+  02a : `ecart_cents` mesure la différence avec ce que le serveur compte. Une **observation, jamais
+  une punition, jamais un paiement** — c'est sur ces écarts que la phase 06 fixera un seuil, et les
+  jeter maintenant perdrait les données qui le fixeront.
+- `digests`, la suite des **condensés d'état** du client, un par `WBSim.EMPREINTE_PAS` pas simulés.
+  Elle ne sert qu'à dire si le rejeu a convergé, et à partir de quel pas il s'en est écarté.
+
+Un test porte cette phrase entière : **un corps dont les kills, la sacoche et la durée sont gonflés
+écrit une ligne strictement identique à celle d'un corps sincère.** C'est le patron de la 02a — « un
+corps portant une graine écrit une ligne identique à celle d'un corps vide » — étendu des
+*paramètres* aux *faits*.
+
+Et l'exemple canonique, celui que la spécification nomme : **prendre un billet, ne jamais jouer,
+attendre cinq secondes, rendre `{rank:1, seconds:10, purseCents: mise × sièges}`**. Ce corps passait
+mot pour mot en 02a et valait 800 centimes sur une table à 0,50 $. Il vaut désormais **zéro** :
+aucune trace n'est arrivée, donc il n'y a pas de partie à juger.
+
+### Une ligne ne se clôt QUE sur un état terminal
+
+C'est le vrai trou d'un rejeu différé, et il s'ouvre le jour où un euro entre : **tronquer une trace
+ne doit jamais rien payer.** Sans cette règle, couper le réseau juste après un gros kill deviendrait
+la meilleure stratégie du jeu — la partie resterait à jamais dans son meilleur instant.
+
+Le rejeu doit donc atteindre une **fin** — un vainqueur, un encaissement du joueur, sa mort
+définitive, ou la fin du plan de zone — pour que la route écrive un montant. Sinon elle n'écrit
+**aucun** montant, nomme ce qui lui manque, et laisse le billet au **veilleur** de la 02a, qui le clôt
+sans montant. C'est le seul endroit du dossier qui refuse sans clore, et c'est délibéré : clore ici
+ferait un second endroit qui ferme une ligne, et un joueur dont la trace s'est perdue en route mérite
+de pouvoir la renvoyer tant que son billet vit.
+
+La règle qui décide, `WBSim.terminal`, vit dans le **jeu** et pas dans l'API : le serveur et le
+navigateur doivent en avoir exactement une idée. Idem pour les faits eux-mêmes — `WBSim.faits` est la
+seule définition de ce qu'est la durée, le rang ou la sacoche d'une partie finie, et `endMatch`, le
+harnais de `test.js` et cette route la lisent tous les trois. Trois copies d'une même définition
+auraient fini par juger une autre partie que celle que l'écran du joueur venait d'afficher.
+
+Le corollaire se teste entièrement hors ligne, et il l'est : pour une trace terminale et chacun de
+ses préfixes, `net(préfixe) ≤ net(complète)`, et `net = 0` sans état terminal.
+
+### La conservation de l'argent est assertée au moment du règlement
+
+Sur la partie **réellement rejouée** : sacoches + butin au sol + encaissé = `mise × sièges`. Elle ne
+coûte rien là, et c'est elle qui fonde `purseBound`, donc le seul plafond de paiement qui existe. Si
+elle est fausse, ce n'est pas le joueur qui triche, c'est le serveur qui se trompe — et un serveur qui
+se trompe n'écrit surtout pas de montant : la ligne part au veilleur avec le code `conservation`.
+
+### Une divergence est MESURÉE, jamais punie
+
+`Math.sin`, `Math.cos` et `Math.exp` ne sont pas spécifiées à l'ulp près par ECMAScript. Une
+divergence entre le rejeu du serveur et l'empreinte du client peut donc ne prouver qu'une chose : les
+deux n'ont pas la même bibliothèque mathématique. Refuser ce joueur serait le **quatrième contrôle
+« évident » et faux** de ce dossier.
+
+La ligne est donc **réglée et payée**, marquée `digest_match = false`, avec `divergence_step` — le
+premier pas où les deux empreintes s'écartent, au pas d'empreinte près — et `replay_ms`. Et la
+garantie, écrite noir sur blanc, est celle dont la phase 03 a besoin : **le grand livre ne lira jamais
+que des lignes dont le rejeu a convergé.**
+
+Reste le défaut de ce choix, qu'il faut traiter et pas seulement avouer : une liste d'exclusion qui
+grandit en silence laisserait la phase 03 hériter d'un filtre dont personne ne connaît le rendement.
+Les statistiques exposent donc le **taux de divergence** comme un agrégat de plus, `stats.divergences`
+à côté de `stats.matches` — deux entiers, pas un flottant, et le taux se déduit des deux. Un test
+vérifie qu'**aucun** des quatre autres agrégats ne compte une ligne divergente.
+
+Un client qui n'envoie pas de condensés n'est pas un tricheur : il ne prouve simplement aucune
+convergence. Sa ligne est réglée, payée, et comptée comme divergente. La valeur par défaut sûre est
+« non convergé », jamais l'inverse.
+
+### Le budget de calcul
+
+Un rejeu tourne **dans le fil de la requête**, et une trace adversariale peut chercher à en maximiser
+le coût : c'est la surface d'attaque que cette phase ajoute. `REPLAY_BUDGET_MS` (2 000 ms) la borne.
+Une partie solo complète — neuf mille pas, vingt brawlers — coûte environ trois cents millisecondes
+sur la machine de développement, donc six fois la marge. Le dépassement est un **code nommé**, jamais
+une exception, et il s'éprouve avec une **horloge injectée**, donc sans attendre : `createApp` reçoit
+`chrono` en plus de `now`. Les deux ne mesurent pas la même chose — `now` donne une **date** et décide
+si un billet a expiré, `chrono` mesure une **durée**. Les confondre rendait le budget intestable.
+
+### Les refus du rejeu : six codes nommés, plus deux gardes
+
+| Code | HTTP | Ce qu'il dit |
+|---|---|---|
+| `trop_de_pas` | 400 | la trace dépasse à elle seule la durée maximale d'une partie de ce mode |
+| `donnees` | 400 | trace illisible, ou segments qui ne se recollent pas (un rang manquant) |
+| `trace_absente` | 409 | aucune trace n'est arrivée : il n'y a pas de partie à juger |
+| `non_terminal` | 409 | la trace s'arrête avant la fin de la partie |
+| `sim_version` | 409 | le billet a été ouvert sous une autre version de la simulation |
+| `budget` | 409 | le rejeu a dépassé `REPLAY_BUDGET_MS` |
+| `billet` | 409 | garde : le billet désigne un mode ou un brawler que le jeu ne connaît plus |
+| `conservation` | 409 | garde : l'argent ne se conserve pas dans la partie rejouée |
+
+**Aucun n'est un 500, et aucun ne laisse la ligne sans issue.** C'est la leçon du `22003` : un joueur
+n'a qu'un billet ouvert à la fois, donc une route qui échoue en laissant la ligne `open` l'enferme
+jusqu'à l'expiration. Ici la ligne reste ouverte **volontairement**, sans le moindre montant, et un
+test vérifie pour chacun des huit codes que le veilleur la ramasse ensuite.
+
+Un **billet périmé** ne se rejoue pas du tout : la partie qu'il désigne ne se règle plus, quoi qu'ait
+fait le joueur, et deux secondes de fil pour arriver au même refus seraient deux secondes perdues. La
+ligne passe en `expired`, comme en 02a, avec des faits **mis à zéro** plutôt que recopiés du corps :
+même sur un refus, aucun fait déclaré n'entre en base.
+
+### Le verdict reste une **enveloppe de plausibilité**, et c'est maintenant la seconde protection
 
 `WBCore.matchVerdict()` est une fonction pure qui reçoit le billet, le rapport et **une horloge en
 argument**. Le billet porte `seats` **et** `team_size`, figés à l'ouverture : un résultat est
 accepté jusqu'à l'expiration, et un serveur redémarré entre-temps avec un mode rééquilibré jugerait
-la partie contre une table que personne n'a achetée. Le serveur ne rejoue pas la partie — il ne le fera pas avant la phase 02b. Il refuse ce
-qui est **impossible**, et rien d'autre. La liste des contrôles vit dans la constante `ENVELOPPE`,
+la partie contre une table que personne n'a achetée.
+
+**Elle ne disparaît pas avec le rejeu, et c'est le point.** Elle reçoit désormais des faits
+**recalculés** au lieu de faits déclarés, et elle reste pour la raison exacte qui la rendait
+insuffisante hier : si le rejeu se trompe, plus rien ne regarderait le montant avant de l'écrire.
+L'enveloppe cesse d'être la seule protection, elle devient la seconde. Elle mord encore, et sur des
+faits que le client ne choisit plus : une partie de cent quatre secondes rendue à l'instant où le
+billet s'ouvre est refusée par le contrôle `chronometre`, quelle que soit la qualité de la trace qui
+l'accompagne.
+
+Elle refuse ce qui est **impossible**, et rien d'autre. La liste des contrôles vit dans la constante `ENVELOPPE`,
 à côté de la fonction : plus de kills que adversaires × vies, une partie plus longue que tout le
 plan de zone, une durée que son propre chronomètre n'a pas eu le temps de contenir, une victoire
 annoncée avant que son horloge ne l'autorise, un encaissement Resurgence avant la fin du verrou de
@@ -218,19 +341,24 @@ la ramasse sans avoir tué qui que ce soit, tandis que mourir la remet à zéro 
 subsiste. « Plus de kills que d'adversaires » : non, chacun a trois vies, deux en Resurgence.
 
 Les tolérances d'horloge sont **volontairement larges** : un onglet en arrière-plan, un téléphone
-endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheur. Aucun argent
-n'est en jeu en 02a, donc accepter une partie douteuse coûte une ligne de statistique qui ne vaut
-rien, tandis que refuser une partie honnête coûte un joueur.
+endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheur. Accepter une partie
+douteuse coûte une ligne de statistique, refuser une partie honnête coûte un joueur.
 
-### L'invariant « aucun montant ne vient du client » est FAUX, dans les deux jeux
+### L'aveu de la 02a est levé : le net sort de la partie rejouée
 
-C'était écrit comme une scission — MAXWIN recalculé, Resurgence encadré — et la moitié rassurante
-était fausse. **Le net est encadré, jamais recalculé, dans les cinq modes.** Il vaut
-`cashoutCents(sacoche)`, et la sacoche est précisément le nombre que le serveur ne sait pas
-refaire : il applique une fonction à un montant **déclaré par le client**, borné à
-`[0, mise × sièges]` — un intervalle de 0 à 20 mises en MAXWIN, de 0 à 50 en Resurgence. C'est
-faible, c'est honnête, et **c'est une raison de plus pour qu'aucun euro n'entre avant la phase
-02b**. L'aveu a durci, il ne s'est pas adouci.
+La 02a écrivait ceci, et c'était le seul point ouvert que la phase 02b existait pour fermer :
+
+> Le net vaut `cashoutCents(sacoche)` dans les cinq modes. La sacoche est précisément le nombre que
+> le serveur ne sait pas refaire.
+
+**Il sait, désormais.** La sacoche est celle que le rejeu trouve dans la poche du joueur au moment où
+il sort, et elle est conservée : sacoches + butin au sol + encaissé = `mise × sièges`, asserté sur la
+partie rejouée. `payoutCents` reste ce qu'il est partout ailleurs dans le jeu — le **plafond « WIN UP
+TO » du lobby, jamais un versement** — et il n'est plus dépassable pour une raison démontrable et non
+plus par décret.
+
+Ce qui n'a pas changé : l'API **ne recalcule jamais la commission elle-même**. Le net ne sort que des
+fonctions de paiement de `WBCore`.
 
 Pourquoi le serveur recalculait un pot MAXWIN, et pourquoi il ne le fait plus : le jeu a cessé de
 verser un forfait au dernier survivant il y a longtemps — **le prix est la sacoche qu'on emporte**,
@@ -247,9 +375,6 @@ Les trois montants d'une ligne réglée sont donc au **périmètre du joueur**, 
 `fee_cents + net_cents = gross_cents` sans exception — la ligne se réconcilie seule. Ce que
 l'**équipe** emporte n'est écrit nulle part, volontairement : c'est la somme des sacoches de ses
 membres, et le serveur ne la connaît pas.
-
-Dans tous les cas, l'API **ne recalcule jamais la commission elle-même** : le net ne sort que des
-fonctions de paiement de `WBCore`.
 
 **`declaredNetCents` n'est jamais payé ni cru.** Le verdict calcule l'**écart** entre ce que le
 client annonce et ce qu'il compte, et le stocke dans `ecart_cents` — la seule colonne en centimes
@@ -272,6 +397,20 @@ second rapport ment sur tout. Une garde textuelle vérifie que toute écriture d
 **Un résultat en retard est accepté tant que le billet n'a pas expiré.** Si couper le wifi
 effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
 
+### Ce qu'il faut écrire sans l'enrober
+
+- **Aucun euro n'entre au bout de cette phase.** Le vol de *temps* devient impossible, le vol de
+  *précision* reste entier.
+- **Un rejeu n'est opposable que sur le MÊME runtime.** Ce que les tests prouvent : l'égalité entre
+  deux processus Node. Ce qu'ils ne prouvent pas : l'égalité entre deux **moteurs** JavaScript.
+- **Aucune base n'a toujours jamais tourné**, et cette phase ajoute des colonnes et une table dont un
+  **paiement** dépend. Faire tourner une vraie Postgres au moins une fois devient un **prérequis de la
+  phase 03**, à écrire comme tel — et c'est écrit comme tel.
+- **`match_traces` n'a aucune politique de conservation** : renvoyé à la phase 03.
+- **Un déploiement se DRAINE, il n'écrase pas les billets ouverts** — au plus une quinzaine de
+  minutes. C'est une décision d'exploitation, à ranger à côté de « la maison est la contrepartie de
+  chaque pot », et le refus `sim_version` est ce qui arrive quand on ne la prend pas.
+
 ### Le veilleur
 
 Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — resteraient
@@ -283,14 +422,26 @@ reste, horloge injectée, sans attendre.
 
 ## Les statistiques sont la somme des parties, pas des compteurs
 
-`GET /api/me` rend `matches`, `wins`, `kills` et `best`. Aucun de ces quatre nombres n'est stocké :
-ils sont lus par **agrégat** sur la table `matches`, et seules les parties `settled` y entrent. Une
-partie refusée, périmée ou encore ouverte ne compte pour rien — elle n'a pas de résultat opposable.
+`GET /api/me` rend `matches`, `wins`, `kills`, `best` et `divergences`. Aucun de ces cinq nombres
+n'est stocké : ils sont lus par **agrégat** sur la table `matches`, et seules les parties `settled` y
+entrent. Une partie refusée, périmée ou encore ouverte ne compte pour rien — elle n'a pas de résultat
+opposable.
+
+Depuis la phase 02b, les quatre premiers ne comptent en plus que les parties dont le **rejeu a
+convergé** : c'est la garantie écrite dont la phase 03 a besoin, et elle s'applique dès ici pour
+qu'aucun agrégat n'ait à la redécouvrir. Le cinquième dit combien ce filtre en écarte — sans lui, la
+liste d'exclusion grandirait en silence.
 
 ```sql
-count(*) · count(*) filter (where issue in ('victoire','encaissement')) · sum(kills) · max(net_cents)
+count(*) filter (where digest_match) · … filter (where digest_match and issue in (…))
+sum(kills) filter (where digest_match) · max(net_cents) filter (where digest_match)
+count(*) filter (where digest_match is not true)
 where user_id = $1 and status = 'settled'
 ```
+
+`digest_match` vaut `NULL` sur une ligne qui n'a pas été rejouée ; en SQL, `where digest_match`
+l'écarte comme il écarte `false`, et c'est exactement ce qu'on veut : on ne compte que ce qu'on a pu
+vérifier.
 
 C'est exactement le raisonnement de l'absence de colonne solde : **un compteur qu'on incrémente est
 une case qu'on écrase, et un double envoi la fausse pour toujours.** Ici, un double envoi ne peut
@@ -343,7 +494,7 @@ auth-crossmint.js   vérifie les jetons de session                  ← touche l
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
 schema.sql          le schéma : users, matches, match_traces. Aucune colonne « solde ».
-test.js             119 tests sans rien installer, 128 avec jose
+test.js             128 tests sans rien installer, 137 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -446,8 +597,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 104 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 113 : les 104, plus la chaîne complète de vérification
+node api/test.js          # 128 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 137 : les 128, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
@@ -557,24 +708,21 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
 
 ## Limites connues, à traiter avant la production
 
-- **Le verdict est une ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE, et il n'arrête presque
-  rien.** Une enveloppe volontairement large, des tolérances d'horloge généreuses, et le parti pris
-  de ne jamais refuser à tort : un client modifié ment à l'intérieur de l'enveloppe sans être
-  inquiété. **Il choisit son montant dans les deux jeux** — une sacoche quelconque entre zéro et
-  vingt mises en MAXWIN, entre zéro et cinquante en Resurgence — et il peut mentir sur tous les faits
-  — durée, kills, cubes, dégâts, rang. Cette phrase disait le contraire pour MAXWIN, parce que le
-  serveur y recalculait un forfait ; le forfait a disparu, l'aveu s'est donc aggravé et il faut le
-  lire ainsi. Ce n'est pas un premier étage d'anti-triche et il ne faut
-  jamais le présenter comme tel : c'est une borne sur l'impossible, rien de plus. C'est précisément
-  pour cela qu'**aucun euro n'entre avant que le serveur ne simule** (phase 02b). La valeur réelle
-  de ce module en phase 02a est la répétition générale du grand livre.
-- **La table `matches` se remplit de faits DÉCLARÉS par le client, et ces lignes-là ne seront
-  JAMAIS lues par le grand livre de la phase 03.** Borner n'est pas vérifier. La phase 03 attend
-  des lignes produites par simulation serveur ; celles-ci ne valent que pour des statistiques
-  d'affichage et pour mesurer des écarts. Le jour où le grand livre existera, il faudra une
-  frontière explicite — une colonne d'origine, une autre table, une date de bascule — et non un
-  `select` sur `matches` qui ramasserait tout. Sans cette phrase écrite noir sur blanc, on paiera un
-  jour des chiffres que personne n'a contrôlés.
+- **AUCUN EURO N'ENTRE AU BOUT DE CETTE PHASE.** Le rejeu rend le vol de *temps* impossible ; le vol
+  de *précision* reste entier. La phase 02 est faite, elle n'ouvre aucune table en argent réel, et
+  rien de ce qui suit ne doit se lire comme le contraire.
+- **UN REJEU N'EST OPPOSABLE QUE SUR LE MÊME RUNTIME.** `Math.sin`, `Math.cos`, `Math.atan2`,
+  `Math.hypot` et `Math.pow` sont partout dans le mouvement, la visée et le gaz, et ECMAScript les
+  laisse « implementation-approximated ». Ce que les tests prouvent : l'égalité entre **deux
+  processus Node**. Ce qu'ils ne prouvent pas, et ce que la spécification se garde de promettre :
+  l'égalité entre deux **moteurs**. C'est la raison d'être de `digest_match` : on mesure la
+  divergence, on ne la punit pas, et le grand livre ne lira que ce qui a convergé.
+- **Les lignes de la 02a — faits DÉCLARÉS par le client — ne seront JAMAIS lues par le grand livre
+  de la phase 03.** Borner n'est pas vérifier. Depuis la 02b, les lignes neuves portent des faits
+  **rejoués** et `digest_match` dit lesquelles ont convergé ; il faudra quand même une frontière
+  explicite entre l'avant et l'après — une date de bascule, ou le simple fait que `trace_steps` soit
+  `NULL` sur les anciennes — et non un `select` sur `matches` qui ramasserait tout. Sans cette phrase
+  écrite noir sur blanc, on paiera un jour des chiffres que personne n'a contrôlés.
 - **La limitation de débit est en mémoire, et elle couvre désormais DES ROUTES QUI ÉCRIVENT EN
   BASE.** Elle freine un joueur sur une instance ; dès qu'il y en aura deux, chaque instance aura
   son propre compteur et la limite vaudra le double, puis le triple. C'était déjà vrai en phase 01,
@@ -589,8 +737,15 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   primaire `(match_id, seq)` qui arbitre le premier-écrit-gagne de `match_traces` n'ont été éprouvés
   que contre la doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
   comporte autrement, rien ne le signalera avant le premier déploiement. C'est la dette la plus
-  silencieuse du dossier, et elle grandit : c'est maintenant un montant qu'une clause non éprouvée
-  protège.
+  silencieuse du dossier, et elle grandit : cette phase ajoute cinq colonnes et une table dont un
+  **paiement** dépend. **Faire tourner une vraie Postgres au moins une fois — ne serait-ce qu'à la
+  main, `psql -f schema.sql` puis une partie de bout en bout — est désormais un PRÉREQUIS de la
+  phase 03**, et c'est écrit comme tel ici et dans `docs/PHASE-02B.md`.
+- **Un déploiement se DRAINE, il n'écrase pas les billets ouverts** — au plus une quinzaine de
+  minutes, la durée de vie d'un billet. Ce n'est pas de l'architecture, c'est une décision
+  d'exploitation, à ranger à côté de « la maison est la contrepartie de chaque pot ». Ce qui arrive
+  quand on ne la prend pas est visible : le rejeu refuse en `sim_version`, la ligne part au veilleur,
+  et le joueur ne voit jamais sa partie enregistrée.
 - **L'AIMBOT SURVIT ENTIER, ET L'ESP DEVIENT STRUCTUREL.** La trace porte une direction de visée par
   pas, et une visée parfaite ne se distingue pas d'un très bon joueur : le rejeu rend le vol de
   *temps* impossible, il ne touche pas au vol de *précision*. Pire, dans une architecture de rejeu le

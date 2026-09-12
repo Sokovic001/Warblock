@@ -146,6 +146,32 @@ create table if not exists matches (
   damage             integer  check (damage  >= 0),
   cashed_out         boolean,
 
+  -- ---- Phase 02b : ce que le REJEU a coûté et ce qu'il a trouvé. Les faits ci-dessus ne sont
+  -- plus déclarés par le client depuis que la route les recalcule ; ces cinq colonnes-ci disent
+  -- comment ils l'ont été, et elles sont écrites par la même écriture unique.
+  --
+  -- Le nombre de pas réellement rejoués. La durée d'une partie se compte en pas × SIM.stepS,
+  -- jamais sur une horloge : c'est le seul repère qu'un rejeu partage avec la partie d'origine.
+  trace_steps        integer  check (trace_steps >= 0),
+  -- L'empreinte de la partie telle que le SERVEUR l'a rejouée. bigint et pas integer, pour la même
+  -- raison que seed_public : c'est un entier 32 bits NON signé, et l'integer de Postgres est signé.
+  replay_digest      bigint   check (replay_digest between 0 and 4294967295),
+  -- LA GARANTIE DONT LA PHASE 03 A BESOIN, ET ELLE TIENT EN UNE COLONNE : le grand livre ne lira
+  -- jamais que des lignes dont le rejeu a CONVERGÉ avec l'empreinte du client. Une divergence est
+  -- MESURÉE, jamais punie — `Math.sin`, `Math.cos` et `Math.exp` ne sont pas spécifiées à l'ulp
+  -- près par ECMAScript, donc un écart peut ne prouver qu'une chose : les deux côtés n'ont pas la
+  -- même bibliothèque mathématique. Refuser ce joueur serait le quatrième contrôle « évident » et
+  -- faux de ce dossier. La ligne est donc réglée, payée, et simplement invisible au grand livre.
+  digest_match       boolean,
+  -- Le premier pas où les deux empreintes s'écartent, au pas d'empreinte près (WBSim.EMPREINTE_PAS).
+  -- Zéro veut dire « aucun condensé comparable » : le client n'en a pas envoyé, ou pas de lisibles.
+  -- NULL sur une ligne qui a convergé. Sans ce chiffre, la liste d'exclusion grandirait en silence
+  -- et la phase 03 hériterait d'un filtre dont personne ne connaît le rendement.
+  divergence_step    integer  check (divergence_step >= 0),
+  -- Le coût du rejeu, en millisecondes. Il est borné par REPLAY_BUDGET_MS dans app.js ; le mesurer
+  -- ici est ce qui permettra de savoir si cette borne est large ou serrée, sur des parties réelles.
+  replay_ms          integer  check (replay_ms >= 0),
+
   constraint matches_expire_apres check (expires_at > opened_at),
   -- Un règlement est complet ou absent : une ligne close porte ses montants, une ligne ouverte
   -- n'en porte aucun. Sans cette contrainte, un règlement interrompu à mi-chemin serait lisible

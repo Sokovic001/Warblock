@@ -108,6 +108,42 @@ La trace porte donc ces actions comme des **jetons à part**, dans l'ordre où e
 leur propre direction et leur propre portée : un super lancé au stick ne vise pas comme le pas qui
 l'entoure. Le rejeu les applique avant le pas qui suit, ce qui reproduit exactement l'ordre d'origine.
 
+### Une empreinte finale ne dit pas OÙ deux rejeux s'écartent — phase 02b, module 7
+
+`empreinte(G)` accumule un condensé d'état tous les soixante pas et referme l'accumulation à la fin.
+C'est exactement ce qu'il faut pour répondre « d'accord » ou « pas d'accord », et exactement ce qu'il
+ne faut pas pour répondre « à partir de quel pas ». Un pli n'a pas d'inverse : on ne peut pas
+bissecter une accumulation.
+
+Or la phase 02b promet de **mesurer** la divergence et pas seulement de la constater — sans quoi la
+phase 03 hériterait d'une liste d'exclusion dont personne ne connaît le rendement. Le client envoie
+donc la **suite entière** de ses condensés, pas leur pli : six caractères base64url chacun, cent
+soixante-sept au pire, un millier de caractères pour une partie complète. Cela tient sous les quatre
+kilo-octets de `MAX_BODY`, qui n'a pas bougé — c'était la condition, la route du règlement ne devient
+pas la surface d'attaque la plus large de l'API pour un confort de diagnostic.
+
+Corollaire écrit une fois : `divergence_step` est au **pas d'empreinte près**, soixante pas, une
+seconde simulée. Ce n'est pas le premier pas où les deux parties diffèrent, c'est le premier condensé
+qui les sépare.
+
+### `terminal` et `faits` appartiennent au JEU, pas au serveur — phase 02b, module 7
+
+Le rejeu du serveur a besoin de deux réponses : « cette partie est-elle finie ? » et « qu'est-ce
+qu'elle rend comme durée, kills, rang et sacoche ? ». Les écrire dans `api/app.js` aurait été la
+chose évidente, et la troisième copie : `endMatch` les calculait déjà, le harnais de `test.js` les
+recopiait, et le serveur allait recommencer. Trois copies d'une même définition, dont deux auraient
+fini par mentir — et alors le serveur aurait jugé une **autre partie** que celle que l'écran du joueur
+venait d'afficher, sans que rien ne casse.
+
+`WBSim.terminal(G)`, `WBSim.faits(G)` et `WBSim.argentCents(G)` sont donc descendus dans le bloc de
+simulation, comme tout le reste, et `endMatch` les lit. Le harnais garde ses propres formules,
+délibérément : c'est une seconde opinion, et un test compare les deux sur les cinquante parties. Même
+patron que le `free()` réécrit exprès dans `test.js` au module 3.
+
+Le fait de fin a dû descendre **sur l'état** pour cela : `G.fin` retient le premier événement `fin`,
+parce qu'un événement se draine — le bloc `Game` le lit une fois puis il n'existe plus — alors que
+« cette partie a une fin, et laquelle » est un fait de la partie.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -147,6 +183,13 @@ a triché ; il peut n'être qu'une preuve que les deux n'ont pas la même biblio
 un jour un rejeu doit être opposable, il faudra soit figer le runtime des deux côtés, soit remplacer
 ces trois fonctions par des implémentations déterministes écrites à la main — ce qui est un chantier
 en soi, à chiffrer avant de le promettre.
+
+*Ce que la phase 02b en a fait, module 7.* Rien de cette limite n'a été levé, et rien n'a été promis
+au-delà. La divergence est **mesurée et jamais punie** : la ligne est réglée, payée, et marquée
+`digest_match = false` avec le pas où les empreintes se séparent. La seule garantie donnée est
+négative et elle suffit : **le grand livre de la phase 03 ne lira que des lignes dont le rejeu a
+convergé.** Refuser le joueur divergent aurait été le quatrième contrôle « évident » et faux de ce
+dossier.
 
 ### Le verdict de la phase 02a n'arrête presque rien, et c'est assumé
 
@@ -359,21 +402,49 @@ passe contre la doublure prouve la doublure.
   réseau : tout est injecté dans `createApp()`.
 - Toujours aucun euro, et le portefeuille reste une variable du navigateur.
 
+## État après la phase 02b
+
+- Le jeu n'a toujours pas changé de nature : un seul `index.html`, sans build, jouable sans compte
+  ni serveur, graine comprise. Il contient désormais **trois** blocs `<script>` — `WBCore`, `WBSim`,
+  `Game` — et les deux premiers sont testés dans Node, sans navigateur.
+- **Le serveur rejoue la partie.** `POST /api/match/:id/result` refait la partie depuis la graine
+  publique du billet et la trace des entrées du joueur, avec le même bloc `WBSim` que le navigateur
+  exécute, et recalcule durée, kills, morts, rang, cubes et sacoche. `net_cents` sort de la partie
+  rejouée ; `declared_net_cents` et `ecart_cents` restent une observation. **La forme de la route
+  n'a pas changé d'une virgule**, comme la 02a l'avait promis.
+- **Une ligne ne se clôt que sur un état terminal**, la conservation de l'argent est assertée au
+  moment du règlement, un budget de calcul borne le rejeu, et huit refus nommés sortent en 400 ou
+  409 sans jamais laisser un joueur enfermé dans un billet mort.
+- **La divergence est mesurée, jamais punie** : la ligne est réglée et payée, marquée
+  `digest_match = false`, et le taux de divergence est un agrégat exposé. Le grand livre de la phase
+  03 ne lira que ce qui a convergé.
+- **365 tests sur le jeu, 128 sur l'API** sans rien installer, 137 avec `jose`. Aucune base, aucun
+  réseau, aucun navigateur : tout est injecté.
+- **Toujours aucun euro, et cette phase n'ouvre aucune table en argent réel.** Le vol de temps
+  devient impossible ; le vol de précision — aimbot, ESP — reste entier, et il est structurel.
+
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
-- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 6 livrés sur sept. Le
-  serveur possède l'identité d'une partie et, depuis le module 6, la **pièce** qui prouve son
-  déroulement — mais pas encore son verdict. Ce qui a bougé : le pas est fixe, le hasard de la
-  simulation descend de la graine, le bloc `WBSim` existe et contient toute la simulation, une
-  partie entière se joue sans navigateur, `api/sim.js` charge ce bloc côté serveur, `sim_version`
-  est figée sur le billet et la trace des entrées du joueur arrive en base, en insertion seule.
-  **Ce qui n'a pas bougé, et c'est le tout dernier trou : `net_cents` vient toujours de la sacoche
-  DÉCLARÉE par le client.** Le serveur a la trace, il ne s'en sert pas encore pour juger. Le verdict
-  de 02a reste une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le
-  présenter comme un premier étage d'anti-triche. Le solde reste modifiable depuis la console.
-- **Aucune base n'a jamais tourné.** Les contraintes qui arbitrent l'unicité n'ont été éprouvées
-  que contre une doublure.
+- ~~**Serveur autoritaire**~~ **Refermé par la phase 02b, les sept modules livrés.** Le serveur
+  rejoue la partie et `net_cents` en sort. Ce qui reste ouvert derrière, et qui n'est pas la même
+  chose : **le vol de précision.** L'aimbot survit entier — la trace porte une direction de visée par
+  pas, et une visée parfaite ne se distingue pas d'un très bon joueur — et l'ESP est devenu
+  **structurel** : dans une architecture de rejeu, le client possède tout ce qu'il dessine, donc il
+  connaît le contenu de tout le butin de la carte dès la première seconde. Tant que les dix-neuf
+  adversaires sont des bots, la seule victime en est la maison, à chaque partie. Le solde, lui, reste
+  une variable du navigateur jusqu'à la phase 03.
+- **Aucune base n'a jamais tourné, et c'est devenu un PRÉREQUIS de la phase 03.** Les contraintes qui
+  arbitrent l'unicité et l'écriture unique d'un règlement n'ont été éprouvées que contre une
+  doublure, et la phase 02b a ajouté cinq colonnes et une table dont un **paiement** dépend. Un test
+  qui passe contre la doublure prouve la doublure. Faire tourner une vraie Postgres une fois, ne
+  serait-ce qu'à la main, se fait **avant** le grand livre, pas après.
+- **`match_traces` n'a aucune politique de conservation.** Combien de temps garde-t-on la pièce qui
+  prouve une partie, et qui a le droit de la relire : renvoyé à la phase 03.
+- **Un déploiement se draine, il n'écrase pas les billets ouverts.** Décision d'exploitation, à
+  ranger à côté de « la maison est la contrepartie de chaque pot ». Ce qui arrive quand on ne la
+  prend pas est désormais visible : le rejeu refuse en `sim_version` et la partie n'est jamais
+  enregistrée.
 - ~~**Aucun test ne regarde le jeu tourner.**~~ **Refermé au module 5 de la phase 02b :** `node
   test.js` joue cinquante parties complètes — dix graines × cinq modes — du coup d'envoi à la
   dernière phase du gaz, sans navigateur. Ce qui reste ouvert derrière, et qui n'est pas la même
@@ -390,12 +461,15 @@ passe contre la doublure prouve la doublure.
   couverte, pas sa dramaturgie — les bots y sont remplacés par une conduite de quelques lignes. Le
   trou se referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
   ennuyeuses reste un humain qui joue une partie entière.
-- **La session de jeu réelle due après le module 1 n'a toujours pas eu lieu**, et elle a désormais
-  **trois** changements de ressenti à juger : le pas fixe, la personnalité des bots qui a changé
-  d'un coup au module 2, et depuis le module 4 la portée réelle des tirs — la collision balayée
-  fait toucher des tirs qui frôlaient, surtout de près et surtout avec les armes rapides, et les
-  bots en profitent autant que le joueur. Le module 3 n'en ajoute pas : c'est un déplacement, pas
-  une règle. La spécification exige cette session **avant le module 5**.
+- **La session de jeu réelle due après le module 1 n'a toujours pas eu lieu**, et la phase 02b est
+  finie sans elle. Elle a **quatre** changements de ressenti à juger : le pas fixe (module 1), la
+  personnalité des bots qui a changé d'un coup (module 2), la portée réelle des tirs — la collision
+  balayée fait toucher des tirs qui frôlaient, surtout de près et surtout avec les armes rapides
+  (module 4) — et la quantification des entrées du joueur, visée au 1024e de tour (module 6). Les
+  modules 3, 5 et 7 n'en ajoutent pas : ce sont des déplacements et des décisions de serveur. Aucun
+  test ne peut départager les quatre, et le seul juge est un humain qui joue une partie entière, sur
+  téléphone comme sur ordinateur. **C'est la dette la plus ancienne du dossier et elle est encore
+  là.**
 - **Cadre légal** avant tout argent réel, et la décision d'exploitation ci-dessus — la maison est
   la contrepartie de chaque pot — à trancher avant la phase 04.
 - **Icône définitive** : plusieurs directions explorées, décision non figée.
