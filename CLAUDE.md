@@ -75,6 +75,14 @@ tout solde y est modifiable depuis la console.
   un seul fichier, et reste jouable sans compte. Une ligne à remplir, `ACCOUNT.api`, le jour où le
   serveur tournera quelque part.
 - Phase 02 — le serveur devient l'autorité du jeu. `WBCore` tourne déjà dans Node, c'est le socle.
+  Le chantier s'est révélé être deux chantiers, et les deux moitiés sont nommées pour qu'on ne
+  croie jamais la phase finie alors qu'elle ne l'est qu'à moitié :
+  - Phase 02a — le serveur possède l'**identité** de la partie : il émet le billet (graines, mode,
+    mise en centimes entiers, heure d'ouverture, expiration), il juge le rapport rendu et recalcule
+    lui-même tout montant. **En cours.** Spécification : `docs/PHASE-02.md`.
+  - Phase 02b — le serveur **simule** la partie : mouvement, tirs, dégâts, gaz. Pas commencée.
+  Tant que 02b n'est pas faite, la phase 02 n'est pas faite : le verdict de 02a est une enveloppe de
+  plausibilité, pas de l'anti-triche, et aucun euro n'entre.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde.
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
