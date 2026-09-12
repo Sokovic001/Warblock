@@ -1499,10 +1499,174 @@ const WBCore = (function(){
              tip:'Slow heavy bolt. Super builds a turret that covers you for 15s.' },
   };
   for(const b of Object.values(BRAWLERS)) b.speed = derivedSpeed(b.hp, b.attack.range, b.agility);
+  // Ce qu'est `makeRng`, écrit une fois pour qu'on ne le redécouvre pas en phase 04 : un
+  // générateur congruentiel linéaire à état 32 bits. UNE SEULE sortie rend l'état exact —
+  // `s = sortie * 4294967296` — et donc tout l'avenir du flux, à jamais. Ce n'est pas un défaut
+  // dans un rejeu où la graine est publique de toute façon, et où le client doit posséder tout ce
+  // qu'il dessine. Mais ça INTERDIT d'appuyer quoi que ce soit sur sa non-prédictibilité :
+  // ni un contenu de caisse qu'on croirait cacher au joueur, ni un tirage qui déciderait d'un
+  // paiement. Le jour où il faudra vraiment qu'un client ne devine pas, il faudra autre chose
+  // que ce générateur, et la décision sera architecturale, pas un changement de constante.
   function makeRng(seed){ let s=(seed>>>0)||1; return function(){ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
   function makeNoise(rng,size){ size=size||64; const g=new Float32Array(size*size); for(let i=0;i<g.length;i++) g[i]=rng();
     const at=(i,j)=>g[((i%size)+size)%size*size+((j%size)+size)%size], sm=t=>t*t*(3-2*t);
     return (x,y)=>{ const xi=Math.floor(x),yi=Math.floor(y),xf=sm(x-xi),yf=sm(y-yi); const a=at(xi,yi)+(at(xi+1,yi)-at(xi,yi))*xf, b=at(xi,yi+1)+(at(xi+1,yi+1)-at(xi,yi+1))*xf; return a+(b-a)*yf; }; }
+  // ---- Le hasard de la simulation : des flux NOMMÉS, semés par usage.
+  //
+  // Un générateur unique par partie suffirait au rejeu, et c'est un piège connu : ajouter un
+  // tirage quelque part décale toute la suite AILLEURS, donc toute la partie. Tirer trois fois de
+  // plus dans la visée des bots déplacerait les caisses. Chaque usage a donc son flux, semé par un
+  // mélange ENTIER de la graine publique et d'un sel constant dérivé du NOM du flux.
+  //
+  // Ce n'est pas une précaution théorique, c'est la réparation d'un défaut qui était déjà là : les
+  // caisses, les points d'apparition, le brawler de chaque bot et sa précision sortaient tous de
+  // `G.rng`, le générateur que `buildWorld` consomme d'abord pour la hauteur des murs, le feuillage
+  // des buissons et les particules de gaz. Or le nombre de feuilles par buisson vient du palier de
+  // qualité, c'est-à-dire de la machine. Sur la MÊME graine, deux appareils ne posaient donc pas
+  // les caisses au même endroit et ne jouaient pas contre les mêmes bots. Le cosmétique garde
+  // `Math.random` et son propre générateur ; la simulation ne les touche plus.
+  //
+  // Les noms sont fermés : demander un flux qui n'est pas dans cette liste LANCE. Une faute de
+  // frappe créerait sinon un flux neuf en silence, et le rejeu du serveur tirerait ailleurs que le
+  // jeu sans que rien ne le signale.
+  const FLUX = [
+    'bots/identite',      // nervosité, distance préférée, rythme d'esquive, brawler, précision, nom en partie
+    'bots/visee',         // délai de réaction et erreur de visée
+    'bots/objectif',      // où un bot va quand il n'a pas de cible, et sa décision de fumigène
+    'bots/encaissement',  // le tirage par pas qui décide qu'un bot met sa sacoche à l'abri
+    'apparition',         // points de départ des équipes et points de réapparition
+    'butin/contenu',      // ce que rend une caisse cassée
+    'butin/position',     // où se posent les caisses et les objets qui tombent
+    'tir/dispersion',     // le grain de sable sur l'angle de chaque projectile, joueur compris
+  ];
+  // FNV-1a 32 bits, en arithmétique entière : `Math.imul` garde les 32 bits bas exacts là où une
+  // multiplication flottante perdrait les bits de poids faible dès la troisième lettre.
+  function fluxSalt(nom){
+    let h = 0x811c9dc5;
+    for (let i = 0; i < nom.length; i++){ h = (h ^ nom.charCodeAt(i)) >>> 0; h = Math.imul(h, 0x01000193) >>> 0; }
+    return h >>> 0;
+  }
+  // La graine d'un flux. Le mélange doit AVALANCHER : un simple `graine ^ sel` ferait que deux
+  // flux dont les sels diffèrent d'un bit rendraient, sur un générateur congruentiel, deux suites
+  // presque superposables. Trois tours de multiplication et de décalage suffisent, et l'ensemble
+  // reste en entiers 32 bits, donc identique sur tout moteur.
+  function fluxSeed(seed, nom){
+    let x = ((seed >>> 0) ^ Math.imul(fluxSalt(nom), 0x9e3779b1)) >>> 0;
+    x = Math.imul(x ^ (x >>> 16), 0x85ebca6b) >>> 0;
+    x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35) >>> 0;
+    return (x ^ (x >>> 16)) >>> 0;
+  }
+  // Les flux d'une partie. Rend une fonction `flux(nom)` qui donne TOUJOURS le même générateur
+  // pour un nom donné : c'est ce qui en fait une suite et non une série de générateurs neufs.
+  function makeFlux(seed){
+    const cache = Object.create(null);
+    return function (nom){
+      const deja = cache[nom];
+      if (deja) return deja;
+      if (FLUX.indexOf(nom) < 0) throw new Error('flux de hasard inconnu : ' + nom);
+      return (cache[nom] = makeRng(fluxSeed(seed, nom)));
+    };
+  }
+  // Un mélange semé, en place, par Fisher-Yates. Il existe parce que le jeu mélangeait ses listes
+  // par `sort(() => rng() - 0.5)`, et qu'un comparateur aléatoire n'est pas rejouable : le NOMBRE
+  // de comparaisons qu'un moteur effectue n'est spécifié nulle part, donc le nombre de tirages
+  // consommés non plus. Deux moteurs — ou deux versions du même — ne consomment alors pas la même
+  // longueur du flux, et tout ce qui tire ensuite dans ce flux se décale. Fisher-Yates consomme
+  // exactement `n - 1` sorties, quoi qu'il arrive, et rend une permutation uniforme, ce qu'un tri
+  // à comparateur aléatoire ne fait de toute façon pas.
+  function melangeSeme(tab, rng){
+    for (let i = tab.length - 1; i > 0; i--){
+      const j = (rng() * (i + 1)) | 0;
+      const t = tab[i]; tab[i] = tab[j]; tab[j] = t;
+    }
+    return tab;
+  }
+  // ---- La géométrie tirée de la SEULE graine, sans fonctions transcendantes.
+  //
+  // ECMAScript laisse `Math.cos`, `Math.sin`, `Math.hypot`, `Math.pow`, `Math.atan2` et `Math.exp`
+  // « implementation-approximated » : deux moteurs ont le droit de différer du dernier bit. Or la
+  // carte, les biomes, le plan de zone et les points d'apparition sont le PRÉFIXE COMMUN de toute
+  // la partie — s'ils divergent, tout ce qui suit diverge, et l'invariant « même graine, même
+  // plan de zone » ne prouve alors que l'égalité entre deux processus du même moteur.
+  //
+  // Ces fonctions-là ne prennent leurs angles que de la graine, jamais d'une souris ni d'un stick :
+  // on peut donc les quantifier sans qu'aucun joueur ne le sente. L'INTERDICTION S'ARRÊTE LÀ. La
+  // visée vient d'une souris, le spread vaut 0,32 ou 0,55 selon les armes, les lobs et le dash ont
+  // leurs arcs : quantifier tout ça serait une réécriture des mathématiques du jeu sous couvert de
+  // déterminisme, et ce n'est pas ce module. Pour le reste, la doctrine est la divergence mesurée.
+  //
+  // UNIT_N = 1024 directions, soit un pas de 2π/1024 ≈ 0,00614 radian. Le pas se choisit sur le
+  // plus grand cercle que la carte parcourt : la route circulaire de `generateMap`, à MAP×0,34 ≈
+  // 51,7 cases. Un pas y vaut 0,32 case, donc le cercle reste continu sur une grille de maille 1.
+  // (Le code d'origine balayait par pas de 0,006 radian : on ne change rien de visible.)
+  //
+  // La table écrite est le PREMIER QUADRANT des cosinus, 257 littéraux de source, produits une
+  // seule fois par `Math.cos(2*Math.PI*k/1024)` puis figés ici. Les trois autres quadrants s'en
+  // déduisent par échange d'axes et changement de signe — deux opérations EXACTES en IEEE 754.
+  // Aucune transcendante n'est donc appelée à l'exécution, et aucun moteur ne peut rendre autre
+  // chose que ces nombres-là. Les quatre directions cardinales sont écrites exactes, 1 et 0, là où
+  // `Math.cos(Math.PI/2)` rend 6,12e-17.
+  //
+  // Aucune base n'a jamais tourné : changer la carte et les centres de gaz de toutes les graines
+  // coûte ZÉRO migration. C'est le dernier moment où ça reste vrai.
+  const UNIT_N = 1024;
+  const UNIT_COS = [
+    1, 0.9999811752826011, 0.9999247018391445, 0.9998305817958234, 0.9996988186962042, 0.9995294175010931, 0.9993223845883495, 0.9990777277526454,
+    0.9987954562051724, 0.9984755805732948, 0.9981181129001492, 0.9977230666441916, 0.9972904566786902, 0.9968202992911657, 0.996312612182778, 0.9957674144676598,
+    0.9951847266721969, 0.9945645707342554, 0.9939069700023561, 0.9932119492347945, 0.99247953459871, 0.9917097536690995, 0.99090263542778, 0.9900582102622971,
+    0.989176509964781, 0.9882575677307495, 0.9873014181578584, 0.9863080972445987, 0.9852776423889412, 0.984210092386929, 0.9831054874312163, 0.9819638691095552,
+    0.9807852804032304, 0.9795697656854405, 0.9783173707196277, 0.9770281426577544, 0.9757021300385286, 0.9743393827855759, 0.9729399522055602, 0.9715038909862518,
+    0.970031253194544, 0.9685220942744173, 0.9669764710448521, 0.9653944416976894, 0.9637760657954398, 0.9621214042690416, 0.9604305194155658, 0.9587034748958716,
+    0.9569403357322088, 0.9551411683057708, 0.9533060403541939, 0.9514350209690083, 0.9495281805930367, 0.9475855910177411, 0.9456073253805213, 0.9435934581619604,
+    0.9415440651830208, 0.9394592236021899, 0.937339011912575, 0.9351835099389476, 0.932992798834739, 0.9307669610789837, 0.9285060804732156, 0.9262102421383114,
+    0.9238795325112867, 0.9215140393420419, 0.9191138516900578, 0.9166790599210427, 0.9142097557035307, 0.9117060320054299, 0.9091679830905224, 0.9065957045149153,
+    0.9039892931234433, 0.901348847046022, 0.8986744656939538, 0.8959662497561852, 0.8932243011955153, 0.8904487232447579, 0.8876396204028539, 0.8847970984309378,
+    0.881921264348355, 0.8790122264286335, 0.8760700941954066, 0.8730949784182901, 0.8700869911087115, 0.8670462455156926, 0.8639728561215867, 0.8608669386377673,
+    0.8577286100002721, 0.8545579883654005, 0.8513551931052652, 0.8481203448032972, 0.8448535652497071, 0.8415549774368984, 0.8382247055548381, 0.83486287498638,
+    0.8314696123025452, 0.8280450452577558, 0.8245893027850253, 0.8211025149911046, 0.8175848131515837, 0.8140363297059484, 0.8104571982525948, 0.8068475535437993,
+    0.8032075314806449, 0.799537269107905, 0.7958369046088836, 0.7921065773002124, 0.7883464276266063, 0.7845565971555752, 0.7807372285720945, 0.7768884656732324,
+    0.773010453362737, 0.7691033376455797, 0.765167265622459, 0.7612023854842618, 0.7572088465064846, 0.7531867990436125, 0.7491363945234594, 0.745057785441466,
+    0.7409511253549592, 0.7368165688773698, 0.7326542716724128, 0.7284643904482252, 0.724247082951467, 0.7200025079613817, 0.7157308252838186, 0.7114321957452164,
+    0.7071067811865476, 0.7027547444572253, 0.6983762494089729, 0.693971460889654, 0.6895405447370669, 0.6850836677727004, 0.6806009977954531, 0.676092703575316,
+    0.6715589548470183, 0.6669999223036375, 0.6624157775901718, 0.6578066932970787, 0.6531728429537769, 0.6485144010221126, 0.6438315428897915, 0.6391244448637757,
+    0.6343932841636455, 0.6296382389149271, 0.6248594881423865, 0.6200572117632892, 0.6152315905806268, 0.6103828062763095, 0.6055110414043255, 0.600616479383869,
+    0.5956993044924335, 0.5907597018588743, 0.5857978574564389, 0.5808139580957645, 0.5758081914178453, 0.5707807458869674, 0.5657318107836132, 0.560661576197336,
+    0.5555702330196023, 0.5504579729366048, 0.5453249884220465, 0.540171472729893, 0.5349976198870973, 0.5298036246862948, 0.5245896826784688, 0.5193559901655895,
+    0.5141027441932217, 0.508830142543107, 0.5035383837257176, 0.49822766697278187, 0.4928981922297841, 0.48755016014843605, 0.48218377207912283, 0.47679923006332225,
+    0.4713967368259978, 0.4659764957679661, 0.46053871095824, 0.45508358712634384, 0.4496113296546066, 0.44412214457042926, 0.4386162385385277, 0.433093818853152,
+    0.4275550934302822, 0.4220002707997998, 0.4164295600976373, 0.4108431710579039, 0.40524131400498986, 0.3996241998456468, 0.3939920400610481, 0.3883450466988263,
+    0.38268343236508984, 0.3770074102164183, 0.3713171939518376, 0.36561299780477396, 0.3598950365349883, 0.3541635254204905, 0.3484186802494345, 0.3426607173119944,
+    0.33688985339222005, 0.33110630575987643, 0.325310292162263, 0.31950203081601575, 0.3136817403988916, 0.307849640041535, 0.3020059493192282, 0.29615088824362396,
+    0.29028467725446233, 0.2844075372112718, 0.27851968938505306, 0.272621355449949, 0.2667127574748984, 0.26079411791527557, 0.2548656596045146, 0.24892760574572026,
+    0.24298017990326398, 0.23702360599436734, 0.23105810828067128, 0.22508391135979278, 0.21910124015686977, 0.21311031991609136, 0.20711137619221856, 0.20110463484209196,
+    0.19509032201612833, 0.18906866414980628, 0.18303988795514106, 0.17700422041214886, 0.17096188876030136, 0.1649131204899701, 0.1588581433338614, 0.1527971852584434,
+    0.14673047445536175, 0.14065823933284924, 0.13458070850712622, 0.12849811079379322, 0.12241067519921628, 0.11631863091190488, 0.11022220729388318, 0.10412163387205473,
+    0.09801714032956077, 0.0919089564971327, 0.08579731234443988, 0.07968243797143013, 0.07356456359966745, 0.0674439195636641, 0.06132073630220865, 0.05519524434969003,
+    0.049067674327418126, 0.04293825693494096, 0.03680722294135899, 0.03067480317663658, 0.024541228522912264, 0.01840672990580482, 0.012271538285719944, 0.006135884649154515,
+    0
+  ];
+  const UNIT = (function(){
+    const t = new Array(UNIT_N), moins = v => v === 0 ? 0 : -v;   // jamais de -0 dans la table
+    for (let i = 0; i < UNIT_N; i++){
+      const q = i >> 8, k = i & 255, c = UNIT_COS[k], s = UNIT_COS[256 - k];
+      t[i] = q === 0 ? { x: c,         z: s }
+           : q === 1 ? { x: moins(s),  z: c }
+           : q === 2 ? { x: moins(c),  z: moins(s) }
+           :           { x: s,         z: moins(c) };
+    }
+    return t;
+  })();
+  // La direction d'indice i, l'indice étant ramené dans la table. Les décalages d'angle se comptent
+  // donc en INDICES et jamais en radians : c'est ce qui garde l'arithmétique entière de bout en
+  // bout, et c'est pourquoi les fonctions appelantes portent des constantes en indices.
+  function unitAt(i){ const n = ((Math.round(i) % UNIT_N) + UNIT_N) % UNIT_N; return UNIT[n]; }
+  // Une direction tirée d'un flux semé : un seul tirage, un seul entier, aucune multiplication
+  // par π. Consomme exactement une sortie, comme le faisait `rng() * Math.PI * 2`.
+  function unitFrom(rng){ const i = (rng() * UNIT_N) | 0; return UNIT[i < 0 ? 0 : (i >= UNIT_N ? UNIT_N - 1 : i)]; }
+  // `Math.hypot` est « implementation-approximated » ; `Math.sqrt` est exactement spécifié par
+  // IEEE 754. La protection de `hypot` contre le débordement ne sert à rien ici : les coordonnées
+  // d'une carte tiennent dans [0, 152], leurs carrés aussi, de très loin.
+  function dist(dx, dz){ return Math.sqrt(dx * dx + dz * dz); }
   // Three biomes share one map, in large contiguous regions.
   // One scene for now — the farm. The other two are kept ready but switched off: a single coherent
   // arena reads far better than three biomes stitched together on one map.
@@ -1540,7 +1704,7 @@ const WBCore = (function(){
     const biomes=generateBiomes(seed);
     const cells=new Uint8Array(MAP*MAP), cx=MAP/2, cz=MAP/2;
     for(let x=0;x<MAP;x++) for(let z=0;z<MAP;z++){
-      const d=Math.hypot(x-cx,z-cz), ring=Math.abs(d-MAP*0.42)<3;
+      const d=dist(x-cx,z-cz), ring=Math.abs(d-MAP*0.42)<3;
       const bi=BIOMES[biomes[x*MAP+z]];
       let t=0;
       const w=n1(x/6.5,z/6.5), b=n2(x/5+9,z/5+3), p=n3(x/17,z/17);
@@ -1554,8 +1718,12 @@ const WBCore = (function(){
     }
     // hand-carved lanes so the map is never sealed: a cross through the centre plus two ring roads
     for(let i=1;i<MAP-1;i++){ cells[i*MAP+Math.floor(cz)]=0; cells[Math.floor(cx)*MAP+i]=0; }
-    for(const rr of [MAP*0.22, MAP*0.34]) for(let a=0;a<Math.PI*2;a+=0.006){
-      const x=Math.round(cx+Math.cos(a)*rr), z=Math.round(cz+Math.sin(a)*rr);
+    // Le balayage se fait sur la table des directions : un tour complet, 1024 pas, là où le code
+    // d'origine avançait de 0,006 radian (1047 pas). Le trait reste continu, et il est le même
+    // sur tous les moteurs.
+    for(const rr of [MAP*0.22, MAP*0.34]) for(let ai=0;ai<UNIT_N;ai++){
+      const u=UNIT[ai];
+      const x=Math.round(cx+u.x*rr), z=Math.round(cz+u.z*rr);
       if(x>0&&z>0&&x<MAP-1&&z<MAP-1) cells[x*MAP+z]=0;
     }
     // scattered waist-high props, only ever dropped on a cell with open ground all around it.
@@ -1705,7 +1873,7 @@ const WBCore = (function(){
   // ---- Le pas de simulation, et pourquoi il est FIXE.
   //
   // La raison suffisante n'a rien à voir avec l'argent : `Math.min(1,dt*13)` sur la vitesse,
-  // `Math.random()<dt*0.25` sur l'encaissement des bots, `b.aim-=dt` — le jeu ne se comporte pas
+  // un tirage `< dt*0.25` sur l'encaissement des bots, `b.aim-=dt` — le jeu ne se comporte pas
   // pareil à 30 et à 144 images par seconde. On répare une inéquité entre appareils. Que le rejeu
   // du serveur en devienne possible est un bénéfice, pas la justification.
   //
@@ -1755,10 +1923,12 @@ const WBCore = (function(){
   // recalculer après coup ce qu'une durée de survie voulait dire. Les centres se tirent désormais
   // de `makeRng(graine ^ ZONE_SALT)`, et de rien d'autre.
   //
-  // CE QUE CE BLOC NE FAIT PAS, et qu'il faut lire avant de croire le contraire : il ne rend PAS
-  // la partie reproductible. Il reste une trentaine d'appels à `Math.random()` dans le bloc
-  // `Game` — points de réapparition, décision d'encaissement des bots, identifiants d'entités.
-  // Seul le GAZ devient déterministe. Le rejeu intégral appartient à la phase 02b.
+  // CE QUE CE BLOC NE FAIT TOUJOURS PAS, et qu'il faut lire avant de croire le contraire : il ne
+  // rend pas à lui seul la partie reproductible. Ce qui a changé depuis : le hasard de la
+  // simulation descend désormais de la graine par les flux nommés ci-dessus — apparitions,
+  // identités des bots, visée, objectifs, encaissement, butin. Ce qui manque encore : la
+  // simulation vit dans le bloc `Game`, hors de toute partie testée, et rien ne rejoue une partie
+  // entière. Le rejeu intégral reste le reste de la phase 02b.
   const ZONE_PHASES=[ {wait:25,shrink:34,radius:56,dps:0.04},{wait:18,shrink:26,radius:32,dps:0.07},{wait:12,shrink:18,radius:15,dps:0.11},{wait:8,shrink:13,radius:5,dps:0.16} ]; // dps as fraction of max hp
   // Resurgence is the sprint version: the gas never stops moving.
   const ZONE_PHASES_FAST=[ {wait:12,shrink:20,radius:52,dps:0.06},{wait:8,shrink:16,radius:28,dps:0.10},{wait:6,shrink:12,radius:12,dps:0.14},{wait:4,shrink:9,radius:4,dps:0.20} ];
@@ -1790,15 +1960,19 @@ const WBCore = (function(){
     for (let i = 0; i < table.length; i++){
       const ph = table[i];
       // Deux tirages par phase, l'angle puis la distance, dans l'ordre du code d'origine : le gaz
-      // garde exactement l'allure qu'il avait, seule sa source change.
-      const a = rng() * Math.PI * 2;
+      // garde exactement l'allure qu'il avait, seule sa source change. L'angle passe par la table
+      // des directions et non plus par `Math.cos`/`Math.sin` : il ne vient que de la graine, donc
+      // le rabattre sur 1024 directions ne se voit nulle part et rend le plan identique sur tout
+      // moteur. Les centres de gaz de toutes les graines changent, et ça ne coûte rien : aucune
+      // base n'a jamais tourné.
+      const u = unitFrom(rng);
       const d = rng() * Math.max(0, r - ph.radius) * ZONE_DRIFT;
       // Le cercle est rabattu dans la carte. Ce rabotage ne peut pas casser la containment : la
       // fenêtre autorisée s'élargit à chaque phase puisque le rayon diminue, elle contient donc
       // déjà le centre précédent, et rabattre dedans ne fait que s'en rapprocher.
       const m = ph.radius + ZONE_EDGE;
-      const ncx = borne(cx + Math.cos(a) * d, m, MAP - m);
-      const ncz = borne(cz + Math.sin(a) * d, m, MAP - m);
+      const ncx = borne(cx + u.x * d, m, MAP - m);
+      const ncz = borne(cz + u.z * d, m, MAP - m);
       phases.push({ index: i, fromCx: cx, fromCz: cz, fromR: r,
                     cx: ncx, cz: ncz, r: ph.radius, dps: ph.dps,
                     waitS: ph.wait, shrinkS: ph.shrink,
@@ -2294,6 +2468,7 @@ const WBCore = (function(){
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
+           FLUX, fluxSalt, fluxSeed, makeFlux, melangeSeme, UNIT_N, UNIT_COS, UNIT, unitAt, unitFrom, dist,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
            NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
@@ -3321,7 +3496,13 @@ function buildWorld(seed){
   const gasFloor=new THREE.Mesh(new THREE.RingGeometry(1,3,72),new THREE.MeshBasicMaterial({color:0x69d43e,transparent:true,opacity:0.34,side:THREE.DoubleSide,depthWrite:false})); gasFloor.rotation.x=-Math.PI/2; gasFloor.position.y=0.05; world.add(gasFloor);
   const gasMat=new THREE.MeshBasicMaterial({color:0x8bf05a,transparent:true,opacity:0.4,depthWrite:false});
   const gasParts=[]; for(let i=0;i<C.QUALITY.presets.ultra.gas;i++){ const mesh=new THREE.Mesh(boxGeo,gasMat); const sc=0.7+rng()*1.3; mesh.scale.set(sc,sc*0.7,sc); world.add(mesh); gasParts.push({mesh,a:rng()*Math.PI*2,off:1+rng()*16,ph:rng()*9,sp:(rng()-0.5)*0.11}); }
-  return {cells,biomes,rng,zoneMesh,gasFloor,gasParts,bushMeshes};
+  // `rng` ne sort plus d'ici. Il restait dans `G` sous le nom `G.rng`, et la simulation y puisait :
+  // les caisses, les points d'apparition, le brawler de chaque bot et sa précision. Or ce
+  // générateur-là est d'abord consommé, juste au-dessus, par le feuillage des buissons, dont le
+  // nombre vient du palier de qualité — donc de la machine. Sur la MÊME graine, deux appareils ne
+  // jouaient pas la même partie. Il reste le générateur du décor, et il ne quitte pas cette
+  // fonction : ce qui décide d'un fait de la partie tire dans `G.alea`.
+  return {cells,biomes,zoneMesh,gasFloor,gasParts,bushMeshes};
 }
 
 // ---------- meshes ----------
@@ -3583,20 +3764,30 @@ function discard(obj){
 }
 
 // ---------- entities ----------
+// `id` n'est pas un identifiant : c'est la PERSONNALITÉ du brawler. `botUpdate` en tire la
+// nervosité, la distance préférée, le rythme d'esquive et la moitié qui décroche contre celle qui
+// reste. Il sort donc du flux `bots/identite` et non plus de `Math.random()` : c'est ce qui rend
+// les vingt adversaires rejouables, et c'est aussi ce qui change le comportement de TOUS les bots
+// d'un coup. `think` est le décalage de leur première réflexion, tiré du même flux.
 function makeEntity(name,x,z,stake,isPlayer,brawler,acc,team){
   const e={ name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
-    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:Math.random()*0.3,aim:0,id:Math.random(),
+    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:G.alea('bots/identite')()*0.3,aim:0,id:G.alea('bots/identite')(),
     speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0, gadget:C.smokeStart() };
   e.mesh=makeBrawlerMesh(new THREE.Color(brawler.color),isPlayer,brawler.id); e.mesh.position.set(x,0,z); world.add(e.mesh);
   e.stealthT=0; e.dashT=0;
   return e;
 }
 const maxHp=e=>C.maxHp(e.brawler,e.cubes);
+// Les points de départ ne prennent leurs angles que de la graine : ils se comptent donc en INDICES
+// de `C.UNIT`, jamais en radians, et aucune transcendante n'est appelée ici. Les constantes sont
+// les anciennes, converties : 20 indices ≈ 0,123 rad (l'ancien jitter de 0,12), 16 ≈ 0,098 (0,09),
+// 18 ≈ 0,110 (0,11). L'écart est très inférieur au demi-pas de la grille, personne ne le voit.
 function spawnPoints(rng,teams,teamSize){
   const pts=[]; const cx=N/2,cz=N/2;
-  for(let i=0;i<teams;i++){ const a=i/teams*Math.PI*2+rng()*0.12, r=N*0.42;
-    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*0.09;
-      let x=cx+Math.cos(a2)*r, z=cz+Math.sin(a2)*r;
+  for(let i=0;i<teams;i++){ const a=Math.round(i*C.UNIT_N/teams)+((rng()*20)|0), r=N*0.42;
+    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*16;
+      const u=C.unitAt(a2);
+      let x=cx+u.x*r, z=cz+u.z*r;
       // free(), never isWall(). A brawler is 0.42 wide: its centre can sit on clear floor while
       // a corner is buried in the wall beside it. tryMove() then refuses both axes and that
       // brawler never moves again — and cannot even be shot, because bullets die on the wall it
@@ -3607,8 +3798,8 @@ function spawnPoints(rng,teams,teamSize){
         for(let step=0; step<50 && !found; step++){
           const rr=r-step*0.6; if(rr<4) break;
           for(let k=0;k<13 && !found;k++){
-            const aa=a2+(k-6)*0.11;
-            const nx=cx+Math.cos(aa)*rr, nz=cz+Math.sin(aa)*rr;
+            const uu=C.unitAt(a2+(k-6)*18);
+            const nx=cx+uu.x*rr, nz=cz+uu.z*rr;
             if(free(nx,nz)){ x=nx; z=nz; found=true; }
           }
         }
@@ -3744,10 +3935,13 @@ function attack(e,dirx,dirz,aimDist){
   e.ammo--; e.ammoT=0; e.stealthT=0;
   fireSpec(e,dirx,dirz,e.brawler.attack,false,aimDist); snd('shot',e.isPlayer?0.14:0.06*Math.max(0,1-Math.hypot(e.x-G.player.x,e.z-G.player.z)/30)); return true;
 }
+// Le grain de sable sur l'angle de chaque projectile décide de ce qui touche : il sort du flux
+// `tir/dispersion`, joueur compris. La visée elle-même, elle, vient toujours d'une souris ou d'un
+// stick et garde ses angles — ce module ne quantifie que la géométrie tirée de la seule graine.
 function fireSpec(e,dirx,dirz,spec,isSuper,aimDist,origin){
   const base=Math.atan2(dirx,dirz);
   for(let i=0;i<spec.n;i++){
-    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(Math.random()-0.5)*0.02;
+    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(G.alea('tir/dispersion')()-0.5)*0.02;
     const pr=spawnProjectile(e,Math.sin(a),Math.cos(a),spec,isSuper,i*(spec.stagger||0),origin);
     if(spec.kind==='lob'){ pr.lob=true; pr.explodeAt=clamp(aimDist||spec.range,1.5,spec.range); }
   }
@@ -3858,7 +4052,11 @@ function damage(t,dmg,src){
   else if(src&&src.isPlayer){ snd(critique?'crit':'hit',critique?0.11:0.06); if(critique) critFx(); }
   if(t.hp<=0) kill(t,src,'shot');
 }
-function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(C.boxDrop(Math.random),bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
+function hurtBox(bx,dmg,src){ if(bx.hp<=0) return; bx.hp-=dmg; bx.mesh.scale.set(1+0.12*(1-bx.hp/C.BOX_HP),Math.max(0.7,bx.hp/C.BOX_HP*0.3+0.7),1+0.12*(1-bx.hp/C.BOX_HP)); if(bx.hp<=0){ world.remove(bx.mesh); discard(bx.mesh); spawnPickup(C.boxDrop(G.alea('butin/contenu')),bx.x,bx.z,1,null); if(src&&src.isPlayer) snd('box',0.1); } }
+// L'endroit où un objet tombe décide du chemin que quelqu'un devra faire pour le ramasser : il
+// sort du flux `butin/position`. Le déphasage `ph` du ballottement est, lui, purement décoratif,
+// et il se tire du MÊME flux : couper une fonction en deux moitiés dont l'une garderait
+// `Math.random` rendrait la frontière illisible, et le tirage ne coûte rien.
 function spawnPickup(kind,x,z,amount,owner){
   const mesh =
       kind==='heart' ? (()=>{ const sp=new THREE.Sprite(heartMat.clone()); sp.scale.set(0.85,0.85,1); return sp; })()
@@ -3866,13 +4064,14 @@ function spawnPickup(kind,x,z,amount,owner){
       // a canister lying in the grass, the same object you see flying when someone throws one
     : kind==='smoke' ? makeNade()
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
-  let px=x+(Math.random()-0.5)*1.4, pz=z+(Math.random()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
+  const aleaPos=G.alea('butin/position');
+  let px=x+(aleaPos()-0.5)*1.4, pz=z+(aleaPos()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
   mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
   // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
   // ground for the rest of the match
   const shadow=new THREE.Mesh(shadowGeo,shadowMat);
   shadow.scale.setScalar(0.75); shadow.position.set(px,0.03,pz); world.add(shadow);
-  G.pickups.push({kind,x:px,z:pz,amount,owner,mesh,shadow,ph:Math.random()*6.283});
+  G.pickups.push({kind,x:px,z:pz,amount,owner,mesh,shadow,ph:aleaPos()*6.283});
 }
 function removePickup(pk){
   const i=G.pickups.indexOf(pk); if(i<0) return false;
@@ -3971,9 +4170,14 @@ $('cashout').addEventListener('click',e=>{ e.stopPropagation(); doCashOut(); });
 $('cashout').addEventListener('touchend',e=>{ e.preventDefault(); e.stopPropagation(); doCashOut(); },{passive:false});
 function respawn(e){
   // come back somewhere safe inside the current circle, as far as possible from whoever is shooting
+  // Le point de retour est un FAIT de la partie : il décide de qui le revenant croise en premier.
+  // Il sort donc du flux `apparition`. L'angle, lui, garde `Math.cos`/`Math.sin` : il ne vient pas
+  // que de la graine — le cercle de gaz en cours dépend de tout ce qui s'est passé avant — et
+  // l'interdiction des transcendantes s'arrête à la géométrie tirée de la seule graine.
+  const alea=G.alea('apparition');
   let x=G.zone.cx, z=G.zone.cz, best=-1;
   for(let t=0;t<40;t++){
-    const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-3);
+    const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-3);
     const nx=clamp(G.zone.cx+Math.cos(a)*r,2,N-2), nz=clamp(G.zone.cz+Math.sin(a)*r,2,N-2);
     if(!free(nx,nz)) continue;
     let nearest=1e9;
@@ -4042,8 +4246,9 @@ function pickGoal(b){
   if(best) return best; bd=34;
   for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
   if(best) return best;
-  if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(Math.random()-0.5)*4,z:mate.z+(Math.random()-0.5)*4}; }
-  const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
+  const alea=G.alea('bots/objectif');
+  if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(alea()-0.5)*4,z:mate.z+(alea()-0.5)*4}; }
+  const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
 }
 function botUpdate(b,dt){
   if(dashUpdate(b,dt)) return;
@@ -4058,9 +4263,9 @@ function botUpdate(b,dt){
       if(done) break; }
   }
   if(G.modeCfg.cashout){ b.cashLock=Math.max(0,(b.cashLock||0)-dt);
-    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&Math.random()<dt*0.25){ botCashOut(b); return; } }
+    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&G.alea('bots/encaissement')()<dt*0.25){ botCashOut(b); return; } }
   b.think-=dt; b.fireCd-=dt; b.goalT-=dt; b.aim-=dt; b.stealthT-=dt;
-  if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+Math.random()*0.6); b.target=nt;
+  if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+G.alea('bots/visee')()*0.6); b.target=nt;
     if(!b.target&&(!b.goal||b.goalT<=0||Math.hypot(b.goal.x-b.x,b.goal.z-b.z)<0.8||(b.goal.box&&b.goal.box.hp<=0)||(b.goal.pick&&!G.pickups.includes(b.goal.pick)))){ b.goal=pickGoal(b); b.goalT=8; } }
   let mx=0,mz=0; const atk=b.brawler.attack;
   // Two ways of being hurt, split by temperament. A bot that has broken off is heading for its
@@ -4105,7 +4310,7 @@ function botUpdate(b,dt){
     else if(d>want){ mx=dx; mz=dz; }
     else { const s=Math.sin(G.time*(1.0+(b.id*11%1)*0.8)+b.id*9); mx=-dz*s; mz=dx*s; if(d<want*0.5&&b.brawler.id!=='brick'){ mx-=dx*0.7; mz-=dz*0.7; } }
     if(d<atk.range*0.98&&b.aim<=0&&b.fireCd<=0&&b.ammo>=1){
-      const err=(Math.random()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
+      const err=(G.alea('bots/visee')()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
       // lead a little on the player's velocity
       const lead=0.25; const lx=t.x+(t.vx||0)*lead-b.x, lz=t.z+(t.vz||0)*lead-b.z, la=Math.atan2(lx,lz)+err;
       attack(b,Math.sin(la),Math.cos(la),d);
@@ -4115,7 +4320,7 @@ function botUpdate(b,dt){
       b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
     // smoke is a way out, not an opening: a losing bot drops it on itself and runs, same as you
-    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&Math.random()<dt*1.7) throwSmoke(b,0);
+    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&G.alea('bots/objectif')()<dt*1.7) throwSmoke(b,0);
     const sp=b.brawler.super;
     if(b.super>=sp.cost){
       // A super's reach depends on its shape: a burst or a lob flies `range`, a thrown zone
@@ -4185,8 +4390,10 @@ function zoneUpdate(dt){
   // etait la morte. C'est mot pour mot le patron « respawn() definie deux fois » que
   // docs/HISTORIQUE.md recense, et il laissait passer une mutation qui doublait la duree du gaz
   // sans faire tomber un seul test.
-  // Attention a ce que ca ne veut pas dire : seul le GAZ est reproductible, le reste de la partie
-  // (reapparitions, bots, identifiants) tire toujours sur Math.random().
+  // Attention a ce que ca ne veut pas dire : le gaz sort de la seule graine, et depuis le module 2
+  // le reste du hasard de la simulation aussi — reapparitions, bots, butin — par les flux nommes
+  // de `C.makeFlux`. Ce qui manque au rejeu n'est plus une source de hasard, c'est que la
+  // simulation soit sortie du rendu et qu'un test la fasse tourner.
   const z=G.zone, ph=G.zonePlan.phases, avantShrink=z.shrinking;
   const a=C.zoneAt(G.zonePlan,G.time);
   z.cx=a.cx; z.cz=a.cz; z.r=a.r; z.phase=a.phase; z.shrinking=a.shrinking; z.timer=a.timer; z.dps=a.dps; z.to=a.to;
@@ -4872,7 +5079,12 @@ function startMatch(stake){
   const graineLocale=(Date.now()^(Math.random()*1e9))>>>0;
   const billet=Match.coupDenvoi(selMode,C.toCents(stake));
   const seed=C.seedFor(billet,graineLocale);
-  G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
+  // Les flux de hasard de la partie, un par usage, tous semés par la graine publique. Tout ce qui
+  // decide d'un fait de la partie tire ici et nulle part ailleurs. Le generateur du DECOR, lui, ne
+  // sort plus de `buildWorld` : il est consomme par le feuillage des buissons, dont le nombre vient
+  // du palier de qualite, donc de la machine. Le laisser decider des caisses, des points de depart
+  // et des bots faisait que deux appareils ne jouaient pas la meme partie sur la meme graine.
+  G={ running:true,paused:true,stake,tier,seed,alea:C.makeFlux(seed),time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
        dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
   document.body.classList.toggle('res',!!mode.cashout);
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
@@ -4883,15 +5095,18 @@ function startMatch(stake){
   // zoneUpdate n'a plus qu'a le suivre. Rien d'autre dans la partie ne devient reproductible.
   G.zonePlan=C.zonePlan(seed,mode);
   G.zone={cx:G.zonePlan.startCx,cz:G.zonePlan.startCz,r:G.zonePlan.startR,phase:0,timer:G.zonePlan.phases[0].waitS,shrinking:false,warned:false,dps:0};
-  for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(G.rng()*(N-6))+0.5; z=3+Math.floor(G.rng()*(N-6))+0.5; t++; }while((cellAt(x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
-    const mesh=makeCrate(); mesh.position.set(x,0,z);  world.add(mesh); G.boxes.push({x,z,hp:C.BOX_HP,mesh,ph:G.rng()*6.283}); }
-  const pts=spawnPoints(G.rng,mode.teams,mode.teamSize), names=BOT_NAMES.slice().sort(()=>G.rng()-0.5), bids=Object.keys(B);
+  const aleaCaisses=G.alea('butin/position'), aleaBots=G.alea('bots/identite');
+  for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(aleaCaisses()*(N-6))+0.5; z=3+Math.floor(aleaCaisses()*(N-6))+0.5; t++; }while((cellAt(x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
+    const mesh=makeCrate(); mesh.position.set(x,0,z);  world.add(mesh); G.boxes.push({x,z,hp:C.BOX_HP,mesh,ph:aleaCaisses()*6.283}); }
+  // Le nom d'un bot EN PARTIE fait partie de son identite : il apparait dans le kill feed et dans
+  // le rapport de fin. Celui du sas d'attente, lui, reste cosmetique et garde Math.random.
+  const pts=spawnPoints(G.alea('apparition'),mode.teams,mode.teamSize), names=C.melangeSeme(BOT_NAMES.slice(),aleaBots), bids=Object.keys(B);
   const playerSlot=pts.findIndex(pt=>pt.team===0);
   let ni=0;
   pts.forEach((pt,i)=>{ if(i===playerSlot){ G.player=makeEntity(profile.name,pt.x,pt.z,stake,true,B[selBrawler],0,0); G.ents.push(G.player); }
-    else { const br=B[bids[Math.floor(G.rng()*bids.length)]]; let nm=names[ni%names.length]+(ni>=names.length?'-2':''); ni++;
+    else { const br=B[bids[Math.floor(aleaBots()*bids.length)]]; let nm=names[ni%names.length]+(ni>=names.length?'-2':''); ni++;
       if(nm===profile.name) nm+='2';                        // never two of you on the same map
-      G.ents.push(makeEntity(nm,pt.x,pt.z,stake,false,br,tier.acc*(0.85+G.rng()*0.3),pt.team)); } });
+      G.ents.push(makeEntity(nm,pt.x,pt.z,stake,false,br,tier.acc*(0.85+aleaBots()*0.3),pt.team)); } });
   // --- aim indicator, Brawl-Stars style: a cone on the ground showing exactly where the shot goes ---
   {
     const atk=G.player.brawler.attack, sup=G.player.brawler.super;

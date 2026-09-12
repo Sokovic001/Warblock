@@ -152,6 +152,26 @@ nommé — `bots/identite`, `bots/visee`, `bots/objectif`, `bots/encaissement`, 
 sel constant propre au nom. Ajouter un tirage dans la visée des bots ne déplace alors plus les
 caisses.
 
+*Complété au module 2.* Un **huitième** flux existe, `tir/dispersion` : `fireSpec` ajoute
+`(Math.random()-0.5)*0.02` à l'angle de chaque projectile, joueur compris. Ce grain de sable décide
+de ce qui touche, donc c'est un fait de partie et non du cosmétique ; il n'apparaissait pas dans la
+liste ci-dessus parce que la liste avait été écrite en relisant les bots, pas les armes. La liste des
+noms est **fermée** : demander un flux absent lance, pour qu'une faute de frappe ne crée pas une
+suite neuve en silence.
+
+*Ajouté au module 2, et à connaître avant d'écrire le rejeu :* `WBCore.melangeSeme` remplace les
+`sort(() => rng() - 0.5)` du chemin de simulation. Le **nombre de comparaisons** qu'un moteur
+effectue pour trier n'est spécifié nulle part, donc le nombre de tirages consommés non plus : deux
+moteurs ne consomment pas la même longueur du flux, et tout ce qui tire ensuite dans ce flux se
+décale. Fisher-Yates consomme exactement `n - 1` sorties, quoi qu'il arrive.
+
+*Et le défaut qui était déjà là, trouvé en écrivant ce module :* `G.rng` servait à la fois au décor
+et aux règles. `buildWorld` le consommait d'abord pour le feuillage des buissons — dont le nombre
+vient du **palier de qualité**, donc de la machine — puis la simulation y puisait la position des
+caisses, les points de départ, le brawler et la précision de chaque bot. Sur la **même graine**, deux
+appareils ne jouaient donc pas la même partie. Le générateur du décor ne quitte plus `buildWorld`.
+Consigné dans `docs/HISTORIQUE.md`.
+
 Ce qui reste à `Math.random` : le **cosmétique**, et lui seul — le décalage horizontal d'un nombre
 flottant, le nom d'un bot au lobby, une particule. Un test nomme la liste des fonctions du chemin de
 simulation où `Math.random(` est interdit, et une seconde liste nomme celles où il est **attendu**,
@@ -199,6 +219,16 @@ unitaires en littéraux de source, échantillonnée à pas fixe et documentée c
 sur `Math.sqrt`, qui lui est exactement spécifié par IEEE 754. Aucune base n'ayant jamais tourné,
 changer la carte et les centres de gaz de toutes les graines coûte **zéro migration** : c'est le
 dernier moment.
+
+*Fait au module 2, avec le détail qui compte.* `C.UNIT` tient 1024 directions, pas de 2π/1024 ≈
+0,00614 radian. Le pas se choisit sur le plus grand cercle que la carte parcourt — la route
+circulaire de `generateMap` à MAP×0,34 ≈ 51,7 cases — où il vaut 0,32 case : le cercle reste continu
+sur une grille de maille 1, et le code d'origine balayait par pas de 0,006 radian, donc rien de
+visible ne change. Ce qui est écrit en littéraux est le **premier quadrant des cosinus**, 257
+valeurs ; les trois autres quadrants s'en déduisent par échange d'axes et changement de signe, deux
+opérations exactes en IEEE 754. Les quatre cardinales sont exactes, là où `Math.cos(Math.PI/2)` rend
+6,12e-17. Les décalages d'angle de `spawnPoints` se comptent désormais en **indices** et non plus en
+radians, pour que l'arithmétique reste entière de bout en bout.
 
 **L'interdiction s'arrête là**, et c'est délibéré. La visée vient d'une souris, le spread vaut 0,32
 ou 0,55 selon les armes, les lobs et le dash ont leurs arcs, `findTarget` et `botUpdate` raisonnent en
@@ -448,7 +478,11 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
   Les trois sont justes séparément. Le jour où le jeu se jouera mal, **rien ne dira lequel en est la
   cause**, et le seul juge est un humain qui joue une partie entière, sur téléphone comme sur
   ordinateur. Ce n'est pas budgétable, donc c'est écrit : une session de jeu réelle après le module 1
-  et après le module 4, avec ce qu'il faut regarder noté d'avance.
+  et après le module 4, avec ce qu'il faut regarder noté d'avance. *Le module 2 a livré le troisième
+  de ces changements — les bots ont tous changé de personnalité d'un coup, puisque leur `id` ne vient
+  plus de `Math.random()` : nervosité, distance préférée, rythme d'esquive, et la moitié qui décroche
+  contre la moitié qui reste. La session due après le module 1 n'a toujours pas eu lieu et elle a
+  maintenant deux changements à juger, pas un.*
 - **La trace est une surface d'attaque nouvelle** : corps volumineux, trace adversariale qui maximise
   le coût du rejeu, joueur qui rejoue en boucle. D'où une borne dure sur le nombre de pas, un budget
   de temps de calcul, une route séparée de celle qui règle l'argent, et la limitation de débit

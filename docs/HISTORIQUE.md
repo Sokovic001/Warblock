@@ -208,6 +208,19 @@ appelant — le patron du `respawn()` défini deux fois, avec la copie vivante d
   fait du pot un plafond exact. La leçon n'est pas « écrire plus de tests » : c'est que deux règles
   qui décident du même nombre doivent être confrontées SUR TOUT LEUR DOMAINE, ou réduites à une
   seule. Ici, l'une des deux a été supprimée.
+- **La qualité graphique décidait de la position des caisses.** `buildWorld` rendait son générateur
+  semé dans `G.rng`, et la simulation y puisait ensuite : position des caisses, points de départ des
+  vingt équipes, brawler de chaque bot, précision de chaque bot. Or ce générateur est d'abord
+  consommé, dans `buildWorld` même, par le feuillage des buissons — et le nombre de feuilles par
+  buisson vient du palier de qualité, c'est-à-dire de la machine. Sur la **même graine**, un
+  téléphone en qualité basse et un ordinateur en qualité haute ne posaient donc pas les caisses au
+  même endroit et ne jouaient pas contre les mêmes bots. Personne ne pouvait le voir : il n'existait
+  aucune partie où deux appareils étaient censés voir le même monde, et l'invariant « même graine,
+  même plan de zone » ne parlait que du gaz. Trouvé en écrivant les flux nommés du module 2 de la
+  phase 02b, pas en jouant. La leçon est la même que pour les compteurs : **un générateur partagé
+  entre le décor et les règles est une case qu'on écrase** — le nombre de tirages consommés par
+  l'affichage est une dépendance invisible de la simulation. Le décor garde son générateur, il ne
+  quitte plus `buildWorld`, et tout ce qui décide d'un fait tire dans un flux nommé.
 - **Le compteur « 20 ALIVE » figé.** Avec 3 vies, un joueur tué reste en lice : le compteur ne
   bougeait qu'à la troisième mort. Corrigé en séparant **ALIVE** (debout maintenant) et **LEFT**
   (encore en lice).

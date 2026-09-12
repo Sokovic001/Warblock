@@ -29,7 +29,7 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 298 tests sur le jeu (`node test.js`) et
+- **Lancer `npm test` après chaque modification.** 313 tests sur le jeu (`node test.js`) et
   104 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
@@ -71,8 +71,7 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - `toCents` et `fromCents` sont le **seul** passage entre dollars et centimes, et une garde
   textuelle vérifie que rien d'autre dans le bloc `CORE` ne change d'unité.
 - Même graine, même plan de zone — deux fois de suite et dans deux processus. `zonePlan` tourne
-  avec `Math.random` remplacé par une fonction qui lance. Attention à ce que cela ne dit pas :
-  seul le **gaz** est reproductible, pas la partie.
+  avec `Math.random` remplacé par une fonction qui lance.
 - Le plan de zone n'a qu'un seul lecteur, `zoneAt` : une garde interdit la réapparition d'un
   second décompte à côté, exactement le patron du `respawn()` défini deux fois.
 - La simulation avance à **pas fixe** : `WBCore.simSteps` convertit le temps du navigateur en un
@@ -81,6 +80,18 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
   elle est toujours inférieure ou égale à la durée réelle. Une garde textuelle interdit à la boucle
   d'image de rappeler une fonction de simulation, et à l'arrêt sur image du coup critique de
   redevenir un multiplicateur de `dt`.
+- Tout le hasard de la **simulation** descend de la graine publique, par des **flux nommés par
+  usage** — `bots/identite`, `bots/visee`, `bots/objectif`, `bots/encaissement`, `apparition`,
+  `butin/contenu`, `butin/position`, `tir/dispersion`. Ajouter un tirage dans l'un ne déplace rien
+  dans les autres, et un test le prouve. Deux listes nommées dans `test.js` gardent la frontière :
+  les fonctions où `Math.random(` est **interdit**, et celles où il est **attendu** — le cosmétique,
+  plus la graine locale de secours, qui doit précisément ne pas être reproductible.
+- La géométrie tirée de la **seule** graine — `generateMap`, `generateBiomes`, `zonePlan`, `zoneAt`,
+  `spawnPoints` — n'appelle aucune fonction transcendante : les angles viennent d'une table
+  `C.UNIT` de 1024 directions écrites en littéraux de source, et `dist()` de `Math.sqrt`. Garde
+  textuelle plus bac à sable où `Math.cos`, `Math.sin`, `Math.hypot`, `Math.pow`, `Math.atan2` et
+  `Math.exp` **lancent**. L'interdiction s'arrête là : la visée, les lobs et le dash gardent leurs
+  angles, et la doctrine pour le reste est la divergence mesurée, jamais punie.
 - Le jeu se joue à l'identique sans compte et sans serveur, graine comprise : quatre cas nommés
   (`ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible) sont testés comme des cas
   normaux, et un billet qui tarde ne retarde jamais le coup d'envoi.
@@ -109,8 +120,9 @@ tout solde y est modifiable depuis la console.
   - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
     simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
     refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
-    la spécification est écrite (`docs/PHASE-02B.md`), le module 1 est livré — pas fixe et arrêt
-    sur image sorti des règles — et les six autres restent à faire. Le mouvement, les
+    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 et 2 sont livrés — pas fixe,
+    arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés et géométrie de
+    la graine sans transcendantes — et les cinq autres restent à faire. Le mouvement, les
     tirs et les bots vivent toujours dans le script `Game`, hors de toute partie testée, et
     `net_cents` vient toujours d'une sacoche déclarée par le client. Ce n'est pas une autorité
     temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à arbitrer en direct.

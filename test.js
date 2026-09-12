@@ -2748,4 +2748,369 @@ test('CRIT_TEST n\'existe plus, et ne doit pas réapparaître', () => {
   assert.strictEqual(tir.split('C.critShot(').length - 1, 1, 'et il n\'y en a qu\'une');
 });
 
+console.log('Le hasard de la simulation : des flux nommés, semés par la graine');
+// Un générateur unique par partie suffirait au rejeu. Le piège est ailleurs : ajouter un tirage
+// quelque part décale toute la suite AILLEURS. Ces tests-là gardent la propriété qui rend le
+// module utile — un flux par usage — et la frontière entre ce qui descend de la graine et ce qui
+// reste cosmétique. Aucun ne prouve que le jeu tourne ; seul un humain qui joue le prouve.
+test('les sels des flux diffèrent entre eux, et de celui du gaz', () => {
+  // Deux sels égaux, et deux usages partageraient la même suite : le gaz et les bots joueraient
+  // la même partition. Le sel se dérive du NOM, donc renommer un flux le déplace — c'est voulu,
+  // et c'est pourquoi la liste des noms est fermée.
+  const sels = C.FLUX.map(C.fluxSalt);
+  assert.strictEqual(new Set(sels).size, C.FLUX.length, 'deux flux partagent un sel');
+  for (let i = 0; i < C.FLUX.length; i++)
+    assert.notStrictEqual(sels[i], C.ZONE_SALT, `${C.FLUX[i]} a le sel du gaz`);
+  // Et les graines de flux, elles aussi, restent distinctes de celle du gaz et de celle de la carte.
+  for (const graine of [0, 1, 7, 4242, 0xdeadbeef, 4294967295]) {
+    const vues = new Set([graine >>> 0, ((graine >>> 0) ^ C.ZONE_SALT) >>> 0]);
+    for (const nom of C.FLUX) {
+      const s = C.fluxSeed(graine, nom);
+      assert.ok(!vues.has(s), `${nom} sème comme un autre flux sur la graine ${graine}`);
+      vues.add(s);
+    }
+  }
+});
+test('les huit noms attendus existent, et un nom inconnu lance', () => {
+  for (const nom of ['bots/identite', 'bots/visee', 'bots/objectif', 'bots/encaissement',
+                     'apparition', 'butin/contenu', 'butin/position', 'tir/dispersion'])
+    assert.ok(C.FLUX.includes(nom), `le flux ${nom} a disparu de la liste`);
+  const flux = C.makeFlux(7);
+  // Une faute de frappe créerait sinon un flux neuf en silence : le jeu tirerait d'un côté, le
+  // rejeu du serveur de l'autre, et rien ne le signalerait.
+  for (const faux of ['bots/vise', 'butin', '', 'toString', 'constructor'])
+    assert.throws(() => flux(faux), /flux de hasard inconnu/, JSON.stringify(faux));
+});
+test('un nom rend toujours le MÊME générateur, donc une suite et non des suites neuves', () => {
+  const flux = C.makeFlux(1234);
+  assert.strictEqual(flux('bots/visee'), flux('bots/visee'), 'deux appels rendent deux générateurs');
+  const a = flux('bots/visee'), suite = [a(), a(), a()];
+  const b = C.makeFlux(1234)('bots/visee');
+  assert.deepStrictEqual([b(), b(), b()], suite, 'même graine, même suite');
+  const autre = C.makeFlux(1235)('bots/visee');
+  assert.notDeepStrictEqual([autre(), autre(), autre()], suite, 'deux graines, deux suites');
+});
+test('tirer N fois de plus dans bots/visee ne déplace pas butin/contenu', () => {
+  // C'est la raison d'être des flux nommés, et elle se teste directement : une visée qui
+  // consomme plus — un brawler de plus, une passe d'esquive de plus — ne doit pas changer une
+  // seule caisse. Avec un générateur unique, ce test tombe.
+  const butin = graine => { const f = C.makeFlux(graine); const r = f('butin/contenu');
+                            return Array.from({ length: 12 }, () => C.boxDrop(r)); };
+  const temoin = butin(20260912);
+  for (const n of [0, 1, 5, 137]) {
+    const f = C.makeFlux(20260912), visee = f('bots/visee'), contenu = f('butin/contenu');
+    for (let i = 0; i < n; i++) visee();
+    assert.deepStrictEqual(Array.from({ length: 12 }, () => C.boxDrop(contenu)), temoin,
+      `${n} tirages de visée en plus ont déplacé le butin`);
+  }
+});
+test('deux graines voisines ne donnent pas deux flux voisins', () => {
+  // Le mélange doit avalancher. Un simple `graine ^ sel` laisserait, sur un générateur
+  // congruentiel dont les bits de poids faible sont pauvres, deux graines consécutives rendre
+  // deux suites presque superposables — et deux parties d'affilée se ressembleraient.
+  const debut = (graine, nom) => { const r = C.makeFlux(graine)(nom); return [r(), r(), r()]; };
+  for (const nom of C.FLUX)
+    for (let graine = 0; graine < 64; graine++) {
+      const [a] = debut(graine, nom), [b] = debut(graine + 1, nom);
+      assert.ok(Math.abs(a - b) > 1e-6, `${nom} : les graines ${graine} et ${graine + 1} démarrent au même endroit`);
+    }
+});
+test('melangeSeme consomme exactement n-1 tirages et rend une permutation', () => {
+  // Il remplace `sort(() => rng() - 0.5)`. Le nombre de comparaisons qu'un moteur effectue n'est
+  // spécifié nulle part : le tri consommait donc une longueur de flux inconnue, et tout ce qui
+  // tirait ensuite dans ce flux se décalait d'un moteur à l'autre.
+  for (const n of [0, 1, 2, 5, 20, 60]) {
+    let tirages = 0;
+    const rng = C.makeRng(99), compte = () => { tirages++; return rng(); };
+    const source = Array.from({ length: n }, (_, i) => i);
+    const melange = C.melangeSeme(source.slice(), compte);
+    assert.strictEqual(tirages, Math.max(0, n - 1), `${n} éléments`);
+    assert.deepStrictEqual(melange.slice().sort((a, b) => a - b), source, 'ce n\'est plus une permutation');
+  }
+  // Et il mélange vraiment : sur vingt noms, l'ordre ne doit pas survivre.
+  const vingt = Array.from({ length: 20 }, (_, i) => i);
+  assert.notDeepStrictEqual(C.melangeSeme(vingt.slice(), C.makeRng(3)), vingt);
+  assert.deepStrictEqual(C.melangeSeme(vingt.slice(), C.makeRng(3)), C.melangeSeme(vingt.slice(), C.makeRng(3)));
+});
+
+console.log('La frontière du hasard : où Math.random est interdit, où il est attendu');
+// Deux listes, écrites ici et nulle part ailleurs. La première nomme les fonctions du chemin de
+// simulation : un `Math.random(` y est un fait de partie que le serveur ne pourra pas refaire. La
+// seconde nomme celles qui le gardent, pour que personne ne « corrige » plus tard une frontière
+// qui est un CHOIX. Sans la seconde liste, la première se lirait comme un travail inachevé.
+const corpsDe = nom => {
+  const d = JEU.indexOf('\nfunction ' + nom + '(');
+  assert.ok(d >= 0, `${nom} n'a pas été retrouvée dans le bloc Game`);
+  const lignes = JEU.slice(d + 1).split('\n'), out = [lignes[0]];
+  for (let i = 1; i < lignes.length; i++) {
+    const l = lignes[i];
+    if (l && !/^[\s}]/.test(l)) break;          // une nouvelle déclaration de premier niveau
+    out.push(l);
+    if (l === '}') break;                       // la fermeture d'une fonction multi-lignes
+  }
+  return out.join('\n');
+};
+const sansCommentaires = t => t.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+const compte = (t, motif) => (t.match(motif) || []).length;
+// Le chemin de simulation : tout ce qui décide d'un fait de la partie.
+const HASARD_INTERDIT = ['makeEntity', 'spawnPoints', 'fireSpec', 'hurtBox', 'spawnPickup', 'collect',
+                         'respawn', 'pickGoal', 'botUpdate', 'findTarget', 'projUpdate', 'playerUpdate',
+                         'commonUpdate', 'damage', 'useSuper', 'dashUpdate', 'zoneUpdate', 'zonesUpdate',
+                         'nadesUpdate', 'buildWorld', 'simPas'];
+// Le cosmétique, et la seule exception qui n'en est pas une : la graine de secours.
+const HASARD_ATTENDU = {
+  randomName:  'le pseudo d\'un bot au sas d\'attente, qui ne joue aucune partie',
+  spawnSmoke:  'la position des bouffées d\'un nuage, pure décoration',
+  floatText:   'le décalage horizontal d\'un nombre flottant à l\'écran',
+  kill:        'quelle vanne un bot poste après un kill',
+  botCashOut:  'quelle vanne un bot poste en encaissant',
+  startMatch:  'la graine LOCALE de secours, qui doit précisément ne PAS être reproductible',
+};
+test('aucun Math.random dans les fonctions du chemin de simulation', () => {
+  for (const nom of HASARD_INTERDIT) {
+    const corps = sansCommentaires(corpsDe(nom));
+    assert.ok(corps.length > 20, `${nom} est suspicieusement courte, l'extraction a dû rater`);
+    assert.strictEqual(compte(corps, /Math\.random\(/g), 0,
+      `${nom} tire encore sur Math.random : le serveur ne pourra pas refaire ce qu'elle décide`);
+  }
+  // Et le générateur du décor ne remonte plus dans l'état de la partie : `G.rng` servait à la fois
+  // au feuillage des buissons — dont le nombre vient du palier de qualité, donc de la machine — et
+  // aux caisses, aux points d'apparition et aux bots. Sur la même graine, deux appareils ne
+  // jouaient pas la même partie.
+  assert.ok(!sansCommentaires(JEU).includes('G.rng'),
+    'G.rng est de retour : la simulation retire dans le flux du décor');
+  assert.match(JEU, /alea:C\.makeFlux\(seed\)/, 'les flux de la partie doivent naître de la graine');
+});
+test('chaque usage tire dans le flux qui porte son nom', () => {
+  // Sans cette table, « plus aucun Math.random » se satisferait d'un flux unique rebaptisé, et
+  // l'indépendance des usages — la seule raison d'être du module — serait perdue en silence.
+  const attendus = {
+    makeEntity:  ['bots/identite'],
+    fireSpec:    ['tir/dispersion'],
+    hurtBox:     ['butin/contenu'],
+    spawnPickup: ['butin/position'],
+    respawn:     ['apparition'],
+    pickGoal:    ['bots/objectif'],
+    botUpdate:   ['bots/encaissement', 'bots/visee', 'bots/objectif'],
+    startMatch:  ['butin/position', 'bots/identite', 'apparition'],
+  };
+  for (const [nom, flux] of Object.entries(attendus)) {
+    const corps = sansCommentaires(corpsDe(nom));
+    for (const f of flux)
+      assert.ok(corps.includes(`'${f}'`), `${nom} ne tire plus dans le flux ${f}`);
+  }
+  // `spawnPoints` reçoit son flux de l'appelant : c'est celui des apparitions, et pas un autre.
+  assert.match(sansCommentaires(corpsDe('startMatch')), /spawnPoints\(G\.alea\('apparition'\)/);
+  // Et AUCUN site d'appel du jeu ne demande un nom qui n'existe pas. `makeFlux` lance sur un nom
+  // inconnu, mais seulement quand la ligne s'exécute : une faute de frappe dans une branche rare —
+  // le fumigène d'un bot acculé — n'apparaîtrait qu'en pleine partie, chez un joueur. Ici elle
+  // tombe à l'intégration continue, pour tous les sites à la fois.
+  const demandes = sansCommentaires(JEU).match(/G\.alea\('([^']*)'\)/g) || [];
+  assert.ok(demandes.length >= 10, `seulement ${demandes.length} sites d'appel trouvés : l'extraction a dû rater`);
+  for (const d of demandes)
+    assert.ok(C.FLUX.includes(d.slice(8, -2)), `${d} demande un flux qui n'existe pas`);
+});
+test('et les fonctions qui gardent Math.random le gardent pour une raison écrite', () => {
+  for (const [nom, raison] of Object.entries(HASARD_ATTENDU)) {
+    const corps = sansCommentaires(corpsDe(nom));
+    assert.ok(compte(corps, /Math\.random\(/g) > 0,
+      `${nom} ne tire plus sur Math.random (${raison}) : si c'est voulu, sortir le nom de la liste`);
+  }
+  // La seule qui mérite d'être épinglée à la ligne près : `startMatch` n'a le droit qu'à UN
+  // tirage libre, celui de la graine de secours. C'est la promesse du fichier unique — sans
+  // compte, sans serveur, sans réseau, la partie part quand même — et c'est exactement le tirage
+  // qu'il ne faut jamais semer.
+  const debut = sansCommentaires(corpsDe('startMatch'));
+  assert.strictEqual(compte(debut, /Math\.random\(/g), 1, 'startMatch ne doit tirer qu\'une fois librement');
+  const ligne = debut.split('\n').find(l => l.includes('Math.random('));
+  assert.match(ligne, /graineLocale/, 'le seul tirage libre de startMatch doit être la graine de secours');
+  // Les vannes des bots sont du texte à l'écran, jamais un fait de partie : chaque tirage restant
+  // dans `kill` et `botCashOut` doit poster quelque chose, et rien d'autre.
+  for (const nom of ['kill', 'botCashOut'])
+    for (const l of sansCommentaires(corpsDe(nom)).split('\n').filter(l => l.includes('Math.random(')))
+      assert.ok(/botSay\(|sendEmote\(/.test(l), `${nom} : un tirage libre qui ne sert pas à parler — ${l.trim()}`);
+});
+
+console.log('La géométrie tirée de la seule graine, sans transcendantes');
+// ECMAScript laisse `Math.cos`, `Math.sin`, `Math.hypot`, `Math.pow`, `Math.atan2` et `Math.exp`
+// « implementation-approximated ». La carte, les biomes, le plan de zone et les points de départ
+// sont le préfixe commun de toute la partie : s'ils divergent entre deux moteurs, tout ce qui suit
+// diverge. Eux seuls ne prennent leurs angles que de la graine, donc eux seuls se quantifient sans
+// que personne ne le sente. Ce que ces tests ne prouvent PAS : l'égalité entre deux moteurs.
+const TRANSCENDANTES = ['Math.cos', 'Math.sin', 'Math.hypot', 'Math.pow', 'Math.atan2', 'Math.exp'];
+const corpsCore = nom => {
+  const d = core.indexOf('\n  function ' + nom + '(');
+  assert.ok(d >= 0, `${nom} n'a pas été retrouvée dans CORE`);
+  const reste = core.slice(d + 1), fin = reste.indexOf('\n  }\n');
+  assert.ok(fin > 0, `la fin de ${nom} n'a pas été retrouvée`);
+  return reste.slice(0, fin + 4);
+};
+test('garde textuelle : aucune transcendante dans generateMap, generateBiomes, zonePlan, zoneAt ni spawnPoints', () => {
+  const geometrie = { generateMap: corpsCore('generateMap'), generateBiomes: corpsCore('generateBiomes'),
+                      zonePlan: corpsCore('zonePlan'), zoneAt: corpsCore('zoneAt'),
+                      spawnPoints: corpsDe('spawnPoints') };
+  for (const [nom, corps] of Object.entries(geometrie)) {
+    assert.ok(corps.length > 200, `${nom} est suspicieusement courte, l'extraction a dû rater`);
+    for (const interdite of TRANSCENDANTES)
+      assert.ok(!sansCommentaires(corps).includes(interdite),
+        `${nom} appelle ${interdite} : deux moteurs ont le droit d'en différer du dernier bit`);
+  }
+  // `Math.sqrt`, lui, est exactement spécifié par IEEE 754 : c'est pourquoi `dist` existe.
+  assert.match(sansCommentaires(corpsCore('dist')), /Math\.sqrt/);
+  for (const [dx, dz] of [[3, 4], [0, 0], [-7.5, 12.25], [152, 152]])
+    assert.strictEqual(C.dist(dx, dz), Math.sqrt(dx * dx + dz * dz), `dist(${dx},${dz})`);
+});
+// Un `free()` conforme à celui du jeu : le corps du brawler fait 0,42 de demi-largeur, et ce sont
+// ses QUATRE coins qui doivent tenir sur du sol praticable. Un centre sur du vide et un coin dans
+// le mur, et le brawler ne bouge plus de la partie.
+assert.ok(JEU.includes('const R=0.42;'), 'le rayon du corps a changé dans le jeu : ce test le suppose');
+const libreSur = (cells, N) => {
+  const bloque = (x, z) => { const xi = Math.floor(x), zi = Math.floor(z);
+    return (xi < 0 || zi < 0 || xi >= N || zi >= N) ? true : C.BLOCKING(cells[xi * N + zi]); };
+  return (x, z) => !bloque(x - 0.42, z - 0.42) && !bloque(x + 0.42, z - 0.42)
+                && !bloque(x - 0.42, z + 0.42) && !bloque(x + 0.42, z + 0.42);
+};
+// `spawnPoints` vit dans le bloc `Game`, donc hors de tout ce que ce fichier charge. On l'exécute
+// quand même : sa source est extraite du fichier et fermée sur ce dont elle a besoin — `C`, `N` et
+// `free`. C'est du vrai code du jeu qui tourne, pas une récitation.
+const faireSpawnPoints = (S, MathUtil) =>
+  new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
+    .call(null, S, S.MAP, libreSur(S.generateMap(0), S.MAP), MathUtil);
+test('spawnPoints place un corps entier, sur toutes les graines et tous les modes', () => {
+  // L'invariant que la correction du point d'apparition avait gagné sans laisser de test : un
+  // centre sur du sol libre ne suffit pas, il faut que les quatre coins du corps tiennent.
+  const MODES = Object.values(C.MODES);
+  for (let graine = 0; graine < 40; graine++) {
+    const cells = C.generateMap(graine), libre = libreSur(cells, C.MAP);
+    const spawnPoints = new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
+      .call(null, C, C.MAP, libre, Math);
+    for (const mode of MODES) {
+      const pts = spawnPoints(C.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+      assert.strictEqual(pts.length, mode.teams * mode.teamSize, `graine ${graine} ${mode.id}`);
+      for (const p of pts) {
+        assert.ok(libre(p.x, p.z), `graine ${graine} ${mode.id} : un corps ne tient pas en ${p.x},${p.z}`);
+        assert.ok(p.x > 1 && p.z > 1 && p.x < C.MAP - 1 && p.z < C.MAP - 1, 'point hors carte');
+      }
+    }
+  }
+});
+test('bac à sable : la géométrie de la graine tourne alors que les transcendantes LANCENT', () => {
+  // La garde textuelle ne couvre que ce qui est écrit ; celle-ci couvre ce qui s'exécute, branches
+  // rares comprises — la réparation des poches fermées de `generateMap`, le balayage de
+  // `spawnPoints` quand le point de départ est muré. Les deux se complètent : le texte est le
+  // filet des branches que le corpus n'atteint pas, l'exécution est la preuve du reste.
+  let mordant = false;
+  const nues = TRANSCENDANTES.map(n => n.slice(5));
+  const piege = new Proxy(Math, { get: (t, p) => (mordant && nues.includes(p))
+    ? () => { throw new Error('la géométrie de la graine a appelé Math.' + String(p)); }
+    : Reflect.get(t, p) });
+  const m = { exports: {} };
+  new Function('module', 'exports', 'Math', core)(m, m.exports, piege);
+  const S = m.exports;
+  // Une carte entièrement murée force le balayage de repli de spawnPoints, celui qui cherche un
+  // creux en tournant puis en rentrant — la branche qu'aucune graine réelle n'exerce à coup sûr.
+  const muree = new Uint8Array(S.MAP * S.MAP).fill(1);
+  const spawnMure = new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
+    .call(null, S, S.MAP, libreSur(muree, S.MAP), piege);
+  const spawn = faireSpawnPoints(S, piege);
+  mordant = true;
+  try {
+    for (let graine = 0; graine < 6; graine++) {
+      S.generateBiomes(graine);
+      S.generateMap(graine);
+      for (const mode of Object.values(S.MODES)) {
+        spawn(S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+        spawnMure(S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+        const plan = S.zonePlan(graine, mode);
+        for (let t = 0; t <= 220; t += 3) S.zoneAt(plan, t);
+      }
+    }
+  } finally { mordant = false; }
+  // Et ce qui sort du bac à sable est bien ce que le jeu produit : sinon on aurait prouvé qu'une
+  // autre carte n'appelle pas de transcendantes.
+  assert.deepStrictEqual(Array.from(S.generateMap(9)), Array.from(C.generateMap(9)));
+  assert.deepStrictEqual(S.zonePlan(9, S.MODES.solo), C.zonePlan(9, C.MODES.solo));
+});
+test('la table des directions est unitaire, cardinale et sans -0', () => {
+  assert.strictEqual(C.UNIT_N, 1024);
+  assert.strictEqual(C.UNIT.length, C.UNIT_N);
+  assert.strictEqual(C.UNIT_COS.length, C.UNIT_N / 4 + 1, 'le quadrant stocké doit couvrir [0, π/2]');
+  const vues = new Set();
+  for (let i = 0; i < C.UNIT_N; i++) {
+    const u = C.UNIT[i];
+    assert.ok(Math.abs(Math.sqrt(u.x * u.x + u.z * u.z) - 1) < 1e-15, `direction ${i} non unitaire`);
+    // Un -0 se propage dans les comparaisons et les sérialisations sans jamais se voir.
+    assert.ok(!Object.is(u.x, -0) && !Object.is(u.z, -0), `direction ${i} porte un -0`);
+    vues.add(u.x + ':' + u.z);
+  }
+  assert.strictEqual(vues.size, C.UNIT_N, 'deux directions se confondent');
+  // Les quatre cardinales sont écrites exactes, là où Math.cos(Math.PI/2) rend 6,12e-17.
+  assert.deepStrictEqual(C.UNIT[0], { x: 1, z: 0 });
+  assert.deepStrictEqual(C.UNIT[256], { x: 0, z: 1 });
+  assert.deepStrictEqual(C.UNIT[512], { x: -1, z: 0 });
+  assert.deepStrictEqual(C.UNIT[768], { x: 0, z: -1 });
+  // La table reste l'échantillonnage régulier qu'elle prétend être : l'écart à Math.cos/Math.sin
+  // d'un moteur qui, lui, a le droit de flotter, reste sous l'ulp.
+  for (let i = 0; i < C.UNIT_N; i += 7) {
+    const a = 2 * Math.PI * i / C.UNIT_N;
+    assert.ok(Math.abs(C.UNIT[i].x - Math.cos(a)) < 1e-15 && Math.abs(C.UNIT[i].z - Math.sin(a)) < 1e-15, `direction ${i}`);
+  }
+  // Les indices se ramènent dans la table, y compris négatifs : les décalages d'angle s'écrivent
+  // en indices, et un décalage négatif est le cas normal.
+  assert.strictEqual(C.unitAt(-1), C.UNIT[C.UNIT_N - 1]);
+  assert.strictEqual(C.unitAt(C.UNIT_N + 3), C.UNIT[3]);
+  assert.strictEqual(C.unitAt(-C.UNIT_N * 3 - 5), C.UNIT[C.UNIT_N - 5]);
+  // Et un tirage rend toujours une direction, jamais `undefined` sur le bord du domaine.
+  for (const v of [0, 0.5, 0.999999999, 1 - Number.EPSILON / 2])
+    assert.ok(C.unitFrom(() => v), `unitFrom(${v})`);
+});
+test('le pas de la table reste plus fin que la maille de la carte', () => {
+  // Le pas se choisit sur le plus grand cercle que `generateMap` parcourt, la route à MAP×0,34 :
+  // si un pas y dépassait une case, la route circulaire deviendrait pointillée et la réparation de
+  // connexité aurait à creuser là où le code d'origine passait tout seul.
+  for (const rr of [C.MAP * 0.22, C.MAP * 0.34]) {
+    let precedent = null, saut = 0;
+    for (let i = 0; i <= C.UNIT_N; i++) {
+      const u = C.UNIT[i % C.UNIT_N];
+      const p = [Math.round(C.MAP / 2 + u.x * rr), Math.round(C.MAP / 2 + u.z * rr)];
+      if (precedent) saut = Math.max(saut, Math.abs(p[0] - precedent[0]), Math.abs(p[1] - precedent[1]));
+      precedent = p;
+    }
+    assert.ok(saut <= 1, `la route de rayon ${rr} saute de ${saut} cases : elle n'est plus continue`);
+  }
+});
+test('même graine, mêmes bots et mêmes points de départ — deux fois, et dans un processus neuf', () => {
+  // Le patron déjà employé pour le plan de zone. Deux appels d'affilée peuvent se ressembler par
+  // accident, un état accumulé dans le module passerait inaperçu ; un processus neuf ne le peut pas.
+  const identites = graine => { const r = C.makeFlux(graine)('bots/identite');
+                                return Array.from({ length: 40 }, () => r()); };
+  assert.deepStrictEqual(identites(4242), identites(4242));
+  assert.notDeepStrictEqual(identites(4242), identites(4243));
+  const spawn = faireSpawnPoints(C, Math);
+  const depart = graine => spawn(C.makeFlux(graine)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize);
+  assert.deepStrictEqual(depart(4242), depart(4242));
+  const attendu = JSON.stringify({ identites: identites(4242), depart: depart(4242) });
+  const dehors = require('child_process').execFileSync(process.execPath, ['-e', `
+    const fs = require('fs');
+    const html = fs.readFileSync(process.env.WB_FICHIER, 'utf8');
+    const bloc = html.slice(html.indexOf('/*CORE-' + 'START*/'), html.indexOf('/*CORE-' + 'END*/'));
+    const jeu = html.slice(html.indexOf('/*CORE-' + 'END*/'));
+    const m = { exports: {} }; new Function('module', 'exports', bloc)(m, m.exports);
+    const C = m.exports;
+    const d = jeu.indexOf('\\nfunction spawnPoints(');
+    const src = jeu.slice(d + 1, jeu.indexOf('\\n}\\n', d) + 3);
+    const bloque = (cells, N, x, z) => { const xi = Math.floor(x), zi = Math.floor(z);
+      return (xi < 0 || zi < 0 || xi >= N || zi >= N) ? true : C.BLOCKING(cells[xi * N + zi]); };
+    const cells = C.generateMap(0);
+    const free = (x, z) => !bloque(cells, C.MAP, x - 0.42, z - 0.42) && !bloque(cells, C.MAP, x + 0.42, z - 0.42)
+                        && !bloque(cells, C.MAP, x - 0.42, z + 0.42) && !bloque(cells, C.MAP, x + 0.42, z + 0.42);
+    const spawnPoints = new Function('C', 'N', 'free', src + '\\nreturn spawnPoints;')(C, C.MAP, free);
+    const r = C.makeFlux(4242)('bots/identite');
+    process.stdout.write(JSON.stringify({
+      identites: Array.from({ length: 40 }, () => r()),
+      depart: spawnPoints(C.makeFlux(4242)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize) }));
+  `], { encoding: 'utf8', env: Object.assign({}, process.env, { WB_FICHIER: path.join(__dirname, GAME) }) });
+  assert.strictEqual(dehors, attendu, 'un processus neuf ne rejoue pas les mêmes bots ni les mêmes départs');
+});
+
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));
