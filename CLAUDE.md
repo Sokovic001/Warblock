@@ -100,9 +100,13 @@ tout solde y est modifiable depuis la console.
     a un compte et une adresse de serveur, tire sa graine de `seedFor`, rend son rapport à la fin, et
     se comporte exactement comme avant dès qu'il manque l'un des deux. Spécification :
     `docs/PHASE-02.md`.
-  - Phase 02b — le serveur **simule** la partie : mouvement, tirs, dégâts, gaz. **PAS COMMENCÉE**, et
-    rien n'en a été entamé : ni bloc de simulation, ni rejeu, ni netcode. Le mouvement, les tirs et
-    les bots vivent toujours dans le script `Game`, hors de toute partie testée.
+  - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
+    simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
+    refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
+    la spécification est écrite (`docs/PHASE-02B.md`), aucun module n'est livré. Le mouvement, les
+    tirs et les bots vivent toujours dans le script `Game`, hors de toute partie testée, et
+    `net_cents` vient toujours d'une sacoche déclarée par le client. Ce n'est pas une autorité
+    temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à arbitrer en direct.
   Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de
   02a est une enveloppe de plausibilité, pas de l'anti-triche, et il n'arrête presque rien en
   pratique. Une phase 02a « faite » ne doit jamais se lire comme une phase 02 finie.
