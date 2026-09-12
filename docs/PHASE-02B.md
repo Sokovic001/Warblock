@@ -122,10 +122,21 @@ elle-même — où le `dt` d'image entre dans les règles, et l'invariant « auc
 ne reçoit jamais un `dt` d'image » ne peut pas tenir sans lui.
 
 Le pas fixe le résout sans rien coûter au ressenti : `critHold` devient un **facteur d'échelle sur ce
-qu'on verse dans l'accumulateur**, pas sur la simulation. Le monde apparaît toujours au ralenti
-pendant 0,09 seconde de temps de jeu, simplement il consomme plus de temps réel pour le faire. La
-simulation, elle, ne sait pas que ça existe : même suite de pas, mêmes résultats, livrés plus tard sur
-l'horloge murale.
+qu'on verse dans l'accumulateur**, pas sur la simulation. La simulation, elle, ne sait pas que ça
+existe : même suite de pas, mêmes résultats, livrés plus tard sur l'horloge murale.
+
+*Corrigé au module 1.* Cette section disait « au ralenti pendant 0,09 seconde **de temps de jeu**,
+simplement il consomme plus de temps réel ». C'était une erreur, et elle contredisait la phrase qui
+la précède : `critHold` se décompte aujourd'hui sur le temps réel, donc l'arrêt dure 0,09 seconde
+d'horloge et ne fait avancer le monde que d'environ 0,011 seconde simulée. Le décompter sur le temps
+de jeu ferait durer l'effet 0,75 seconde à l'écran — huit fois plus qu'aujourd'hui. Ce serait un
+changement de ressenti, pas sa conservation, et cette phase a déjà trois changements de ressenti que
+rien ne peut tester. `critHold` reste donc décompté sur le `dt` d'image, et seul ce qu'on verse dans
+l'accumulateur est mis à l'échelle.
+
+Un effet de bord, assumé et voulu : le `dt` ralenti s'appliquait aussi au rendu, si bien que la
+caméra, les particules et la mesure de FPS se figeaient pendant l'arrêt. Le rendu garde désormais son
+`dt` entier. L'arrêt sur image se voit donc sur le monde et non plus sur l'écran.
 
 Conséquence à écrire une fois, parce qu'elle touche le verdict : **la durée d'une partie se compte
 désormais en pas**, `pas × SIM.stepS`, et non plus sur l'horloge du navigateur. La durée simulée est

@@ -29,7 +29,7 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 290 tests sur le jeu (`node test.js`) et
+- **Lancer `npm test` après chaque modification.** 298 tests sur le jeu (`node test.js`) et
   104 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
@@ -75,6 +75,12 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
   seul le **gaz** est reproductible, pas la partie.
 - Le plan de zone n'a qu'un seul lecteur, `zoneAt` : une garde interdit la réapparition d'un
   second décompte à côté, exactement le patron du `respawn()` défini deux fois.
+- La simulation avance à **pas fixe** : `WBCore.simSteps` convertit le temps du navigateur en un
+  nombre entier de pas de `SIM.stepS`, et aucune fonction de simulation ne reçoit plus le `dt`
+  d'une image. La durée d'une partie se compte donc en pas, jamais sur l'horloge du navigateur, et
+  elle est toujours inférieure ou égale à la durée réelle. Une garde textuelle interdit à la boucle
+  d'image de rappeler une fonction de simulation, et à l'arrêt sur image du coup critique de
+  redevenir un multiplicateur de `dt`.
 - Le jeu se joue à l'identique sans compte et sans serveur, graine comprise : quatre cas nommés
   (`ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible) sont testés comme des cas
   normaux, et un billet qui tarde ne retarde jamais le coup d'envoi.
@@ -103,7 +109,8 @@ tout solde y est modifiable depuis la console.
   - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
     simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
     refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
-    la spécification est écrite (`docs/PHASE-02B.md`), aucun module n'est livré. Le mouvement, les
+    la spécification est écrite (`docs/PHASE-02B.md`), le module 1 est livré — pas fixe et arrêt
+    sur image sorti des règles — et les six autres restent à faire. Le mouvement, les
     tirs et les bots vivent toujours dans le script `Game`, hors de toute partie testée, et
     `net_cents` vient toujours d'une sacoche déclarée par le client. Ce n'est pas une autorité
     temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à arbitrer en direct.

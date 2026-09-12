@@ -1830,6 +1830,10 @@ test('bac à sable : CORE se charge sans document, window, THREE, Math.random, D
   assert.deepStrictEqual(S.checkReport(S.reportFrom({})).erreurs, C.checkReport(C.reportFrom({})).erreurs);
   assert.strictEqual(S.seedFor(null, 7), 7);
   assert.deepStrictEqual(Array.from(S.generateMap(3)), Array.from(C.generateMap(3)));
+  // Le pas fixe est une règle comme une autre : il ne connaît ni horloge ni navigateur, sans quoi
+  // le serveur ne pourrait pas compter les pas d'une partie qu'il n'a pas vue tourner.
+  assert.deepStrictEqual(S.SIM, C.SIM);
+  assert.deepStrictEqual(S.simSteps(0.004, 0.031), C.simSteps(0.004, 0.031));
 });
 test('le plan de zone ne connaît ni horloge, ni hasard non semé, ni navigateur', () => {
   const bloc = core.slice(core.indexOf('// ---- Le plan de zone'), core.indexOf('// ---- Le contrat du client'));
@@ -1843,6 +1847,80 @@ test('le plan de zone ne connaît ni horloge, ni hasard non semé, ni navigateur
     assert.ok(!jeu.includes(nom), `${nom} est redéclaré hors de WBCore`);
   assert.ok(!/Math\.random\(\)\*Math\.PI\*2, d=Math\.random\(\)/.test(jeu),
     'zoneUpdate retire de nouveau le centre du cercle suivant sur Math.random');
+});
+
+console.log('Le pas fixe');
+// `simSteps` est le seul convertisseur entre le temps du navigateur et le temps de la simulation.
+// Tout ce qui est en dessous s'appuie dessus : la durée d'une partie se compte en pas, donc une
+// dérive ici serait une dérive sur le nombre que le serveur jugera.
+test('le pas est fixe, et le rattrapage d\'une image est borné', () => {
+  assert.strictEqual(C.SIM.stepS, 1 / 60);
+  assert.ok(Number.isInteger(C.SIM.maxRattrapage) && C.SIM.maxRattrapage >= 1,
+    'maxRattrapage est un nombre entier de pas');
+});
+test('simSteps conserve le temps sur dix mille images, sans dérive cumulée', () => {
+  // Le mode de défaillance qu'on empêche : un accumulateur qui perd un morceau de milliseconde à
+  // chaque image. Sur une partie de 154 secondes, dix mille images, cela déplacerait la fin du
+  // gaz de plusieurs secondes — et deux rejeux de la même trace ne tomberaient pas d'accord.
+  // Le `dt` reste sous le plafond de rattrapage : ce test-là parle de conservation, celui d'après
+  // parle de la borne, et les mélanger cacherait l'un des deux.
+  let graine = 20260912, alea = () => (graine = (graine * 1664525 + 1013904223) >>> 0) / 4294967296;
+  let reste = 0, pas = 0, reel = 0;
+  for (let i = 0; i < 10000; i++) {
+    const dt = 0.002 + alea() * 0.048;           // de 500 à 20 images par seconde, bruité
+    reel += dt;
+    const s = C.simSteps(reste, dt);
+    assert.ok(Number.isInteger(s.pas) && s.pas >= 0, `pas invalide à l'image ${i}: ${s.pas}`);
+    assert.ok(s.reste >= 0 && s.reste < C.SIM.stepS, `reste hors bornes à l'image ${i}: ${s.reste}`);
+    pas += s.pas; reste = s.reste;
+  }
+  const simule = pas * C.SIM.stepS + reste;
+  assert.ok(Math.abs(simule - reel) < 1e-9,
+    `dérive de ${(simule - reel)} s sur ${reel} s de temps réel`);
+  // Et la conservation ne doit pas être obtenue en ne faisant jamais rien : il faut que des pas
+  // soient réellement sortis, sinon le test passerait sur une fonction qui rend toujours zéro.
+  assert.ok(pas > 9000, `seulement ${pas} pas rendus pour ${reel} s`);
+});
+test('une seule image ne peut jamais demander plus de maxRattrapage pas', () => {
+  // Un onglet réveillé après quarante secondes réclamerait deux mille quatre cents pas d'un coup :
+  // la page gèlerait, et l'image suivante serait à son tour trop longue — la spirale de la mort.
+  // Le temps excédentaire est ABANDONNÉ, pas reporté : c'est ce que dit `reste` à zéro.
+  for (const dt of [40, 1, 0.5, C.SIM.stepS * (C.SIM.maxRattrapage + 1), 1e9]) {
+    const s = C.simSteps(0, dt);
+    assert.ok(s.pas <= C.SIM.maxRattrapage, `${dt} s a rendu ${s.pas} pas`);
+  }
+  const long = C.simSteps(0, 40);
+  assert.strictEqual(long.pas, C.SIM.maxRattrapage);
+  assert.strictEqual(long.reste, 0, 'le surplus est abandonné, jamais reporté sur l\'image suivante');
+  // Un reste déjà gros — invraisemblable, donc exactement ce qu'il faut tester — ne contourne pas
+  // la borne non plus.
+  assert.ok(C.simSteps(1000, 0).pas <= C.SIM.maxRattrapage);
+});
+test('un dt nul, négatif, NaN ou infini ne rend jamais un pas négatif ni NaN', () => {
+  // `now - last` rend tout ça : zéro sur deux appels dans la même milliseconde, du négatif quand
+  // l'horloge du système recule, du NaN au premier appel d'une boucle dont le repère n'est pas
+  // encore posé. Un NaN qui entre dans l'accumulateur y reste pour toute la partie.
+  const tordus = [0, -0, -1, -1e9, NaN, Infinity, -Infinity, undefined, null, '0.016', {}, []];
+  for (const dt of tordus) {
+    const s = C.simSteps(0, dt);
+    assert.ok(Number.isInteger(s.pas) && s.pas >= 0, `dt=${String(dt)} rend pas=${s.pas}`);
+    assert.ok(Number.isFinite(s.reste) && s.reste >= 0, `dt=${String(dt)} rend reste=${s.reste}`);
+  }
+  // Et un accumulateur déjà corrompu se répare au lieu de contaminer la suite.
+  for (const reste of tordus) {
+    const s = C.simSteps(reste, 0.02);
+    assert.ok(Number.isInteger(s.pas) && s.pas >= 0, `reste=${String(reste)} rend pas=${s.pas}`);
+    assert.ok(Number.isFinite(s.reste) && s.reste >= 0, `reste=${String(reste)} rend reste=${s.reste}`);
+  }
+  assert.deepStrictEqual(C.simSteps(0, 0), { pas: 0, reste: 0 });
+  assert.deepStrictEqual(C.simSteps(0, -1), { pas: 0, reste: 0 }, 'une horloge qui recule ne fait pas reculer la partie');
+});
+test('simSteps est pure : elle ne garde rien entre deux appels', () => {
+  // Tout l'état est dans les arguments. C'est ce qui permettra au serveur de rejouer la même
+  // suite de pas sans avoir à rejouer la boucle d'images du navigateur.
+  const a = C.simSteps(0.004, 0.031), b = C.simSteps(0.004, 0.031);
+  assert.deepStrictEqual(a, b);
+  assert.deepStrictEqual(C.simSteps(0.004, 0.031), a, 'et mille appels plus tard, toujours pareil');
 });
 
 console.log('Le verdict : une enveloppe de plausibilité, pas de l\'anti-triche');
@@ -2618,6 +2696,56 @@ test('les statistiques venues du serveur passent par applyAccount, jamais par un
   const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
   assert.ok(!module.includes('profile.stats'), 'le règlement ne doit jamais écrire les statistiques lui-même');
   assert.ok(module.includes('Auth.sync()'), 'après un règlement, le profil se redemande au serveur');
+});
+
+console.log('La boucle : le pas fixe d\'un côté, l\'image de l\'autre');
+// Gardes de forme, permanentes. Elles ne prouvent pas que le jeu tourne — seul un humain qui joue
+// le prouve — elles prouvent que la frontière entre ce qui décide et ce qui montre n'a pas été
+// refranchie par une édition. C'est la précondition du rejeu : si un `dt` d'image redescend dans
+// une fonction de simulation, la partie redevient une fonction de la cadence de l'écran et plus
+// personne ne peut la recalculer.
+const BOUCLE = JEU.slice(JEU.indexOf('// ---------- loop ----------'));
+const PAS_FIXE = BOUCLE.slice(BOUCLE.indexOf('function simPas(){'), BOUCLE.indexOf('function loop(now){'));
+const IMAGE = BOUCLE.slice(BOUCLE.indexOf('function loop(now){'));
+const codeDe = t => t.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+test('aucune fonction de simulation n\'est appelée depuis la boucle d\'image', () => {
+  assert.ok(PAS_FIXE.length > 400, 'simPas n\'a pas été retrouvée');
+  assert.ok(IMAGE.length > 800, 'loop n\'a pas été retrouvée');
+  const simulation = ['playerUpdate(', 'botUpdate(', 'commonUpdate(', 'projUpdate(', 'zonesUpdate(',
+                      'nadesUpdate(', 'smokesUpdate(', 'zoneUpdate(', 'respawn(', 'G.time+='];
+  for (const nom of simulation) {
+    assert.ok(PAS_FIXE.includes(nom), `${nom} doit être appelé depuis le pas fixe`);
+    assert.ok(!codeDe(IMAGE).includes(nom), `${nom} est appelé depuis la boucle d'image, donc avec un dt d'image`);
+  }
+  // Et le pas fixe ne connaît qu'un seul `dt` : celui de WBCore. Aucune horloge, aucun `now`.
+  assert.match(PAS_FIXE, /const dt=C\.SIM\.stepS;/, 'le pas doit venir de WBCore, jamais d\'une constante recopiée');
+  for (const interdit of ['now', 'performance', 'Date.now', 'requestAnimationFrame', 'simReste'])
+    assert.ok(!codeDe(PAS_FIXE).includes(interdit), `${interdit} n'a rien à faire dans un pas de simulation`);
+  // La boucle, elle, accumule le temps réel et n'exécute que des pas entiers.
+  assert.match(IMAGE, /C\.simSteps\(simReste,dtSim\)/, 'la boucle doit passer par simSteps');
+  assert.match(IMAGE, /for\(let i=0;i<s\.pas;i\+\+\) simPas\(\);/, 'et exécuter exactement le nombre de pas rendu');
+});
+test('l\'arrêt sur image ne ralentit plus la simulation, il ralentit ce qu\'on lui verse', () => {
+  // Avant : `if(critHold>0){ critHold-=dt; dt*=0.12; }` — l'arrêt sur image du coup critique
+  // ralentissait TOUT, le gaz compris. C'était le second endroit, avec la boucle elle-même, où un
+  // `dt` d'image entrait dans les règles.
+  assert.ok(!codeDe(BOUCLE).includes('dt*='), 'plus aucun dt d\'image n\'est mis à l\'échelle dans la boucle');
+  assert.ok(!PAS_FIXE.includes('critHold'), 'la simulation ne doit pas savoir que l\'arrêt sur image existe');
+  assert.match(IMAGE, /dtSim=dt\*0\.12/, 'l\'échelle s\'applique à ce qu\'on verse dans l\'accumulateur');
+  const lignes = JEU.split('\n').filter(l => l.includes('critHold') && !l.trim().startsWith('//'));
+  assert.ok(lignes.length > 0 && lignes.every(l => !/\bsimPas\b/.test(l)),
+    'critHold ne vit que du côté rendu et accumulateur');
+});
+test('CRIT_TEST n\'existe plus, et ne doit pas réapparaître', () => {
+  // `const CRIT_TEST = false` était du code mort, pas une triche vivante. Mais il doublait le test
+  // de critique juste à côté de l'appel à `C.critShot` : le laisser vivre pendant que le critique
+  // descend dans la simulation installerait une seconde règle de critique — le patron du
+  // `respawn()` défini deux fois, dont docs/HISTORIQUE.md garde la trace.
+  assert.ok(!html.includes('CRIT_TEST'), 'CRIT_TEST est de retour dans index.html');
+  const tir = JEU.slice(JEU.indexOf('function projUpdate('), JEU.indexOf('// ---------- damage / death / loot'));
+  assert.ok(tir.length > 500, 'projUpdate n\'a pas été retrouvée');
+  assert.match(tir, /C\.critShot\(/, 'la règle du critique reste celle de WBCore');
+  assert.strictEqual(tir.split('C.critShot(').length - 1, 1, 'et il n\'y en a qu\'une');
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

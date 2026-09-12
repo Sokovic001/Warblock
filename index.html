@@ -1702,6 +1702,45 @@ const WBCore = (function(){
   // sacoche naît à la mise, se transfère entière au tueur, tombe au sol quand il n'y en a pas, et
   // l'encaissement la met à zéro. Personne ne peut donc porter plus que tout l'argent de la table.
   function purseBound(stakeCents, seats){ return { minCents: 0, maxCents: stakeCents * seats }; }
+  // ---- Le pas de simulation, et pourquoi il est FIXE.
+  //
+  // La raison suffisante n'a rien à voir avec l'argent : `Math.min(1,dt*13)` sur la vitesse,
+  // `Math.random()<dt*0.25` sur l'encaissement des bots, `b.aim-=dt` — le jeu ne se comporte pas
+  // pareil à 30 et à 144 images par seconde. On répare une inéquité entre appareils. Que le rejeu
+  // du serveur en devienne possible est un bénéfice, pas la justification.
+  //
+  // Conséquence à connaître partout où l'on parle de durée : la DURÉE d'une partie se compte en
+  // pas, `pas × stepS`, et jamais sur l'horloge du navigateur. Une image trop longue, un onglet
+  // endormi, un rattrapage borné : la durée simulée est donc toujours INFÉRIEURE OU ÉGALE à la
+  // durée réelle, jamais l'inverse.
+  const SIM = {
+    stepS: 1 / 60,
+    // Borne le rattrapage d'une SEULE image. Un onglet réveillé après quarante secondes en
+    // réclamerait deux mille quatre cents d'un coup : la page gèlerait, puis gèlerait encore parce
+    // que l'image suivante serait elle aussi trop longue — la spirale de la mort. Cinq pas valent
+    // 83 ms de simulation par image : de quoi absorber trois images sautées à 60 Hz sans jamais
+    // coûter plus qu'un budget d'image. Au-delà, le temps excédentaire est ABANDONNÉ, pas reporté.
+    maxRattrapage: 5,
+  };
+  // Combien de pas exécuter pour cette image, et ce qu'il reste à reporter sur la suivante.
+  // Pure : tout l'état est dans les arguments, donc elle se teste et se rejoue.
+  //
+  // Les garde-fous ne sont pas décoratifs. `now - last` rend un `dt` nul sur deux appels dans la
+  // même milliseconde, négatif quand l'horloge du système recule, et NaN ou Infini au premier
+  // appel d'une boucle dont le repère n'est pas encore posé. Aucun de ces cas ne doit rendre un
+  // nombre de pas négatif — la boucle tournerait à l'envers — ni un NaN, qui contaminerait
+  // l'accumulateur pour le reste de la partie.
+  function simSteps(reste, dt) {
+    const d = (typeof dt === 'number' && isFinite(dt) && dt > 0) ? dt : 0;
+    const r = (typeof reste === 'number' && isFinite(reste) && reste > 0) ? reste : 0;
+    let acc = r + d;
+    let pas = Math.floor(acc / SIM.stepS);
+    if (pas > SIM.maxRattrapage) { pas = SIM.maxRattrapage; acc = pas * SIM.stepS; }
+    // `Math.floor` sur une division flottante peut rendre un entier dont le produit dépasse
+    // l'accumulateur du dernier bit ; un reste négatif se reporterait ensuite indéfiniment.
+    const suite = acc - pas * SIM.stepS;
+    return { pas, reste: suite > 0 ? suite : 0 };
+  }
   // ---- Le plan de zone : le gaz devient une fonction de la seule graine.
   //
   // Ces trois tables vivaient APRÈS le marqueur de fin de CORE, dans le bloc `Game` : des règles
@@ -2254,7 +2293,7 @@ const WBCore = (function(){
            authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
-           SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
+           SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
            NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
@@ -3782,10 +3821,11 @@ function projUpdate(dt){
         // Pas de critique au super, ni sur une cible intouchable ou encore sous protection.
         // BOT_CRIT reste a false : on juge d'abord l'effet et l'equilibre cote joueur.
         if(p.owner.isPlayer&&!p.isSuper&&e.invuln<=0&&G.time>=C.GRACE){
-          // ---- TEMPORAIRE, pour valider l'effet : chaque tir du joueur est critique. ----
-          // A RETIRER une fois l'effet valide, la regle des trois tirs est juste en dessous.
-          if(CRIT_TEST){ p.owner.critNow=true; p.owner.critShotId=p.shotId; }
-          else if(p.owner.critShotId!==p.shotId){
+          // Une seule regle de critique, et elle est dans WBCore. L'interrupteur de mise au point
+          // qui doublait ce test ici est supprime : du code mort, mais un code mort qui aurait
+          // installe une seconde regle a cote de critShot le jour ou le critique descend dans la
+          // simulation -- le patron du respawn() defini deux fois.
+          if(p.owner.critShotId!==p.shotId){
             const r=C.critShot(p.owner.critState,e.id,G.time,C.critWindow(p.owner.brawler));
             p.owner.critState=r.state; p.owner.critShotId=p.shotId; p.owner.critNow=r.crit;
           }
@@ -3953,9 +3993,10 @@ const tmpV=new THREE.Vector3();
 function toScreen(x,y,z){ tmpV.set(x,y,z).project(camera); return {sx:(tmpV.x+1)/2*innerWidth, sy:(1-tmpV.y)/2*innerHeight, ok:tmpV.z<1}; }
 // Effets d'un critique. La secousse et l'arret sur image sont coupes par prefers-reduced-motion :
 // ce sont exactement les deux choses qui derangent les personnes sensibles au mouvement.
-// TEMPORAIRE — mettre a false pour revenir a la regle des trois tirs consecutifs.
-const CRIT_TEST = false;
 const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Duree restante de l'arret sur image, en secondes d'horloge. Ce n'est PAS une regle du jeu : la
+// boucle s'en sert pour ralentir ce qu'elle verse dans l'accumulateur du pas fixe, jamais pour
+// ralentir la simulation elle-meme, qui ignore que cet effet existe.
 let critHold=0;
 function critFx(){
   const g=$('game'); if(!g) return;
@@ -4286,7 +4327,7 @@ function playerUpdate(dt){
   if(drag){ const a=aimFromStick(drag); p.ax=a.ax; p.az=a.az; G.aimDist=clamp(a.dist,0.2,1)*p.brawler.attack.range; }
   else if(!isTouch){ const mw=mouseWorld(); if(mw){ const dx=mw.x-p.x, dz=mw.z-p.z, d=Math.hypot(dx,dz); if(d>0.2){ p.ax=dx/d; p.az=dz/d; } G.aimDist=d; } }
   p.stealthT-=dt;
-  if(dashUpdate(p,dt)){ camFollow(p,dt); return; }
+  if(dashUpdate(p,dt)) return;
   let mx=(keys.KeyD?1:0)-(keys.KeyA?1:0), mz=(keys.KeyS?1:0)-(keys.KeyW?1:0);
   if(T.move){ mx=T.move.dx/STICK_R; mz=T.move.dy/STICK_R; }
   moveEntity(p,mx,mz,dt);
@@ -4294,7 +4335,9 @@ function playerUpdate(dt){
   // aim guide
   p.fireCd=Math.max(0,(p.fireCd||0)-dt);
   p.damageFlash=Math.max(0,(p.damageFlash||0)-dt*2);
-  camFollow(p,dt);
+  // La camera est remontee dans la boucle. Elle est du RENDU : appelee ici, elle avancait au pas
+  // fixe, donc elle ne bougeait pas du tout sur les images ou le pas fixe n'en demande aucune —
+  // ce qui arrive a chaque image sur un ecran a 144 Hz. Le suivi hachait pour rien.
 }
 // The aim indicator runs on its own, every frame: keeping it inside playerUpdate meant it froze
 // in place whenever that function returned early (while dashing, or once you were dead).
@@ -5198,51 +5241,84 @@ renderLobby();
 startTicker();
 armLobbyMusic();
 let last=0, rafId=0;
+// L'ACCUMULATEUR DU PAS FIXE. Le temps reel entre ici, il en sort un nombre ENTIER de pas de
+// C.SIM.stepS : plus aucune fonction de simulation ne recoit le dt d'une image. La raison n'est
+// pas le rejeu du serveur, c'est l'equite entre appareils — le jeu ne se jouait pas pareil a 30
+// et a 144 images par seconde.
+let simReste=0;
+// UN PAS DE SIMULATION, ET RIEN D'AUTRE. Tout ce qui decide d'un fait de la partie est ici ; tout
+// ce qui se contente de le montrer est reste dans loop(), au dt d'image. Consequence qui touche
+// jusqu'au verdict du serveur : la DUREE d'une partie se compte en pas — G.time n'avance que
+// d'ici, de C.SIM.stepS a la fois — et jamais sur l'horloge du navigateur. Une image trop longue,
+// un onglet endormi, un rattrapage borne : la duree simulee est donc toujours INFERIEURE OU EGALE
+// a la duree reelle, jamais l'inverse.
+function simPas(){
+  const dt=C.SIM.stepS;
+  // Le compte a rebours decide du coup d'envoi : il est simule. Son affichage, lui, lit plus bas
+  // ce que ce pas a ecrit. La valeur negative minuscule est un marqueur : elle dit « le depart
+  // est donne » a une trainee qui doit encore s'ecouler, sans jamais valoir zero, qui signifie
+  // « banniere effacee ».
+  if(G.intro>0){ G.intro-=dt; if(G.intro<=0) G.intro=-1e-9; return; }
+  if(G.intro<0){ G.intro-=dt; if(G.intro<=-0.7) G.intro=0; }
+  G.time+=dt;
+  playerUpdate(dt);
+  for(const e of G.ents) if(e.respawnT>0){ e.respawnT-=dt; if(e.respawnT<=0) respawn(e); }
+  for(const e of G.ents) if(!e.isPlayer&&e.alive) botUpdate(e,dt);
+  for(const e of G.ents) commonUpdate(e,dt);
+  projUpdate(dt); zonesUpdate(dt); nadesUpdate(dt); smokesUpdate(dt); zoneUpdate(dt);
+}
 function loop(now){
-  if(!G) return; let dt=Math.min(0.05,(now-last)/1000); last=now;
-  // Arret sur image : on gele la simulation sans geler le rendu, donc l'ecran reste vivant et
-  // l'impact se lit. Ralentir le dt plutot que sauter des images evite tout a-coup a la reprise.
-  if(critHold>0){ critHold-=dt; dt*=0.12; }
-  if(G.running&&!G.paused&&G.intro>0){
-    G.intro-=dt;
-    const n=Math.ceil(G.intro);
-    if(n!==G.introShown){
-      G.introShown=n; const el=$('intro'), num=$('introNum');
-      if(n>0){ el.className='on'; num.textContent=n; $('introSub').textContent=`${G.ents.length} brawlers · ${money(G.stake)} each`; snd('box',0.07); }
-      else { el.className='on go'; num.textContent='GO!'; $('introSub').textContent=`${C.GRACE}s spawn protection`; snd('cube',0.12); }
-      num.style.animation='none'; void num.offsetWidth; num.style.animation='';
-    }
-    camFollow(G.player,dt);                // keep the arena framed while the countdown runs
-    updateAim(dt);                         // orient yourself during the 3-2-1
-    hudFast(); hud();                      // HUD stays live so you can read the map before you move
+  if(!G) return; const dt=Math.min(0.05,(now-last)/1000); last=now;
+  // Arret sur image du coup critique. C'est desormais un FACTEUR D'ECHELLE sur ce qu'on verse
+  // dans l'accumulateur, jamais un multiplicateur d'un dt passe a une fonction de simulation :
+  // ralentir le dt d'image ralentissait TOUTE la partie, le gaz compris. L'effet dure la meme
+  // duree d'horloge qu'avant et se voit pareil ; la simulation, elle, ignore qu'il existe — meme
+  // suite de pas, memes resultats, simplement livres plus tard. Le rendu garde son dt entier, si
+  // bien que la camera et les particules restent fluides pendant l'arret au lieu de se figer.
+  let dtSim=dt;
+  if(critHold>0){ critHold=Math.max(0,critHold-dt); dtSim=dt*0.12; }
+  if(G.running&&!G.paused){
+    const s=C.simSteps(simReste,dtSim); simReste=s.reste;
+    for(let i=0;i<s.pas;i++) simPas();
   }
-  else if(G.running&&!G.paused){
+  // Une pause ne se rattrape pas : l'accumulateur repart de zero, sans quoi la reprise executerait
+  // d'un coup tous les pas d'un jeu qui ne tournait pas.
+  else simReste=0;
+  if(G.running&&!G.paused){
+    // Le compte a rebours AFFICHE : il ne fait rien avancer, il lit ce que simPas a ecrit.
+    if(G.intro!==0){
+      const n=G.intro>0?Math.ceil(G.intro):0;
+      if(n!==G.introShown){
+        G.introShown=n; const el=$('intro'), num=$('introNum');
+        if(n>0){ el.className='on'; num.textContent=n; $('introSub').textContent=`${G.ents.length} brawlers · ${money(G.stake)} each`; snd('box',0.07); }
+        else { el.className='on go'; num.textContent='GO!'; $('introSub').textContent=`${C.GRACE}s spawn protection`; snd('cube',0.12); }
+        num.style.animation='none'; void num.offsetWidth; num.style.animation='';
+      }
+    }
     // the "GO!" lingers for a beat while the match is already running, then clears
     // Nothing on screen said where the grenades come from, and a gadget nobody knows about is a
     // gadget nobody uses. The line waits for the countdown to clear, or it fades unread behind it.
-    if(G.intro){ G.intro-=dt; if(G.intro<=-0.7){ G.intro=0; $('intro').className='';
-      if(C.SMOKE_READY) feed(`☁ Smoke grenades are in the crates — about one in ${Math.round(1/C.BOX_DROP.smoke)}`); } }
-    G.time+=dt;
-    playerUpdate(dt);
-    updateAim(dt);
-    for(const e of G.ents) if(e.respawnT>0){ e.respawnT-=dt; if(e.respawnT<=0) respawn(e); }
-    if(!G.player.alive&&G.player.respawnT>0){ $('respawn').textContent='RESPAWNING IN '+Math.ceil(G.player.respawnT)+'  ·  '+G.player.lives+(G.player.lives>1?' LIVES':' LIFE')+' LEFT'; const ally=G.ents.find(e=>e.team===G.player.team&&e.alive)||G.ents.find(e=>e.alive); if(ally) camFollow(ally,dt); }
-    for(const e of G.ents) if(!e.isPlayer&&e.alive) botUpdate(e,dt);
-    for(const e of G.ents) commonUpdate(e,dt);
-    projUpdate(dt); zonesUpdate(dt); nadesUpdate(dt); smokesUpdate(dt); zoneUpdate(dt);
-    botChatCd-=dt; idleChatCd-=dt;
-    if(idleChatCd<=0){ idleChatCd=C.CHAT.idleEvery*(0.6+Math.random()*0.9);
-      const alive=G.ents.filter(e=>e.alive&&!e.isPlayer);
-      if(alive.length) botSay(alive[Math.floor(Math.random()*alive.length)],'idle'); }
-    for(const bx of G.boxes){ if(bx.hp<=0) continue; const b=0.45+0.55*(0.5+0.5*Math.sin(G.time*4.2+bx.ph));
-      for(const q of bx.mesh.userData.marks) q.material.opacity=b;
-      bx.mesh.position.y=Math.sin(G.time*2.1+bx.ph)*0.04; }
-    for(const bm of G.bushMeshes){ const t=G.time*1.1+bm.userData.sway; bm.position.x=Math.sin(t)*0.045; bm.position.z=Math.cos(t*0.8)*0.035; }
-    for(const pk of G.pickups){
-      if(pk.kind==='heart'){ const b=1+Math.sin(G.time*5+pk.ph)*0.10; pk.mesh.scale.set(0.85*b,0.85*b,1); pk.mesh.position.y=0.75+Math.sin(G.time*3+pk.ph)*0.10; if(pk.shadow) pk.shadow.scale.setScalar(0.75/b); }
-      else { pk.mesh.rotation.y+=dt*2; pk.mesh.position.y=0.5+Math.sin(G.time*3+pk.ph)*0.08; }
+    else if(G.introShown!==null){ G.introShown=null; $('intro').className='';
+      if(C.SMOKE_READY) feed(`☁ Smoke grenades are in the crates — about one in ${Math.round(1/C.BOX_DROP.smoke)}`); }
+    if(G.player.alive) camFollow(G.player,dt);   // keep the arena framed, countdown included
+    else if(G.player.respawnT>0){ $('respawn').textContent='RESPAWNING IN '+Math.ceil(G.player.respawnT)+'  ·  '+G.player.lives+(G.player.lives>1?' LIVES':' LIFE')+' LEFT'; const ally=G.ents.find(e=>e.team===G.player.team&&e.alive)||G.ents.find(e=>e.alive); if(ally) camFollow(ally,dt); }
+    updateAim(dt);                               // orient yourself during the 3-2-1
+    if(G.intro>0){ hudFast(); hud(); }           // HUD stays live so you can read the map before you move
+    else {
+      botChatCd-=dt; idleChatCd-=dt;
+      if(idleChatCd<=0){ idleChatCd=C.CHAT.idleEvery*(0.6+Math.random()*0.9);
+        const alive=G.ents.filter(e=>e.alive&&!e.isPlayer);
+        if(alive.length) botSay(alive[Math.floor(Math.random()*alive.length)],'idle'); }
+      for(const bx of G.boxes){ if(bx.hp<=0) continue; const b=0.45+0.55*(0.5+0.5*Math.sin(G.time*4.2+bx.ph));
+        for(const q of bx.mesh.userData.marks) q.material.opacity=b;
+        bx.mesh.position.y=Math.sin(G.time*2.1+bx.ph)*0.04; }
+      for(const bm of G.bushMeshes){ const t=G.time*1.1+bm.userData.sway; bm.position.x=Math.sin(t)*0.045; bm.position.z=Math.cos(t*0.8)*0.035; }
+      for(const pk of G.pickups){
+        if(pk.kind==='heart'){ const b=1+Math.sin(G.time*5+pk.ph)*0.10; pk.mesh.scale.set(0.85*b,0.85*b,1); pk.mesh.position.y=0.75+Math.sin(G.time*3+pk.ph)*0.10; if(pk.shadow) pk.shadow.scale.setScalar(0.75/b); }
+        else { pk.mesh.rotation.y+=dt*2; pk.mesh.position.y=0.5+Math.sin(G.time*3+pk.ph)*0.08; }
+      }
+      hudFast(); G.hudT-=dt; if(G.hudT<=0){ G.hudT=0.08; hud(); }
     }
-    hudFast(); G.hudT-=dt; if(G.hudT<=0){ G.hudT=0.08; hud(); }
   }
   for(let i=G.fx.length-1;i>=0;i--){ const f=G.fx[i]; f.life-=dt; f.mesh.material.opacity=Math.max(0,f.life/f.max)*0.7; f.mesh.scale.setScalar(1+(1-f.life/f.max)*0.4); if(f.life<=0){ world.remove(f.mesh); discard(f.mesh); G.fx.splice(i,1); } }
   // Frame-rate watchdog, measured on every frame including the countdown and the pause screen.
