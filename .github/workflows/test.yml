@@ -15,5 +15,12 @@ jobs:
           node-version: '20'
       - run: node test.js
       # L'API n'a besoin d'aucune dépendance pour ses tests : la base et la vérification du jeton
-      # sont injectées, et les tests les remplacent par des doublures.
+      # sont injectées, et les tests les remplacent par des doublures. Ce passage-ci vérifie que
+      # c'est toujours vrai — un contributeur doit pouvoir tout lancer sans rien installer.
+      - run: node api/test.js
+      # Puis le même fichier, dépendances installées : il ajoute alors la chaîne complète de
+      # vérification des jetons, avec de la vraie cryptographie et un trousseau servi en local.
+      # Aucun appel à Crossmint, aucun secret.
+      - run: npm install --no-audit --no-fund
+        working-directory: api
       - run: node api/test.js

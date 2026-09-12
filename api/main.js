@@ -14,24 +14,36 @@ function requis(nom) {
 
 const origins = requis('APP_ORIGINS').split(',').map(s => s.trim()).filter(Boolean);
 const databaseUrl = requis('DATABASE_URL');
-const secretKey = requis('CLERK_SECRET_KEY');
+const apiKey = requis('CROSSMINT_SERVER_API_KEY');
 const port = Number(process.env.PORT || 8787);
 
 const { pgDb } = require('./db-pg');
-const { clerkVerifier } = require('./auth-clerk');
+const { crossmintVerifier } = require('./auth-crossmint');
+
+// Une clé d'API illisible, d'un mauvais environnement ou tronquée fait échouer le démarrage ici,
+// avec un message qui dit quoi corriger. Jamais à la première connexion d'un joueur.
+let verifyToken;
+try {
+  verifyToken = crossmintVerifier({ apiKey, jwksUrl: process.env.CROSSMINT_JWKS_URL });
+} catch (e) {
+  console.error(e && e.message || e);
+  process.exit(1);
+}
 
 const db = pgDb(databaseUrl);
-const app = createApp({
-  db,
-  verifyToken: clerkVerifier({ secretKey, authorizedParties: origins }),
-  origins,
-});
+const app = createApp({ db, verifyToken, origins });
 
 // Les erreurs internes partent dans les journaux, jamais dans la réponse du joueur.
 app.onError = (e, route) => console.error(`[${new Date().toISOString()}] ${route} :`, e && e.stack || e);
 
 const server = http.createServer((req, res) => { app(req, res); });
-server.listen(port, () => console.log(`API Warblock sur le port ${port}, origines : ${origins.join(', ')}`));
+server.listen(port, () => {
+  console.log(`API Warblock sur le port ${port}, origines : ${origins.join(', ')}`);
+  // Ni l'un ni l'autre n'est un secret : l'identifiant de projet voyage dans chaque jeton, et
+  // l'environnement se lit dans le préfixe de la clé. Les afficher évite de découvrir trois jours
+  // plus tard qu'on tourne en staging.
+  console.log(`Crossmint : ${verifyToken.environment}, projet ${verifyToken.projectId}`);
+});
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {

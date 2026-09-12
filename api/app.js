@@ -1,6 +1,7 @@
 // Le routeur de l'API. Aucune dépendance : la base et la vérification du jeton lui sont injectées.
-// C'est ce qui permet de le tester entièrement sans Postgres ni compte Clerk — les deux adaptateurs
-// réels vivent dans db-pg.js et auth-clerk.js, et sont les seuls morceaux qui touchent l'extérieur.
+// C'est ce qui permet de le tester entièrement sans Postgres ni compte Crossmint — les deux
+// adaptateurs réels vivent dans db-pg.js et auth-crossmint.js, et sont les seuls morceaux qui
+// touchent l'extérieur.
 'use strict';
 const C = require('./core');
 

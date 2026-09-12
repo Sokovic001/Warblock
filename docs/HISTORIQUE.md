@@ -28,6 +28,9 @@ ce qui a suivi découle de ce choix.
 | **Un seul biome (FARM)** | Trois biomes cousus sur une même carte se lisaient mal et rendaient la minimap illisible. VOLCANO et SNOW restent définis, `BIOME_COUNT = 1` les réactive. |
 | **3 vies (2 en Resurgence)** | Avec une seule vie, le dernier survivant était désigné vers 54 s alors que le gaz met 154 s à se refermer. Mesuré, pas supposé. |
 | **Sas d'attente de 25 s** | Demandé pour simuler l'arrivée d'autres joueurs. Décompte 3-2-1 ensuite, sans bouton « prêt » : le joueur a déjà cliqué pour entrer. |
+| **L'ordre des sept phases de l'argent n'est pas négociable** | Le serveur doit posséder l'état du jeu avant qu'un euro n'entre. Tant que `wallet` est une variable du navigateur, tout solde est modifiable depuis la console. |
+| **Aucune colonne « solde » en base tant que le grand livre n'existe pas** | Un solde qu'on écrase est exactement ce qu'il faudrait supprimer en phase 03. Mieux vaut ne pas créer la case que d'avoir à en sortir de l'argent. |
+| **Crossmint plutôt que Clerk** | Même fournisseur pour la connexion par email et pour le portefeuille : le portefeuille de la phase 04 naît du compte de la phase 01, sans second fournisseur à réconcilier. |
 
 ---
 
@@ -42,6 +45,16 @@ ce qui a suivi découle de ce choix.
   organiques au bruit.
 - **Estimation pessimiste de la qualité graphique** : partir bas et remonter donnait une première
   partie laide sur un téléphone capable. On part maintenant optimiste et on corrige à la baisse.
+- **Clerk comme fournisseur d'identité** : écrit, testé, puis abandonné avant d'avoir servi. Il
+  fallait de toute façon un second fournisseur pour le portefeuille ; Crossmint fait les deux. Le
+  changement n'a coûté qu'un fichier : la vérification du jeton est injectée dans `createApp()`, et
+  aucun des tests du routeur n'a bougé. C'est l'argument pour l'injection, en une ligne.
+- **`@crossmint/server-sdk` pour vérifier les jetons** : son `verifyCrossmintJwt` ne regarde pas la
+  revendication `aud`, donc un jeton émis pour un autre projet Crossmint — signé par la même
+  autorité, parfaitement valide — aurait ouvert un compte chez nous. Le contrôle était à ajouter par
+  nos soins de toute façon, et le SDK tire `@solana/web3.js` et `viem` pour vérifier un jeton. On
+  utilise `jose` directement : c'est ce que le SDK utilise à l'intérieur, sans dépendance, avec plus
+  de contrôles que lui.
 
 ---
 

@@ -10,6 +10,11 @@ qui détient les comptes et les profils. **Le jeu reste un seul fichier statique
 l'API par HTTPS. L'API ne recopie aucune règle : `api/core.js` charge le bloc `WBCore` depuis
 `index.html`, celui-là même que le navigateur exécute.
 
+L'identité vient de **Crossmint** : connexion par email, et le portefeuille dont la phase 04 aura
+besoin naîtra du même compte. Le serveur ne dépend que de `jose` pour la cryptographie, et décide
+lui-même de ce qu'il accepte d'un jeton — le SDK du fournisseur ne vérifie pas `aud`, donc il ne
+peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
+
 ## Architecture
 
 `index.html` contient trois parties, dans cet ordre :
@@ -25,8 +30,10 @@ l'API par HTTPS. L'API ne recopie aucune règle : `api/core.js` charge le bloc `
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 198 tests sur le jeu (`node test.js`) et
-  25 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres.
+  46 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
+  quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
+  installation, pour que les deux promesses tiennent.
 - **Vérifier la syntaxe des blocs `<script>`** après une édition automatisée : une regex qui
   extrait les blocs puis `node --check` attrape les erreurs avant d'ouvrir le navigateur.
 - **Ne jamais mettre un commentaire `//` en fin d'une ligne existante** lors d'une édition par
@@ -63,7 +70,9 @@ Le plan complet est en sept phases, et **l'ordre n'est pas négociable** : le se
 l'état du jeu avant qu'un euro n'entre. Aujourd'hui `wallet` est une variable du navigateur, donc
 tout solde y est modifiable depuis la console.
 
-- Phase 01 — comptes et profils. **Faite** : `api/`, aucun argent.
+- Phase 01 — comptes et profils. **Faite côté serveur** : `api/`, aucun argent. Reste à brancher
+  l'écran de connexion dans le jeu, par les routes de code email de Crossmint — deux `fetch`, pas de
+  React, pour que `index.html` reste un seul fichier.
 - Phase 02 — le serveur devient l'autorité du jeu. `WBCore` tourne déjà dans Node, c'est le socle.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde.

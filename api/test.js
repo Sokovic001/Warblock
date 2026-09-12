@@ -3,15 +3,21 @@
 // entièrement couvert : authentification, validation, unicité du pseudo, limitation de débit, CORS.
 'use strict';
 const assert = require('assert');
+const crypto = require('node:crypto');
 const { createApp, checkProfile, makeLimiter } = require('./app');
+const { parseApiKey, base58Encode, base58Decode, jwksUri } = require('./crossmint-key');
+const { identityFromClaims } = require('./auth-crossmint');
 const C = require('./core');
 
 let passed = 0;
 function test(nom, fn) {
-  const r = fn();
   const fini = () => { passed++; console.log('  ✓', nom); };
   const rate = e => { console.log('  ✗', nom, '\n    ', e && e.message || e); process.exitCode = 1; };
-  return (r && typeof r.then === 'function') ? r.then(fini, rate) : (() => { try { fini(); } catch (e) { rate(e); } })();
+  // L'appel est dans le try : un test synchrone qui échoue doit être signalé comme les autres, pas
+  // faire tomber tout le harnais avant d'avoir lancé les suivants.
+  let r;
+  try { r = fn(); } catch (e) { rate(e); return; }
+  return (r && typeof r.then === 'function') ? r.then(fini, rate) : fini();
 }
 
 // ---------- doublures ----------
@@ -68,6 +74,30 @@ const verifOk = async jeton => {
   return { authId: id, email: `${id}@exemple.test`, name: nom || 'Joueur' };
 };
 const appDe = (db, extra = {}) => createApp({ db, verifyToken: verifOk, origins: [ORIGINE], ...extra });
+
+// Une autorité de signature de clés d'API, fabriquée sur place. Les vraies clés publiques de
+// Crossmint vivent dans crossmint-key.js et ne servent qu'à vérifier ; pour éprouver aussi le cas
+// où la signature est bonne, il faut pouvoir signer, donc une paire à nous. C'est à cela — et à
+// rien d'autre — que sert le paramètre `signers` de parseApiKey.
+function autorite() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const brut = Buffer.from(publicKey.export({ format: 'jwk' }).x, 'base64url');
+  const b58 = base58Encode(brut);
+  return { privateKey, signers: { development: b58, staging: b58, production: b58 } };
+}
+
+// Reproduit le format exact d'une clé Crossmint : <préfixe>_base58("<projet>.<suite>:<signature>"),
+// la signature portant sur « <préfixe>.<projet>.<suite> ».
+function fabriqueCle(a, { prefix = 'sk_production', projectId = 'proj_warblock', suite = 'aa11bb22' } = {}) {
+  const donnees = `${projectId}.${suite}`;
+  const signature = crypto.sign(null, Buffer.from(`${prefix}.${donnees}`, 'utf8'), a.privateKey);
+  return `${prefix}_${base58Encode(Buffer.from(`${donnees}:${base58Encode(signature)}`, 'utf8'))}`;
+}
+
+const PROJET = 'proj_warblock';
+const revendications = (extra = {}) => ({
+  sub: 'user_1', aud: PROJET, exp: 4102444800, iat: 1700000000, email: 'joueur@exemple.test', ...extra,
+});
 
 (async () => {
 console.log('Validation du profil');
@@ -227,6 +257,228 @@ test('WBCore est chargé depuis index.html, pas recopié', () => {
   assert.strictEqual(C.nameKey('Loïc'), C.nameKey('LOIC'));
   assert.ok(C.BRAWLERS.bolt, 'les brawlers du jeu sont visibles côté serveur');
 });
+
+console.log('Lecture de la clé d\'API Crossmint');
+test('le base58 fait l\'aller-retour, zéros de tête compris', () => {
+  for (let essai = 0; essai < 200; essai++) {
+    const n = 1 + Math.floor(Math.random() * 40);
+    const octets = crypto.randomBytes(n);
+    // Les zéros de tête sont là où les implémentations naïves perdent des octets : on en force.
+    for (let i = 0; i < essai % 4 && i < n; i++) octets[i] = 0;
+    assert.deepStrictEqual(base58Decode(base58Encode(octets)), octets);
+  }
+  assert.deepStrictEqual(base58Decode(base58Encode(Buffer.alloc(0))), Buffer.alloc(0));
+});
+test('un caractère hors alphabet est refusé, pas interprété', () => {
+  // « 0 », « O », « I » et « l » n'existent pas en base58 : ce sont ceux qu'on confond en recopiant.
+  for (const c of ['0', 'O', 'I', 'l', '+', '/', '=']) assert.throws(() => base58Decode('ab' + c));
+});
+test('une vraie clé signée est acceptée, et livre son identifiant de projet', () => {
+  const a = autorite();
+  const r = parseApiKey(fabriqueCle(a, { prefix: 'sk_production', projectId: 'proj_warblock' }),
+    { usageOrigin: 'server', signers: a.signers });
+  assert.ok(r.ok, r.message);
+  assert.strictEqual(r.projectId, 'proj_warblock');
+  assert.strictEqual(r.environment, 'production');
+  assert.strictEqual(r.usageOrigin, 'server');
+});
+test('une clé dont on a changé un caractère est refusée', () => {
+  const a = autorite();
+  const cle = fabriqueCle(a);
+  const abime = cle.slice(0, -2) + (cle.endsWith('z') ? 'a' : 'z');
+  const r = parseApiKey(abime, { usageOrigin: 'server', signers: a.signers });
+  assert.ok(!r.ok, 'une clé abîmée ne doit jamais passer');
+});
+test('une clé fabriquée par quelqu\'un d\'autre est refusée', () => {
+  // Le pirate connaît le format, l'identifiant de projet, tout — sauf la clé privée de Crossmint.
+  const vrai = autorite(), pirate = autorite();
+  const r = parseApiKey(fabriqueCle(pirate, { projectId: 'proj_warblock' }),
+    { usageOrigin: 'server', signers: vrai.signers });
+  assert.ok(!r.ok);
+  assert.match(r.message, /[Ss]ignature/);
+});
+test('la clé du jeu ne peut pas servir de clé serveur', () => {
+  const a = autorite();
+  const r = parseApiKey(fabriqueCle(a, { prefix: 'ck_production' }), { usageOrigin: 'server', signers: a.signers });
+  assert.ok(!r.ok);
+  assert.match(r.message, /ck_/, 'le message doit dire laquelle des deux clés on attend');
+});
+test('une clé staging ne passe pas là où la production est exigée', () => {
+  const a = autorite();
+  const cle = fabriqueCle(a, { prefix: 'sk_staging' });
+  assert.ok(parseApiKey(cle, { usageOrigin: 'server', signers: a.signers }).ok);
+  assert.ok(!parseApiKey(cle, { usageOrigin: 'server', environment: 'production', signers: a.signers }).ok);
+});
+test('une clé signée pour staging ne devient pas une clé de production en changeant l\'étiquette', () => {
+  // La signature porte sur « préfixe.données » : renommer le préfixe la casse.
+  const a = autorite();
+  const staging = fabriqueCle(a, { prefix: 'sk_staging' });
+  const maquille = 'sk_production_' + staging.slice('sk_staging_'.length);
+  assert.ok(!parseApiKey(maquille, { usageOrigin: 'server', signers: a.signers }).ok);
+});
+test('l\'ancien format de clé est nommé, pas seulement refusé', () => {
+  assert.match(parseApiKey('sk_live_abcdef').message, /console/);
+  assert.match(parseApiKey('sk_test_abcdef').message, /console/);
+});
+test('une clé absente, vide ou malformée ne fait pas tomber la lecture', () => {
+  for (const mauvaise of [undefined, null, '', 42, {}, 'bonjour', 'sk_', 'sk_prod_x', 'sk_production_', 'sk_production_!!']) {
+    const r = parseApiKey(mauvaise);
+    assert.strictEqual(r.ok, false, String(mauvaise));
+    assert.ok(r.message, 'un refus doit toujours dire pourquoi');
+  }
+});
+test('l\'environnement décide du trousseau public, et staging n\'est pas production', () => {
+  assert.strictEqual(jwksUri('production'), 'https://www.crossmint.com/.well-known/jwks.json');
+  assert.strictEqual(jwksUri('staging'), 'https://staging.crossmint.com/.well-known/jwks.json');
+  assert.notStrictEqual(jwksUri('staging'), jwksUri('production'));
+  assert.strictEqual(jwksUri('lune'), null);
+});
+
+console.log('Ce qu\'un jeton Crossmint doit prouver');
+test('un jeton du bon projet donne l\'identité', () => {
+  const id = identityFromClaims(revendications(), { projectId: PROJET });
+  assert.strictEqual(id.authId, 'user_1');
+  assert.strictEqual(id.email, 'joueur@exemple.test');
+});
+test('un jeton émis pour un autre projet est refusé', () => {
+  // C'est le contrôle que le SDK du fournisseur ne fait pas : le jeton est signé par la bonne
+  // autorité et parfaitement valide, il appartient simplement à quelqu'un d'autre.
+  assert.throws(() => identityFromClaims(revendications({ aud: 'proj_voisin' }), { projectId: PROJET }),
+    /autre projet/);
+});
+test('un jeton sans destinataire est refusé', () => {
+  assert.throws(() => identityFromClaims(revendications({ aud: undefined }), { projectId: PROJET }),
+    /autre projet/);
+});
+test('un destinataire en liste est accepté s\'il nous contient, refusé sinon', () => {
+  assert.ok(identityFromClaims(revendications({ aud: ['autre', PROJET] }), { projectId: PROJET }).authId);
+  assert.throws(() => identityFromClaims(revendications({ aud: ['autre', 'encore'] }), { projectId: PROJET }));
+});
+test('un jeton sans expiration est refusé', () => {
+  // Sans `exp`, jose n'a rien à comparer : le jeton serait éternel, et un vol de session aussi.
+  assert.throws(() => identityFromClaims(revendications({ exp: undefined }), { projectId: PROJET }), /expiration/);
+  assert.throws(() => identityFromClaims(revendications({ exp: 'bientôt' }), { projectId: PROJET }), /expiration/);
+});
+test('un jeton sans sujet est refusé', () => {
+  for (const sub of [undefined, '', '   ', 42, null])
+    assert.throws(() => identityFromClaims(revendications({ sub }), { projectId: PROJET }), /sujet/);
+});
+test('sans identifiant de projet à comparer, rien ne passe', () => {
+  assert.throws(() => identityFromClaims(revendications(), {}), /projet/);
+  assert.throws(() => identityFromClaims(revendications(), { projectId: '' }), /projet/);
+});
+test('un jeton vide ou d\'un type inattendu est refusé sans casser', () => {
+  for (const p of [undefined, null, 'abc', 42, []])
+    assert.throws(() => identityFromClaims(p, { projectId: PROJET }));
+});
+test('l\'email manquant n\'empêche pas la connexion', () => {
+  // Crossmint ne met pas toujours l'email dans le jeton. L'identité, c'est `sub` ; l'email est une
+  // commodité, et le serveur ira le chercher séparément.
+  const id = identityFromClaims(revendications({ email: undefined }), { projectId: PROJET });
+  assert.strictEqual(id.email, '');
+  assert.strictEqual(id.authId, 'user_1');
+});
+test('le compte naît sans pseudo : c\'est le joueur qui le choisira', () => {
+  const id = identityFromClaims(revendications(), { projectId: PROJET });
+  assert.strictEqual(id.name, '');
+  assert.ok(C.validName(C.nameOr(id.name, C.NAME.fallback)), 'le repli doit être un pseudo valide');
+});
+
+// ---------- de bout en bout, avec de la vraie cryptographie ----------
+// Ce bloc est le seul qui demande une dépendance. Il ne s'exécute que si jose est installé, pour que
+// `node api/test.js` reste lançable sans rien installer ; l'intégration continue, elle, installe les
+// dépendances de l'API et l'exécute vraiment. Il n'appelle jamais Crossmint : le trousseau public
+// est servi par un serveur local, ce qui permet d'éprouver aussi les cas qu'on ne peut pas demander
+// à un fournisseur — un jeton signé par la mauvaise clé, un jeton expiré, une confusion
+// d'algorithme.
+let jose = null;
+try { jose = require('jose'); } catch { /* pas installé : bloc sauté */ }
+
+if (!jose) {
+  console.log('Chaîne complète de vérification (sautée : jose n\'est pas installé — cd api && npm install)');
+} else {
+  console.log('Chaîne complète de vérification');
+  const http = require('node:http');
+
+  const paire = await jose.generateKeyPair('ES256', { extractable: true });
+  const pirate = await jose.generateKeyPair('ES256', { extractable: true });
+  const jwk = { ...(await jose.exportJWK(paire.publicKey)), kid: 'k1', alg: 'ES256', use: 'sig' };
+
+  const trousseau = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ keys: [jwk] }));
+  });
+  await new Promise(r => trousseau.listen(0, '127.0.0.1', r));
+  const jwksUrl = `http://127.0.0.1:${trousseau.address().port}/.well-known/jwks.json`;
+
+  const a = autorite();
+  const verifie = require('./auth-crossmint').crossmintVerifier({
+    apiKey: fabriqueCle(a, { prefix: 'sk_production', projectId: PROJET }),
+    jwksUrl, signers: a.signers,
+    // Pas d'email à aller chercher : ce test ne parle à personne d'autre qu'à lui-même.
+    lookupEmail: false,
+  });
+
+  const jeton = ({ cle = paire.privateKey, alg = 'ES256', aud = PROJET, sub = 'user_1', exp = '2h', ...reste } = {}) => {
+    let s = new jose.SignJWT({ email: 'joueur@exemple.test', ...reste })
+      .setProtectedHeader({ alg, kid: 'k1' })
+      .setIssuedAt()
+      .setSubject(sub)
+      .setExpirationTime(exp);
+    if (aud !== undefined) s = s.setAudience(aud);
+    return s.sign(cle);
+  };
+
+  await test('un jeton signé par Crossmint, pour notre projet, ouvre la session', async () => {
+    const id = await verifie(await jeton());
+    assert.strictEqual(id.authId, 'user_1');
+    assert.strictEqual(id.email, 'joueur@exemple.test');
+  });
+  await test('un jeton signé par une autre clé est refusé', async () => {
+    await assert.rejects(verifie(await jeton({ cle: pirate.privateKey })));
+  });
+  await test('un jeton expiré est refusé', async () => {
+    await assert.rejects(verifie(await jeton({ exp: Math.floor(Date.now() / 1000) - 3600 })));
+  });
+  await test('un jeton pour un autre projet est refusé par la signature comme par le contenu', async () => {
+    await assert.rejects(verifie(await jeton({ aud: 'proj_voisin' })));
+  });
+  await test('la clé publique ne peut pas servir de secret partagé', async () => {
+    // L'attaque classique : signer en HS256 avec le matériau public, en pariant que le serveur
+    // choisisse l'algorithme d'après l'en-tête du jeton. La liste fermée d'algorithmes l'interdit.
+    const faux = await new jose.SignJWT({ sub: 'pirate' })
+      .setProtectedHeader({ alg: 'HS256', kid: 'k1' })
+      .setIssuedAt().setSubject('pirate').setAudience(PROJET).setExpirationTime('2h')
+      .sign(new TextEncoder().encode(JSON.stringify(jwk)));
+    await assert.rejects(verifie(faux));
+  });
+  await test('un jeton sans signature du tout est refusé', async () => {
+    const b64 = o => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const nu = `${b64({ alg: 'none', kid: 'k1' })}.${b64({ sub: 'pirate', aud: PROJET, exp: 4102444800 })}.`;
+    await assert.rejects(verifie(nu));
+  });
+  await test('un jeton du bon émetteur mais sans expiration est refusé', async () => {
+    // jose laisse passer un jeton sans `exp` : c'est notre contrôle à nous qui l'arrête.
+    const eternel = await new jose.SignJWT({ sub: 'user_1' })
+      .setProtectedHeader({ alg: 'ES256', kid: 'k1' })
+      .setIssuedAt().setSubject('user_1').setAudience(PROJET)
+      .sign(paire.privateKey);
+    await assert.rejects(verifie(eternel), /expiration/);
+  });
+  await test('la clé serveur décide du projet : une clé d\'un autre projet ne voit pas nos jetons', async () => {
+    const voisin = require('./auth-crossmint').crossmintVerifier({
+      apiKey: fabriqueCle(a, { prefix: 'sk_production', projectId: 'proj_voisin' }),
+      jwksUrl, signers: a.signers, lookupEmail: false,
+    });
+    await assert.rejects(voisin(await jeton()), 'un jeton Warblock ne doit pas ouvrir une session ailleurs');
+  });
+  await test('une clé serveur illisible fait échouer la construction, pas la première connexion', () => {
+    assert.throws(() => require('./auth-crossmint').crossmintVerifier({ apiKey: 'sk_production_nimportequoi' }),
+      /CROSSMINT_SERVER_API_KEY/);
+  });
+
+  trousseau.close();
+}
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
 })();
