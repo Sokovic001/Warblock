@@ -2477,10 +2477,139 @@ if (typeof module!=='undefined') module.exports=WBCore;
 /*CORE-END*/
 </script>
 
+<!-- SIM: l'etat d'une partie et les requetes qui le lisent. Ni DOM, ni Three.js, ni horloge.
+     Troisieme bloc de script INTERNE : le fichier reste unique, il n'y a toujours rien a
+     installer pour ouvrir le jeu. Extrait et teste par test.js. -->
+<script>
+/*SIM-START*/
+// CE QUE CE BLOC EST, ET CE QU'IL N'EST PAS. WBCore tient les regles PURES : des fonctions qui ne
+// connaissent aucun etat. Ici vit l'ETAT d'une partie et tout ce qui le lit ou le fait avancer :
+// la grille, le mouvement, la vue. Le bloc `Game` garde le rendu, les entrees et le son, et ne
+// produit plus aucun fait de partie sur ces trois sujets — il les LIT.
+//
+// LA FRONTIERE EST DURE, et c'est tout l'interet. Rien de l'environnement ne franchit ces deux
+// marqueurs : pas de scene, pas de DOM, pas de son, pas d'horloge. Une garde textuelle et
+// un bac a sable de test.js le verifient a chaque `npm test`, parce que la panne serait
+// SILENCIEUSE : une seule attache au rendu qui subsiste, et le bloc cesse de tourner dans Node
+// sans que rien ne casse dans le navigateur.
+//
+// LA CONVENTION QUI COUTE LE PLUS CHER, et qui vaut partout ici : l'etat d'une partie n'est plus
+// une fermeture lexicale, c'est un PARAMETRE EXPLICITE, toujours le premier, toujours nomme `G`.
+// Un troisieme <script> est une frontiere de portee dure : une fonction descendue ici perd sa
+// fermeture sur le `G` du bloc `Game`. Le lui rendre par un `let G` de module aurait rendu ce
+// bloc incapable de faire tourner deux parties a la fois, ce dont le rejeu du serveur a
+// precisement besoin, et aurait recree en douce la variable globale qu'on vient de supprimer.
+const WBSim = (function(){
+'use strict';
+const C = WBCore, N = C.MAP;
+// Le corps d'un brawler fait 0,42 de demi-largeur. C'est une regle de collision et pas un reglage
+// d'affichage : elle decide de l'endroit ou un corps tient, donc de qui reste coince contre un mur.
+const R = 0.42;
+
+// ---------- la grille ----------
+// Hors carte vaut mur : un tir qui sort du monde s'arrete, un corps qui pousse dehors ne passe pas.
+function cellAt(G,x,z){ const xi=Math.floor(x),zi=Math.floor(z); if(xi<0||zi<0||xi>=N||zi>=N) return 1; return G.cells[xi*N+zi]; }
+// Les props arretent les corps et les balles, les buissons jamais : c'est C.BLOCKING qui tranche.
+function isWall(G,x,z){ return C.BLOCKING(cellAt(G,x,z)); }
+function inBush(G,e){ return cellAt(G,e.x,e.z)===2; }
+// Les QUATRE coins du corps, jamais son centre seul : un centre sur du sol libre et un coin dans
+// le mur d'a cote, et le brawler ne bouge plus de la partie sans que rien ne le signale.
+function free(G,x,z){ return !isWall(G,x-R,z-R)&&!isWall(G,x+R,z-R)&&!isWall(G,x-R,z+R)&&!isWall(G,x+R,z+R); }
+// Les deux axes se tentent separement : c'est ce qui fait glisser le long d'un mur au lieu de s'y
+// coller. Une direction qui echoue en diagonale reussit souvent sur un seul de ses axes.
+function tryMove(G,e,dx,dz){ if(free(G,e.x+dx,e.z)) e.x+=dx; if(free(G,e.x,e.z+dz)) e.z+=dz; }
+// Le mouvement d'une entite, et rien d'autre : ce que le joueur VOIT de ce mouvement — la
+// position, l'orientation, les jambes qui battent — se deduit de cet etat, une fois par image,
+// par l'unique recopie du bloc `Game`.
+function moveEntity(G,e,mx,mz,dt){
+  const l=Math.hypot(mx,mz); if(l>0){ mx/=l; mz/=l; }
+  const ak=Math.min(1,dt*13); e.vx+=(mx*e.speed-e.vx)*ak; e.vz+=(mz*e.speed-e.vz)*ak;
+  const kx=e.knockx, kz=e.knockz; e.knockx*=Math.pow(0.02,dt); e.knockz*=Math.pow(0.02,dt);
+  tryMove(G,e,(e.vx+kx)*dt,(e.vz+kz)*dt);
+}
+function inZone(G,x,z,m){ return Math.hypot(x-G.zone.cx,z-G.zone.cz)<G.zone.r-(m||0); }
+
+// ---------- ligne de vue : les murs coupent, les buissons cachent sauf de tres pres ----------
+function losClear(G,ax,az,bx,bz){ const d=Math.hypot(bx-ax,bz-az), steps=Math.ceil(d/0.3); for(let i=1;i<steps;i++){ const t=i/steps; if(isWall(G,ax+(bx-ax)*t,az+(bz-az)*t)) return false; } return true; }
+// La fumee se range au meme endroit que la regle du buisson. QUI regarde compte : un nuage frais
+// est a sens unique en faveur de l'equipe qui l'a lance, donc l'equipe du regardant voyage avec
+// chaque test de visibilite. Ce que le nuage FAIT est decide dans WBCore, jamais recopie ici.
+function smokeAt(G,ax,az,bx,bz,team){ return !!(G&&G.smokes) && C.smokeSightBlocked(G.smokes,ax,az,bx,bz,team); }
+function smokeBetween(G,a,b){ return smokeAt(G,a.x,a.z,b.x,b.z,a.team); }
+function canSee(G,a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(G,b) && d>2.5 && !(inBush(G,a)&&cellAt(G,a.x,a.z)===cellAt(G,b.x,b.z)&&d<4)) return false; if(smokeBetween(G,a,b)) return false; return losClear(G,a.x,a.z,b.x,b.z); }
+// Ce qu'on ne peut pas voir s'efface entierement : dans un buisson ou l'on n'est pas entre, ou
+// derriere un nuage. Un mur, c'est different — on voit toujours le brawler de l'autre cote.
+function obscured(G,viewer,e){ return !e.isPlayer && !canSee(G,viewer,e) && (inBush(G,e) || smokeBetween(G,viewer,e)); }
+
+// ---------- les points de depart ----------
+// Ils ne prennent leurs angles que de la graine : ils se comptent donc en INDICES de `C.UNIT`,
+// jamais en radians, et aucune transcendante n'est appelee ici. Les constantes sont les anciennes,
+// converties : 20 indices ~ 0,123 rad (l'ancien jitter de 0,12), 16 ~ 0,098 (0,09), 18 ~ 0,110
+// (0,11). L'ecart est tres inferieur au demi-pas de la grille, personne ne le voit.
+function spawnPoints(G,rng,teams,teamSize){
+  const pts=[]; const cx=N/2,cz=N/2;
+  for(let i=0;i<teams;i++){ const a=Math.round(i*C.UNIT_N/teams)+((rng()*20)|0), r=N*0.42;
+    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*16;
+      const u=C.unitAt(a2);
+      let x=cx+u.x*r, z=cz+u.z*r;
+      // free(), never isWall(). A brawler is 0.42 wide: its centre can sit on clear floor while
+      // a corner is buried in the wall beside it. tryMove() then refuses both axes and that
+      // brawler never moves again — and cannot even be shot, because bullets die on the wall it
+      // is clipping. Measured on the old point test: one bot per match on average, at least one
+      // in 69% of maps. Sweep the arc and then inwards until the whole body fits.
+      if(!free(G,x,z)){
+        let found=false;
+        for(let step=0; step<50 && !found; step++){
+          const rr=r-step*0.6; if(rr<4) break;
+          for(let k=0;k<13 && !found;k++){
+            const uu=C.unitAt(a2+(k-6)*18);
+            const nx=cx+uu.x*rr, nz=cz+uu.z*rr;
+            if(free(G,nx,nz)){ x=nx; z=nz; found=true; }
+          }
+        }
+        if(!found){ x=cx; z=cz; }
+      }
+      pts.push({x,z,team:i}); } }
+  return pts;
+}
+
+// ---------- l'etat d'une entite ----------
+// `id` n'est pas un identifiant : c'est la PERSONNALITE du brawler. `botUpdate` en tire la
+// nervosite, la distance preferee, le rythme d'esquive et la moitie qui decroche contre celle qui
+// reste. Il sort donc du flux `bots/identite` et non plus d'un tirage libre : c'est ce qui rend
+// les vingt adversaires rejouables. `think` est le decalage de leur premiere reflexion, tire du
+// meme flux.
+//
+// `eid` EST l'identifiant, et il est neuf. Le bloc `Game` range ce qu'il dessine dans une table
+// annexe indexee par lui : sans ce numero, le rendu n'aurait eu que `id` sous la main, qui n'en
+// est pas un — deux bots peuvent partager une personnalite, et le rendu aurait melange leurs corps
+// sans que rien ne casse.
+function makeEntity(G,name,x,z,stake,isPlayer,brawler,acc,team){
+  G.nextEid=(G.nextEid||0)+1;
+  const e={ eid:G.nextEid, name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
+    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:G.alea('bots/identite')()*0.3,aim:0,id:G.alea('bots/identite')(),
+    speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0, gadget:C.smokeStart() };
+  e.stealthT=0; e.dashT=0;
+  return e;
+}
+
+return { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
+         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity };
+})();
+if (typeof module!=='undefined') module.exports=WBSim;
+/*SIM-END*/
+</script>
+
 <script>
 (function(){
 'use strict';
 const C=WBCore, N=C.MAP, B=C.BRAWLERS;
+// Les noms descendus dans le bloc SIM se reprennent ici, en UNE SEULE ligne. C'est la seule
+// economie reelle du decoupage : les sites d'appel restes dans `Game` gardent leur forme, ils ne
+// se prefixent pas un par un. Ce qui change chez eux, et qui n'a pas de raccourci, c'est l'etat de
+// partie passe en premier argument — SIM n'a plus de `G` de portee lexicale, par construction.
+const { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
+        losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity } = WBSim;
 const $=id=>document.getElementById(id);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 // keep cents when a value has them ($0.50), drop them when it is round ($1,600)
@@ -3329,11 +3458,11 @@ function zoneAlarm(){
 }
 // ---------- world ----------
 let G=null;
-const cellAt=(x,z)=>{ const xi=Math.floor(x),zi=Math.floor(z); if(xi<0||zi<0||xi>=N||zi>=N) return 1; return G.cells[xi*N+zi]; };
-const isWall=(x,z)=>C.BLOCKING(cellAt(x,z));   // props block movement and bullets, bushes never do
-const inBush=e=>cellAt(e.x,e.z)===2;
 function buildWorld(seed){
   while(world.children.length){ const gone=world.children[0]; world.remove(gone); discard(gone); }
+  // La scene vient d'etre videe : la table des corps d'entites l'est avec elle, sinon la partie
+  // suivante retrouverait des objets que plus rien n'affiche.
+  MESHES.clear();
   const cells=C.generateMap(seed), biomes=C.generateBiomes(seed), rng=C.makeRng(seed^0x51ed270b);
   const blocks=[], floorTiles=[], props=[], caps=[], shadows=[];
   // Per-biome palette. Walls and bushes are deliberately built from different SHAPES, not just
@@ -3763,77 +3892,50 @@ function discard(obj){
   });
 }
 
-// ---------- entities ----------
-// `id` n'est pas un identifiant : c'est la PERSONNALITÉ du brawler. `botUpdate` en tire la
-// nervosité, la distance préférée, le rythme d'esquive et la moitié qui décroche contre celle qui
-// reste. Il sort donc du flux `bots/identite` et non plus de `Math.random()` : c'est ce qui rend
-// les vingt adversaires rejouables, et c'est aussi ce qui change le comportement de TOUS les bots
-// d'un coup. `think` est le décalage de leur première réflexion, tiré du même flux.
-function makeEntity(name,x,z,stake,isPlayer,brawler,acc,team){
-  const e={ name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
-    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:G.alea('bots/identite')()*0.3,aim:0,id:G.alea('bots/identite')(),
-    speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0, gadget:C.smokeStart() };
-  e.mesh=makeBrawlerMesh(new THREE.Color(brawler.color),isPlayer,brawler.id); e.mesh.position.set(x,0,z); world.add(e.mesh);
-  e.stealthT=0; e.dashT=0;
+// ---------- entities : ce qu'on en VOIT ----------
+// L'etat d'une entite est descendu dans le bloc SIM. Ce qui reste ici est son corps a l'ecran, et
+// il ne vit plus DANS l'entite : il est range dans une table annexe, indexee par `eid`,
+// l'identifiant d'insertion que SIM pose sur chaque entite. Laisser SIM porter un pointeur vers un
+// objet de la scene, meme « le temps de la transition », serait exactement le patron du
+// `respawn()` defini deux fois — la copie vivante finit du cote que rien n'execute, et la panne
+// est silencieuse.
+const MESHES=new Map();
+function spawnEntity(name,x,z,stake,isPlayer,brawler,acc,team){
+  const e=makeEntity(G,name,x,z,stake,isPlayer,brawler,acc,team);
+  const obj=makeBrawlerMesh(new THREE.Color(brawler.color),isPlayer,brawler.id);
+  obj.position.set(x,0,z); world.add(obj);
+  // `lastOp` est un cache de rendu, pas un fait de partie : il evite de reparcourir les materiaux
+  // d'un corps dont l'opacite n'a pas bouge. Il est donc range avec le corps, pas avec l'entite.
+  MESHES.set(e.eid,{obj,lastOp:-1});
   return e;
 }
+// L'UNIQUE ECRIVAIN DE CORPS D'ENTITE DU JEU, et une garde textuelle de test.js interdit
+// l'apparition d'un second. Tout ce qui se voit d'un brawler — sa position, son orientation, ses
+// jambes qui battent, son clignotement d'invulnerabilite, son effacement dans un buisson — se
+// DEDUIT de l'etat que SIM a ecrit. Rien ici ne decide de quoi que ce soit.
+//
+// Une fois par IMAGE, jamais par pas : un pas de simulation qu'aucune image ne montre n'a aucune
+// raison de toucher a la scene.
+function syncMeshes(){
+  for(const e of G.ents){
+    const rec=MESHES.get(e.eid); if(!rec) continue;
+    const m=rec.obj;
+    // Un mort n'est pas dessine, et rien de ce qui suit n'a de sens pour lui : ni orientation, ni
+    // jambes, ni fondu. `rec.lastOp` reste l'etat reel de ses materiaux, donc le jour ou il
+    // reapparait, la comparaison est toujours juste.
+    if(!e.alive){ m.visible=false; continue; }
+    m.visible = e.invuln<=0 || Math.floor(G.time*10)%2===0;
+    m.position.set(e.x,0,e.z);
+    m.rotation.y=Math.atan2(e.ax,e.az)+Math.PI;
+    const moving=Math.hypot(e.vx,e.vz)>0.6;
+    m.children[3].rotation.x=moving?Math.sin(G.time*11+e.id*7)*0.6:0;
+    m.children[4].rotation.x=moving?-Math.sin(G.time*11+e.id*7)*0.6:0;
+    m.children[0].material.emissive.setHex(e.flash>0?0x661111:0x000000);
+    const hide=obscured(G,G.player,e), op=hide?0:(e.stealthT>0?(e.isPlayer?0.35:0.18):(inBush(G,e)?0.55:1));
+    if(rec.lastOp!==op){ rec.lastOp=op; m.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
+  }
+}
 const maxHp=e=>C.maxHp(e.brawler,e.cubes);
-// Les points de départ ne prennent leurs angles que de la graine : ils se comptent donc en INDICES
-// de `C.UNIT`, jamais en radians, et aucune transcendante n'est appelée ici. Les constantes sont
-// les anciennes, converties : 20 indices ≈ 0,123 rad (l'ancien jitter de 0,12), 16 ≈ 0,098 (0,09),
-// 18 ≈ 0,110 (0,11). L'écart est très inférieur au demi-pas de la grille, personne ne le voit.
-function spawnPoints(rng,teams,teamSize){
-  const pts=[]; const cx=N/2,cz=N/2;
-  for(let i=0;i<teams;i++){ const a=Math.round(i*C.UNIT_N/teams)+((rng()*20)|0), r=N*0.42;
-    for(let m=0;m<teamSize;m++){ const a2=a+(m-(teamSize-1)/2)*16;
-      const u=C.unitAt(a2);
-      let x=cx+u.x*r, z=cz+u.z*r;
-      // free(), never isWall(). A brawler is 0.42 wide: its centre can sit on clear floor while
-      // a corner is buried in the wall beside it. tryMove() then refuses both axes and that
-      // brawler never moves again — and cannot even be shot, because bullets die on the wall it
-      // is clipping. Measured on the old point test: one bot per match on average, at least one
-      // in 69% of maps. Sweep the arc and then inwards until the whole body fits.
-      if(!free(x,z)){
-        let found=false;
-        for(let step=0; step<50 && !found; step++){
-          const rr=r-step*0.6; if(rr<4) break;
-          for(let k=0;k<13 && !found;k++){
-            const uu=C.unitAt(a2+(k-6)*18);
-            const nx=cx+uu.x*rr, nz=cz+uu.z*rr;
-            if(free(nx,nz)){ x=nx; z=nz; found=true; }
-          }
-        }
-        if(!found){ x=cx; z=cz; }
-      }
-      pts.push({x,z,team:i}); } }
-  return pts;
-}
-
-// ---------- movement / collision ----------
-const R=0.42;
-function free(x,z){ return !isWall(x-R,z-R)&&!isWall(x+R,z-R)&&!isWall(x-R,z+R)&&!isWall(x+R,z+R); }
-function tryMove(e,dx,dz){ if(free(e.x+dx,e.z)) e.x+=dx; if(free(e.x,e.z+dz)) e.z+=dz; }
-function moveEntity(e,mx,mz,dt){
-  const l=Math.hypot(mx,mz); if(l>0){ mx/=l; mz/=l; }
-  const ak=Math.min(1,dt*13); e.vx+=(mx*e.speed-e.vx)*ak; e.vz+=(mz*e.speed-e.vz)*ak;
-  const kx=e.knockx, kz=e.knockz; e.knockx*=Math.pow(0.02,dt); e.knockz*=Math.pow(0.02,dt);
-  tryMove(e,(e.vx+kx)*dt,(e.vz+kz)*dt);
-  e.mesh.position.set(e.x,0,e.z);
-  const moving=Math.hypot(e.vx,e.vz)>0.6;
-  e.mesh.children[3].rotation.x=moving?Math.sin(G.time*11+e.id*7)*0.6:0; e.mesh.children[4].rotation.x=moving?-Math.sin(G.time*11+e.id*7)*0.6:0;
-  e.mesh.rotation.y=Math.atan2(e.ax,e.az)+Math.PI;
-}
-
-// ---------- line of sight (walls block, bushes hide unless close) ----------
-function losClear(ax,az,bx,bz){ const d=Math.hypot(bx-ax,bz-az), steps=Math.ceil(d/0.3); for(let i=1;i<steps;i++){ const t=i/steps; if(isWall(ax+(bx-ax)*t,az+(bz-az)*t)) return false; } return true; }
-// smoke goes in the same place as the bush rule. Who is looking matters: a fresh cloud is one-way
-// in favour of the team that threw it, so the viewer's team travels with every sight test.
-function smokeAt(ax,az,bx,bz,team){ return !!(G&&G.smokes) && C.smokeSightBlocked(G.smokes,ax,az,bx,bz,team); }
-function smokeBetween(a,b){ return smokeAt(a.x,a.z,b.x,b.z,a.team); }
-function canSee(a,b){ const d=Math.hypot(b.x-a.x,b.z-a.z); if(inBush(b) && d>2.5 && !(inBush(a)&&cellAt(a.x,a.z)===cellAt(b.x,b.z)&&d<4)) return false; if(smokeBetween(a,b)) return false; return losClear(a.x,a.z,b.x,b.z); }
-// something you cannot see is drawn away entirely: in a bush you have not walked up to, or behind
-// a cloud. A wall is different — you always see the brawler standing on the other side of it.
-function obscured(viewer,e){ return !e.isPlayer && !canSee(viewer,e) && (inBush(e) || smokeBetween(viewer,e)); }
 
 // ---------- smoke grenade ----------
 // The gadget in three parts: the canister in the air, the cloud it becomes, and the ring on the
@@ -3846,9 +3948,9 @@ function throwSmoke(e,aimDist){
   const at=C.smokeLanding(e.x,e.z,ux,uz,aimDist);
   // never let it bloom inside a wall: walk the throw back until it finds open ground
   let tx=at.x, tz=at.z;
-  if(isWall(tx,tz)){
+  if(isWall(G,tx,tz)){
     tx=e.x; tz=e.z;
-    for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(nx,nz)){ tx=nx; tz=nz; break; } }
+    for(let d=at.dist; d>=0.5; d-=0.4){ const nx=e.x+ux*d, nz=e.z+uz*d; if(!isWall(G,nx,nz)){ tx=nx; tz=nz; break; } }
   }
   e.gadget=C.smokeThrown(e.gadget);
   const g=makeNade();
@@ -3959,9 +4061,9 @@ function useSuper(e,aimDist){
     case 'slam': explode(e.x,e.z,s.radius,s.dmg,e,s.knock); break;
     case 'zone': { const d=clamp(aimDist||s.range,1,s.range); const x=e.x+e.ax*d, z=e.z+e.az*d; const mesh=new THREE.Mesh(new THREE.CylinderGeometry(s.radius,s.radius,0.25,28),fireMat); mesh.position.set(x,0.12,z); world.add(mesh); G.zones.push({x,z,r:s.radius,dps:s.dps,owner:e,life:s.life,tick:0,mesh}); break; }
     case 'heal': { const before=e.hp; e.hp=Math.min(maxHp(e),e.hp+maxHp(e)*s.amount); floatText(e,'+'+Math.round(e.hp-before),'heal'); const ring=new THREE.Mesh(new THREE.RingGeometry(0.3,1.6,32),new THREE.MeshBasicMaterial({color:0x5ce04b,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.set(e.x,0.06,e.z); world.add(ring); G.fx.push({mesh:ring,life:0.5,max:0.5}); break; }
-    case 'stealth': e.stealthT=s.duration; e.lastOp=-1; if(!e.isPlayer) e.target=null; break;
+    case 'stealth': e.stealthT=s.duration; if(!e.isPlayer) e.target=null; break;
     case 'dash': e.dashT=s.dist/22; e.dashX=e.ax; e.dashZ=e.az; e.dashHit=new Set(); e.dashDmg=s.dmg; break;
-    case 'turret': { let x=e.x+e.ax*1.4, z=e.z+e.az*1.4; if(!free(x,z)){ x=e.x; z=e.z; } const g=new THREE.Group(); const base=new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.65,0.5,10),turretMat); base.position.y=0.25; g.add(base); const barrel=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.18,0.8),new THREE.MeshLambertMaterial({color:0x1d2340})); barrel.position.set(0,0.65,-0.3); g.add(barrel); const ol=new THREE.Mesh(base.geometry,outlineMat); ol.position.copy(base.position); ol.scale.setScalar(1.08); g.add(ol); g.position.set(x,0,z); world.add(g);
+    case 'turret': { let x=e.x+e.ax*1.4, z=e.z+e.az*1.4; if(!free(G,x,z)){ x=e.x; z=e.z; } const g=new THREE.Group(); const base=new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.65,0.5,10),turretMat); base.position.y=0.25; g.add(base); const barrel=new THREE.Mesh(new THREE.BoxGeometry(0.18,0.18,0.8),new THREE.MeshLambertMaterial({color:0x1d2340})); barrel.position.set(0,0.65,-0.3); g.add(barrel); const ol=new THREE.Mesh(base.geometry,outlineMat); ol.position.copy(base.position); ol.scale.setScalar(1.08); g.add(ol); g.position.set(x,0,z); world.add(g);
       G.turrets.push({x,z,hp:s.hp,maxHp:s.hp,owner:e,life:s.life,cd:0.3,spec:s.shot,fireRate:s.fireRate,mesh:g,name:e.name+"'s turret"}); break; }
     default: fireSpec(e,e.ax,e.az,s,true,aimDist);
   }
@@ -3984,9 +4086,9 @@ function hurtTurret(tu,dmg){
 }
 function dashUpdate(e,dt){
   if(e.dashT<=0) return false; e.dashT-=dt;
-  const step=22*dt; if(free(e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
+  const step=22*dt; if(free(G,e.x+e.dashX*step,e.z+e.dashZ*step)){ e.x+=e.dashX*step; e.z+=e.dashZ*step; } else e.dashT=0;
   for(const t of G.ents){ if(t===e||!t.alive||t.team===e.team||e.dashHit.has(t)) continue; if(Math.hypot(t.x-e.x,t.z-e.z)<1.1){ e.dashHit.add(t); damage(t,e.dashDmg,e); t.knockx+=e.dashX*6; t.knockz+=e.dashZ*6; } }
-  e.mesh.position.set(e.x,0,e.z); e.vx=e.dashX*8; e.vz=e.dashZ*8; return true;
+  e.vx=e.dashX*8; e.vz=e.dashZ*8; return true;
 }
 function zonesUpdate(dt){
   for(let i=G.zones.length-1;i>=0;i--){ const z=G.zones[i]; z.life-=dt; z.tick-=dt; z.mesh.material.opacity=0.3+Math.sin(G.time*14)*0.12;
@@ -3995,7 +4097,7 @@ function zonesUpdate(dt){
   for(let i=G.turrets.length-1;i>=0;i--){ const tu=G.turrets[i]; tu.life-=dt; tu.cd-=dt;
     if(tu.life<=0||!tu.owner.alive){ world.remove(tu.mesh); discard(tu.mesh); if(tu.lbl){ tu.lbl.remove(); tu.lbl=null; } G.turrets.splice(i,1); continue; }
     if(tu.flash>0){ tu.flash-=dt; tu.mesh.scale.setScalar(1+tu.flash*1.1); } else if(tu.mesh.scale.x!==1) tu.mesh.scale.setScalar(1);
-    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(tu.x,tu.z,t.x,t.z)&&!(inBush(t)&&d>2.5)&&!smokeAt(tu.x,tu.z,t.x,t.z,tu.owner.team)){ bd=d; best=t; } }
+    let best=null,bd=tu.spec.range; for(const t of G.ents){ if(t.team===tu.owner.team||!t.alive||t.stealthT>0) continue; const d=Math.hypot(t.x-tu.x,t.z-tu.z); if(d<bd&&losClear(G,tu.x,tu.z,t.x,t.z)&&!(inBush(G,t)&&d>2.5)&&!smokeAt(G,tu.x,tu.z,t.x,t.z,tu.owner.team)){ bd=d; best=t; } }
     if(best){ const dx=(best.x-tu.x)/bd, dz=(best.z-tu.z)/bd; tu.mesh.rotation.y=Math.atan2(dx,dz)+Math.PI; if(tu.cd<=0){ tu.cd=tu.fireRate; fireSpec(tu.owner,dx,dz,tu.spec,false,bd,{x:tu.x,z:tu.z}); } }
   }
 }
@@ -4007,7 +4109,7 @@ function projUpdate(dt){
     const step=p.spd*dt; p.x+=p.dx*step; p.z+=p.dz*step; p.travel+=step;
     let dead=false;
     if(p.lob){ const k=Math.min(1,p.travel/p.explodeAt); p.mesh.position.set(p.x,0.9+Math.sin(Math.PI*k)*3.2,p.z); if(k>=1){ explode(p.x,p.z,p.spec.aoe,p.dmg,p.owner,p.isSuper?2:0); dead=true; } }
-    else { p.mesh.position.set(p.x,1.0,p.z); dead=p.travel>=p.range||isWall(p.x,p.z); }
+    else { p.mesh.position.set(p.x,1.0,p.z); dead=p.travel>=p.range||isWall(G,p.x,p.z); }
     if(!dead&&!p.lob){
       for(const tu of G.turrets){ if(tu.owner.team===p.owner.team||p.hit.has(tu)) continue; if(Math.hypot(tu.x-p.x,tu.z-p.z)<0.8){ hurtTurret(tu,p.dmg); if(p.pierce) p.hit.add(tu); else { dead=true; break; } } }
       if(!dead) for(const e of G.ents){ if(e===p.owner||!e.alive||e.team===p.owner.team||p.hit.has(e)) continue; if(Math.hypot(e.x-p.x,e.z-p.z)<0.62){
@@ -4065,7 +4167,7 @@ function spawnPickup(kind,x,z,amount,owner){
     : kind==='smoke' ? makeNade()
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
   const aleaPos=G.alea('butin/position');
-  let px=x+(aleaPos()-0.5)*1.4, pz=z+(aleaPos()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
+  let px=x+(aleaPos()-0.5)*1.4, pz=z+(aleaPos()-0.5)*1.4; if(isWall(G,px,pz)){ px=x; pz=z; }
   mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
   // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
   // ground for the rest of the match
@@ -4105,7 +4207,7 @@ function collect(e,pk){
   else { e.pouch+=pk.amount; if(e.isPlayer){ G.looted+=pk.amount; snd('cash',0.12); feed(`+${money(pk.amount)} from ${pk.owner}`,true); const a=$('pouchAmt'); a.classList.add('pop'); setTimeout(()=>a.classList.remove('pop'),120); } }
 }
 function botCashOut(b){
-  b.alive=false; b.mesh.visible=false; b.cashedOut=true; b.pouch=0; b.respawnT=0;
+  b.alive=false; b.cashedOut=true; b.pouch=0; b.respawnT=0;
   feed(`${b.name} cashed out${b.team===G.player.team?' — you are on your own':''}`,b.team===G.player.team);
   if(Math.random()<0.6) botSay(b,'cashout');
   // a banked brawler is out for good: teammates waiting on them stop waiting
@@ -4118,7 +4220,7 @@ function aliveTeams(){ const t=new Set(); for(const e of G.ents) if(inPlay(e)) t
 function playersLeft(){ return G.ents.filter(inPlay).length; }
 function kill(victim,killer,cause){
   if(!victim.alive) return;
-  victim.alive=false; victim.mesh.visible=false; victim.stealthT=0; victim.dashT=0; victim.invuln=0;
+  victim.alive=false; victim.stealthT=0; victim.dashT=0; victim.invuln=0;
   // whatever you carried always drops, on every death — that is what keeps the money moving
   // The pouch now goes straight to whoever put them down, in both games. Dropping it as a bag in
   // MAXWIN meant walking back through the fight you had just won to collect it, and often
@@ -4179,14 +4281,13 @@ function respawn(e){
   for(let t=0;t<40;t++){
     const a=alea()*Math.PI*2, r=alea()*Math.max(2,G.zone.r-3);
     const nx=clamp(G.zone.cx+Math.cos(a)*r,2,N-2), nz=clamp(G.zone.cz+Math.sin(a)*r,2,N-2);
-    if(!free(nx,nz)) continue;
+    if(!free(G,nx,nz)) continue;
     let nearest=1e9;
     for(const o of G.ents){ if(o===e||!o.alive||o.team===e.team) continue; nearest=Math.min(nearest,Math.hypot(o.x-nx,o.z-nz)); }
     if(nearest>best){ best=nearest; x=nx; z=nz; if(nearest>14) break; }
   }
   e.x=x; e.z=z; e.vx=0; e.vz=0; e.alive=true; e.hp=maxHp(e); e.ammo=3; e.ammoT=0; e.super=0;
-  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.lastOp=-1; e.gadget=C.smokeStart();
-  e.mesh.visible=true; e.mesh.position.set(x,0,z);
+  e.respawnT=0; e.invuln=C.RESPAWN_SHIELD; e.lastDamageT=G.time; e.gadget=C.smokeStart();
   if(e.isPlayer){ $('respawn').style.display='none'; floatText(e,'RESPAWN','heal'); G.camT.set(x,0,z); }
 }
 function feed(txt,hi){ const d=document.createElement('div');
@@ -4221,30 +4322,29 @@ function findCover(b,t){
     for(const rad of [4,7,10]){
       const nx=b.x+Math.cos(a)*rad, nz=b.z+Math.sin(a)*rad;
       if(nx<2||nz<2||nx>N-2||nz>N-2) continue;
-      if(!free(nx,nz)||!inZone(nx,nz,2.5)) continue;
-      const hidden=!losClear(nx,nz,t.x,t.z), bush=cellAt(nx,nz)===2;
+      if(!free(G,nx,nz)||!inZone(G,nx,nz,2.5)) continue;
+      const hidden=!losClear(G,nx,nz,t.x,t.z), bush=cellAt(G,nx,nz)===2;
       if(!hidden&&!bush) continue;
       const sc=(hidden?3:0)+(bush?2.2:0)+Math.hypot(nx-t.x,nz-t.z)*0.07-rad*0.06;
       if(sc>bs){ bs=sc; best={x:nx,z:nz}; }
     } }
   return best;
 }
-function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(b,e)){ bd=d; best=e; } }
+function findTarget(b){ if(G.time<C.GRACE) return null; let best=null,bd=C.BOT.sight+ (b.brawler.id==='hex'?4:0); for(const e of G.ents){ if(e===b||!e.alive||e.team===b.team||e.stealthT>0) continue; const d=Math.hypot(e.x-b.x,e.z-b.z); if(d<bd&&canSee(G,b,e)){ bd=d; best=e; } }
   // Nothing in sight, but somebody is shooting: turn and face them. Sight stops at 14 blocks
   // while HEX reaches 15 and BOLT 11, so a bot could be shot from outside its own awareness and
   // just stand there — which is what made them read as asleep until you walked up to them.
   if(!best&&b.lastHitBy&&b.lastHitBy.alive&&b.lastHitBy.team!==b.team&&G.time-b.lastDamageT<4) best=b.lastHitBy;
   return best; }
-function inZone(x,z,m){ return Math.hypot(x-G.zone.cx,z-G.zone.cz)<G.zone.r-(m||0); }
 function pickGoal(b){
   // Anything this bot already wedged itself against is off the list. Without that, the nearest
   // crate is nearest every time it asks, so a bot walled off from one was handed the same
   // unreachable goal every eight seconds and spent the whole match facing a rock.
   const bad=b.badGoals;
   let best=null,bd=22;
-  for(const pk of G.pickups){ if(bad&&bad.has(pk)) continue; const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
+  for(const pk of G.pickups){ if(bad&&bad.has(pk)) continue; const d=Math.hypot(pk.x-b.x,pk.z-b.z); if(d<bd&&inZone(G,pk.x,pk.z,1)){ bd=d; best={x:pk.x,z:pk.z,pick:pk}; } }
   if(best) return best; bd=34;
-  for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
+  for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(G,bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
   if(best) return best;
   const alea=G.alea('bots/objectif');
   if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(alea()-0.5)*4,z:mate.z+(alea()-0.5)*4}; }
@@ -4255,11 +4355,11 @@ function botUpdate(b,dt){
   // Belt and braces. If a brawler is somehow standing where its body does not fit, tryMove()
   // refuses both axes and nothing it decides can ever move it — it just stares at the wall,
   // unshootable, for the rest of the match. Lift it to the nearest spot that does fit.
-  if(!free(b.x,b.z)){
+  if(!free(G,b.x,b.z)){
     for(let ring=1;ring<=6;ring++){ let done=false;
       for(let k=0;k<12&&!done;k++){ const a=k/12*Math.PI*2;
         const nx=b.x+Math.cos(a)*ring*0.5, nz=b.z+Math.sin(a)*ring*0.5;
-        if(free(nx,nz)){ b.x=nx; b.z=nz; b.vx=0; b.vz=0; done=true; } }
+        if(free(G,nx,nz)){ b.x=nx; b.z=nz; b.vx=0; b.vz=0; done=true; } }
       if(done) break; }
   }
   if(G.modeCfg.cashout){ b.cashLock=Math.max(0,(b.cashLock||0)-dt);
@@ -4276,9 +4376,9 @@ function botUpdate(b,dt){
   if(b.cover){
     b.coverT-=dt;
     const near=b.target&&Math.hypot(b.target.x-b.x,b.target.z-b.z)<b.brawler.attack.range*0.6;
-    if(b.hp>=maxHp(b)*returnAt||b.coverT<=0||near||!inZone(b.x,b.z,1.5)) b.cover=null;
+    if(b.hp>=maxHp(b)*returnAt||b.coverT<=0||near||!inZone(G,b.x,b.z,1.5)) b.cover=null;
   }
-  if(!inZone(b.x,b.z,1.5)){ mx=G.zone.cx-b.x; mz=G.zone.cz-b.z; b.cover=null; }
+  if(!inZone(G,b.x,b.z,1.5)){ mx=G.zone.cx-b.x; mz=G.zone.cz-b.z; b.cover=null; }
   else if(b.cover){
     const dc=Math.hypot(b.cover.x-b.x,b.cover.z-b.z);
     if(dc>0.8){ mx=(b.cover.x-b.x)/dc; mz=(b.cover.z-b.z)/dc; }
@@ -4337,9 +4437,9 @@ function botUpdate(b,dt){
       else if(sp.kind==='turret'){ useSuper(b); }
       else if(inR) useSuper(b,d); }
   } else { if(b.brawler.super.kind==='heal'&&b.super>=b.brawler.super.cost&&b.hp<maxHp(b)*0.5) useSuper(b); }
-  if(!b.target&&inZone(b.x,b.z,1.5)&&b.goal){
+  if(!b.target&&inZone(G,b.x,b.z,1.5)&&b.goal){
     const d=Math.hypot(b.goal.x-b.x,b.goal.z-b.z);
-    if(b.goal.box){ const bx=b.goal.box; if(d<atk.range*0.9&&losClear(b.x,b.z,bx.x,bx.z)){ b.ax=(bx.x-b.x)/d; b.az=(bx.z-b.z)/d; if(b.fireCd<=0&&b.ammo>=1){ attack(b,b.ax,b.az,d); b.fireCd=0.5; } if(d>1.6){ mx=b.ax; mz=b.az; } } else { mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; } }
+    if(b.goal.box){ const bx=b.goal.box; if(d<atk.range*0.9&&losClear(G,b.x,b.z,bx.x,bx.z)){ b.ax=(bx.x-b.x)/d; b.az=(bx.z-b.z)/d; if(b.fireCd<=0&&b.ammo>=1){ attack(b,b.ax,b.az,d); b.fireCd=0.5; } if(d>1.6){ mx=b.ax; mz=b.az; } } else { mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; } }
     else if(d>0.5){ mx=(b.goal.x-b.x)/d; mz=(b.goal.z-b.z)/d; }
     if(Math.hypot(mx,mz)>0.01&&!b.goal.box){ b.ax=mx; b.az=mz; }
   }
@@ -4354,9 +4454,9 @@ function botUpdate(b,dt){
   // Blocked ahead: slide along the wall. When neither side is open, keep the blocked vector
   // instead of zeroing it — tryMove() applies the axes separately, so a direction that fails as
   // a pair still slides on one of them. Stopping dead here is what pinned bots to the stone.
-  if(wanted&&!free(b.x+mx*0.9,b.z+mz*0.9)){
+  if(wanted&&!free(G,b.x+mx*0.9,b.z+mz*0.9)){
     const s=(b.id>0.5?1:-1), tx=-mz*s, tz=mx*s;
-    if(free(b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; }
+    if(free(G,b.x+tx*0.9,b.z+tz*0.9)){ mx=tx; mz=tz; }
     else { mx=-tx; mz=-tz; }
   }
   // Progress watchdog. Sliding sideways is not enough on its own: pickGoal() hands back the
@@ -4374,12 +4474,12 @@ function botUpdate(b,dt){
     // sweep sixteen headings, take the most open one that still points roughly where it wanted
     let best=null,bs=-1e9;
     for(let k=0;k<16;k++){ const a=k/16*Math.PI*2, ex=Math.cos(a), ez=Math.sin(a);
-      if(!free(b.x+ex*1.3,b.z+ez*1.3)) continue;
-      const sc=(ex*wx+ez*wz)+(free(b.x+ex*2.6,b.z+ez*2.6)?1.5:0);
+      if(!free(G,b.x+ex*1.3,b.z+ez*1.3)) continue;
+      const sc=(ex*wx+ez*wz)+(free(G,b.x+ex*2.6,b.z+ez*2.6)?1.5:0);
       if(sc>bs){ bs=sc; best=[ex,ez]; } }
     if(best){ b.escX=best[0]; b.escZ=best[1]; b.escapeT=0.8; mx=best[0]; mz=best[1]; }
   }
-  moveEntity(b,mx,mz,dt);
+  moveEntity(G,b,mx,mz,dt);
 }
 
 // ---------- zone ----------
@@ -4405,7 +4505,7 @@ function zoneUpdate(dt){
   if(!z.shrinking && z.phase<ph.length && !z.warned && z.timer<=3){ z.warned=true; zoneAlarm(); }
   G.zoneMesh.position.x=z.cx; G.zoneMesh.position.z=z.cz; G.zoneMesh.scale.set(z.r,1,z.r); G.gasFloor.position.x=z.cx; G.gasFloor.position.z=z.cz; G.gasFloor.scale.set(z.r,z.r,1);
   for(let i=0;i<G.gasParts.length;i++){ const gp=G.gasParts[i]; if(!gp.mesh.visible) continue; gp.a+=gp.sp*dt; const R=z.r+gp.off; gp.mesh.position.set(z.cx+Math.cos(gp.a)*R, 0.8+Math.sin(G.time*1.6+gp.ph)*0.5, z.cz+Math.sin(gp.a)*R); gp.mesh.rotation.y+=dt*0.6; }
-  for(const e of G.ents){ if(e.alive&&!inZone(e.x,e.z,0)){ e.hp-=z.dps*maxHp(e)*dt; e.lastDamageT=G.time; e.gasT=(e.gasT||0)-dt;
+  for(const e of G.ents){ if(e.alive&&!inZone(G,e.x,e.z,0)){ e.hp-=z.dps*maxHp(e)*dt; e.lastDamageT=G.time; e.gasT=(e.gasT||0)-dt;
     if(e.gasT<=0){ e.gasT=1; floatText(e,'-'+Math.round(z.dps*maxHp(e)),e.isPlayer?'you':''); if(e.isPlayer) snd('hurt',0.1); }
     if(e.isPlayer) e.gasHurt=true; if(G.modeCfg.cashout) e.cashLock=C.CASHOUT.lock; if(e.hp<=0) kill(e,e.lastHitBy&&e.lastHitBy.alive?e.lastHitBy:null,'gas'); } }
 }
@@ -4512,7 +4612,7 @@ function buildQualityUI(){
 }
 function pause(){ if(!G||!G.running) return; buildQualityUI(); updateQualityUI(); musicStop(); T.move=null; T.aim=null; T.superT=null; T.gadgetT=null; gadgetHover=false; gDownAt=-1; $('stickL').style.display='none'; $('stickR').style.display='none'; $('pauseTitle').textContent='PAUSED'; $('pauseMsg').textContent='Click to resume. Esc also toggles.'; G.paused=true; mouse.down=false; for(const k in keys) keys[k]=false; $('pause').style.display='grid'; }
 function mouseWorld(){ raycaster.setFromCamera(mouse,camera); const p=new THREE.Vector3(); return raycaster.ray.intersectPlane(groundPlane,p)?p:null; }
-function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(p,p.ax,p.az,d); } }
+function autoAim(){ const p=G.player; let best=null,bd=p.brawler.attack.range; for(const e of G.ents){ if(e===p||!e.alive||e.team===p.team) continue; const d=Math.hypot(e.x-p.x,e.z-p.z); if(d<bd&&canSee(G,p,e)){ bd=d; best=e; } } if(best){ const d=bd; p.ax=(best.x-p.x)/d; p.az=(best.z-p.z)/d; attack(p,p.ax,p.az,d); } }
 
 // ---------- player ----------
 function playerUpdate(dt){
@@ -4537,7 +4637,7 @@ function playerUpdate(dt){
   if(dashUpdate(p,dt)) return;
   let mx=(keys.KeyD?1:0)-(keys.KeyA?1:0), mz=(keys.KeyS?1:0)-(keys.KeyW?1:0);
   if(T.move){ mx=T.move.dx/STICK_R; mz=T.move.dy/STICK_R; }
-  moveEntity(p,mx,mz,dt);
+  moveEntity(G,p,mx,mz,dt);
   if(mouse.down){ mouse.held+=dt; if(mouse.held>HOLD_REPEAT) attack(p,p.ax,p.az,G.aimDist); }
   // aim guide
   p.fireCd=Math.max(0,(p.fireCd||0)-dt);
@@ -4618,12 +4718,12 @@ function commonUpdate(e,dt){
     }
   } else if(e.isPlayer) e.healAcc=0;
   if(e.emoteT>0) e.emoteT-=dt;
-  if(e.invuln>0){ e.invuln-=dt; e.mesh.visible = e.invuln<=0 || Math.floor(G.time*10)%2===0; }
-  if(e.flash>0){ e.flash-=dt; e.mesh.children[0].material.emissive.setHex(0x661111); } else e.mesh.children[0].material.emissive.setHex(0x000000);
+  // Le clignotement de l'invulnerabilite et l'eclat rouge d'un coup encaisse ne se decident plus
+  // ici : ce sont deux lectures de `invuln` et de `flash`, et `syncMeshes()` les fait une fois par
+  // image. Ce qui reste de ces deux lignes est leur seule part de simulation, le decompte.
+  if(e.invuln>0) e.invuln-=dt;
+  if(e.flash>0) e.flash-=dt;
   for(let i=G.pickups.length-1;i>=0;i--){ const pk=G.pickups[i]; if(Math.hypot(pk.x-e.x,pk.z-e.z)<0.9) collect(e,pk); }
-  // bush fade
-  const hide=obscured(G.player,e), op=hide?0:(e.stealthT>0?(e.isPlayer?0.35:0.18):(inBush(e)?0.55:1));
-  if(e.lastOp!==op){ e.lastOp=op; e.mesh.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
 }
 
 // ---------- emotes ----------
@@ -4764,7 +4864,7 @@ function hudFast(){
   G.riche=riche;
   for(const e of G.ents){
     if(!e.lbl){ e.lbl=document.createElement('div'); e.lbl.className='lbl'+(e.isPlayer?' you':(e.team===G.player.team?' ally':'')); e.lbl.innerHTML=`<div class="emo"></div><span class="nm"></span><span class="cubes"></span><div class="bar"><i></i><b></b></div>`+(e.isPlayer?'<div class="am"><i></i><i></i><i></i></div>':'')+'<span class="mn"></span>'; L.appendChild(e.lbl); }
-    const hidden=!e.alive||obscured(p,e); if(hidden){ e.lbl.style.display='none'; continue; }
+    const hidden=!e.alive||obscured(G,p,e); if(hidden){ e.lbl.style.display='none'; continue; }
     const s=toScreen(e.x,2.4,e.z); if(!s.ok||s.sx<-80||s.sx>innerWidth+80||s.sy<-40||s.sy>innerHeight+40){ e.lbl.style.display='none'; continue; }
     e.lbl.style.display='block'; e.lbl.style.left=s.sx+'px'; e.lbl.style.top=s.sy+'px';
     const bub=e.lbl.children[0], showing=e.emoteT>0;
@@ -5096,17 +5196,17 @@ function startMatch(stake){
   G.zonePlan=C.zonePlan(seed,mode);
   G.zone={cx:G.zonePlan.startCx,cz:G.zonePlan.startCz,r:G.zonePlan.startR,phase:0,timer:G.zonePlan.phases[0].waitS,shrinking:false,warned:false,dps:0};
   const aleaCaisses=G.alea('butin/position'), aleaBots=G.alea('bots/identite');
-  for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(aleaCaisses()*(N-6))+0.5; z=3+Math.floor(aleaCaisses()*(N-6))+0.5; t++; }while((cellAt(x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
+  for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(aleaCaisses()*(N-6))+0.5; z=3+Math.floor(aleaCaisses()*(N-6))+0.5; t++; }while((cellAt(G,x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
     const mesh=makeCrate(); mesh.position.set(x,0,z);  world.add(mesh); G.boxes.push({x,z,hp:C.BOX_HP,mesh,ph:aleaCaisses()*6.283}); }
   // Le nom d'un bot EN PARTIE fait partie de son identite : il apparait dans le kill feed et dans
   // le rapport de fin. Celui du sas d'attente, lui, reste cosmetique et garde Math.random.
-  const pts=spawnPoints(G.alea('apparition'),mode.teams,mode.teamSize), names=C.melangeSeme(BOT_NAMES.slice(),aleaBots), bids=Object.keys(B);
+  const pts=spawnPoints(G,G.alea('apparition'),mode.teams,mode.teamSize), names=C.melangeSeme(BOT_NAMES.slice(),aleaBots), bids=Object.keys(B);
   const playerSlot=pts.findIndex(pt=>pt.team===0);
   let ni=0;
-  pts.forEach((pt,i)=>{ if(i===playerSlot){ G.player=makeEntity(profile.name,pt.x,pt.z,stake,true,B[selBrawler],0,0); G.ents.push(G.player); }
+  pts.forEach((pt,i)=>{ if(i===playerSlot){ G.player=spawnEntity(profile.name,pt.x,pt.z,stake,true,B[selBrawler],0,0); G.ents.push(G.player); }
     else { const br=B[bids[Math.floor(aleaBots()*bids.length)]]; let nm=names[ni%names.length]+(ni>=names.length?'-2':''); ni++;
       if(nm===profile.name) nm+='2';                        // never two of you on the same map
-      G.ents.push(makeEntity(nm,pt.x,pt.z,stake,false,br,tier.acc*(0.85+aleaBots()*0.3),pt.team)); } });
+      G.ents.push(spawnEntity(nm,pt.x,pt.z,stake,false,br,tier.acc*(0.85+aleaBots()*0.3),pt.team)); } });
   // --- aim indicator, Brawl-Stars style: a cone on the ground showing exactly where the shot goes ---
   {
     const atk=G.player.brawler.attack, sup=G.player.brawler.super;
@@ -5495,6 +5595,11 @@ function loop(now){
   if(G.running&&!G.paused){
     const s=C.simSteps(simReste,dtSim); simReste=s.reste;
     for(let i=0;i<s.pas;i++) simPas();
+    // L'UNIQUE recopie de l'etat des entites vers la scene, et elle se fait ici : une fois par
+    // image, apres les pas de ce tour. Un pas que personne ne verra n'a aucune raison de toucher
+    // au rendu, et un seul ecrivain est ce qui empeche une seconde copie de s'installer du cote
+    // que rien n'execute.
+    syncMeshes();
   }
   // Une pause ne se rattrape pas : l'accumulateur repart de zero, sans quoi la reprise executerait
   // d'un coup tous les pas d'un jeu qui ne tournait pas.

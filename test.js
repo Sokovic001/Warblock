@@ -5,6 +5,16 @@ const GAME = process.env.WARBLOCK_FILE || 'index.html';
 const html = fs.readFileSync(path.join(__dirname, GAME), 'utf8');
 const core = html.slice(html.indexOf('/*CORE-START*/'), html.indexOf('/*CORE-END*/'));
 const mod = { exports: {} }; new Function('module', 'exports', core)(mod, mod.exports); const C = mod.exports;
+// Le bloc SIM se charge comme CORE : il reçoit `WBCore` en paramètre, exactement comme le
+// navigateur le lui donne en variable globale. C'est le même texte, chargé deux fois — c'est ce
+// qui rend l'invariant « une seule copie de chaque règle » vérifiable.
+const sim = html.slice(html.indexOf('/*SIM-START*/'), html.indexOf('/*SIM-END*/'));
+const chargerSim = (WBCore, MathUtil) => {
+  const m = { exports: {} };
+  new Function('module', 'exports', 'WBCore', 'Math', sim)(m, m.exports, WBCore, MathUtil || Math);
+  return m.exports;
+};
+const SIMU = chargerSim(C);
 let passed = 0;
 const eff = b => b.attack.n * (b.attack.dmgFar ? (b.attack.dmg+b.attack.dmgFar)/2 : b.attack.dmg); // hex: mean over range
 function test(name, fn){ try { fn(); passed++; console.log('  ✓', name); } catch (e) { console.log('  ✗', name, '\n    ', e.message); process.exitCode = 1; } }
@@ -33,7 +43,12 @@ test('chaque bloc <script> du fichier est du JavaScript valide', () => {
   while ((m = re.exec(html))) { new vm.Script(m[1], { filename: `bloc${n}.js` }); n++; }
   // Le compte vaut d'être gardé : il attrape aussi une balise `</script>` cassée, qui ferait
   // disparaître un bloc entier de la recherche et passer pour « rien à vérifier ».
-  assert.strictEqual(n, 2, 'index.html doit contenir exactement deux blocs <script> internes : WBCore et Game');
+  assert.strictEqual(n, 3, 'index.html doit contenir exactement trois blocs <script> internes : WBCore, SIM et Game');
+  // Et le fichier reste UNIQUE : le bloc SIM est un bloc interne, pas un fichier à côté. Un
+  // `src=` qui pointerait vers un .js local casserait la promesse du projet — on ouvre le fichier
+  // et on joue — sans qu'aucun test ne s'en aperçoive, puisque le jeu marcherait encore en local.
+  for (const m2 of html.matchAll(/<script[^>]*\bsrc="([^"]*)"/g))
+    assert.ok(/^https?:\/\//.test(m2[1]), `un script local est chargé à côté du fichier : ${m2[1]}`);
 });
 
 console.log('Economy');
@@ -2412,10 +2427,13 @@ test('le verdict est nommé pour ce qu\'il est : une enveloppe de plausibilité,
 console.log('Le jeu prend son billet, et sait s\'en passer');
 // Le bloc Game n'est pas testable ici : il lui faut un navigateur. Ce qui EST testable, c'est la
 // décision qu'il délègue — et le fait qu'il la délègue vraiment. Les tests de forme ci-dessous
-// lisent donc le texte du fichier après /*CORE-END*/ : ils ne prouvent pas que le jeu tourne, ils
+// lisent donc le texte du fichier après /*SIM-END*/ : ils ne prouvent pas que le jeu tourne, ils
 // prouvent qu'aucune règle n'a été recopiée à côté de celle qui est testée. La seule preuve que
 // le jeu tourne reste un humain qui joue une partie.
-const JEU = html.slice(html.indexOf('/*CORE-END*/'));
+// `JEU` s'arrête à SIM-END et non plus à CORE-END : le bloc SIM, lui, s'exécute pour de vrai dans
+// ce fichier, et le mélanger au texte du bloc `Game` ferait passer une garde textuelle pour une
+// preuve sur du code qui, lui, est éprouvé autrement.
+const JEU = html.slice(html.indexOf('/*SIM-END*/'));
 test('un billet qui décrit une autre table ne se joue pas : la graine locale reprend la main', () => {
   // Le serveur n'ouvre qu'un billet à la fois et rend le billet déjà ouvert quelle que soit la
   // table redemandée. Quitter le sas puis revenir sur une autre table laisse donc en main un
@@ -2838,10 +2856,10 @@ console.log('La frontière du hasard : où Math.random est interdit, où il est 
 // simulation : un `Math.random(` y est un fait de partie que le serveur ne pourra pas refaire. La
 // seconde nomme celles qui le gardent, pour que personne ne « corrige » plus tard une frontière
 // qui est un CHOIX. Sans la seconde liste, la première se lirait comme un travail inachevé.
-const corpsDe = nom => {
-  const d = JEU.indexOf('\nfunction ' + nom + '(');
-  assert.ok(d >= 0, `${nom} n'a pas été retrouvée dans le bloc Game`);
-  const lignes = JEU.slice(d + 1).split('\n'), out = [lignes[0]];
+const corpsDansBloc = (bloc, nom) => {
+  const d = bloc.indexOf('\nfunction ' + nom + '(');
+  assert.ok(d >= 0, `${nom} n'a pas été retrouvée`);
+  const lignes = bloc.slice(d + 1).split('\n'), out = [lignes[0]];
   for (let i = 1; i < lignes.length; i++) {
     const l = lignes[i];
     if (l && !/^[\s}]/.test(l)) break;          // une nouvelle déclaration de premier niveau
@@ -2849,6 +2867,16 @@ const corpsDe = nom => {
     if (l === '}') break;                       // la fermeture d'une fonction multi-lignes
   }
   return out.join('\n');
+};
+// Le chemin de simulation vit désormais dans DEUX blocs : celles des fonctions qui sont déjà
+// descendues dans SIM, et celles qui attendent encore leur module. On cherche dans les deux, et on
+// exige qu'exactement un des deux la déclare. Deux déclarations, ce serait le patron du
+// `respawn()` défini deux fois — la copie vivante finit du côté que rien n'exécute.
+const corpsDe = nom => {
+  const dansSim = sim.includes('\nfunction ' + nom + '('), dansJeu = JEU.includes('\nfunction ' + nom + '(');
+  assert.ok(dansSim !== dansJeu,
+    `${nom} est déclarée ${dansSim && dansJeu ? 'DANS LES DEUX blocs' : 'dans aucun des deux blocs'}`);
+  return corpsDansBloc(dansSim ? sim : JEU, nom);
 };
 const sansCommentaires = t => t.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
 const compte = (t, motif) => (t.match(motif) || []).length;
@@ -2900,12 +2928,12 @@ test('chaque usage tire dans le flux qui porte son nom', () => {
       assert.ok(corps.includes(`'${f}'`), `${nom} ne tire plus dans le flux ${f}`);
   }
   // `spawnPoints` reçoit son flux de l'appelant : c'est celui des apparitions, et pas un autre.
-  assert.match(sansCommentaires(corpsDe('startMatch')), /spawnPoints\(G\.alea\('apparition'\)/);
+  assert.match(sansCommentaires(corpsDe('startMatch')), /spawnPoints\(G,\s*G\.alea\('apparition'\)/);
   // Et AUCUN site d'appel du jeu ne demande un nom qui n'existe pas. `makeFlux` lance sur un nom
   // inconnu, mais seulement quand la ligne s'exécute : une faute de frappe dans une branche rare —
   // le fumigène d'un bot acculé — n'apparaîtrait qu'en pleine partie, chez un joueur. Ici elle
   // tombe à l'intégration continue, pour tous les sites à la fois.
-  const demandes = sansCommentaires(JEU).match(/G\.alea\('([^']*)'\)/g) || [];
+  const demandes = sansCommentaires(sim + JEU).match(/G\.alea\('([^']*)'\)/g) || [];
   assert.ok(demandes.length >= 10, `seulement ${demandes.length} sites d'appel trouvés : l'extraction a dû rater`);
   for (const d of demandes)
     assert.ok(C.FLUX.includes(d.slice(8, -2)), `${d} demande un flux qui n'existe pas`);
@@ -2960,32 +2988,38 @@ test('garde textuelle : aucune transcendante dans generateMap, generateBiomes, z
   for (const [dx, dz] of [[3, 4], [0, 0], [-7.5, 12.25], [152, 152]])
     assert.strictEqual(C.dist(dx, dz), Math.sqrt(dx * dx + dz * dz), `dist(${dx},${dz})`);
 });
-// Un `free()` conforme à celui du jeu : le corps du brawler fait 0,42 de demi-largeur, et ce sont
-// ses QUATRE coins qui doivent tenir sur du sol praticable. Un centre sur du vide et un coin dans
-// le mur, et le brawler ne bouge plus de la partie.
-assert.ok(JEU.includes('const R=0.42;'), 'le rayon du corps a changé dans le jeu : ce test le suppose');
+// Un `free()` conforme à celui du jeu, réécrit ici EXPRÈS. Le corps du brawler fait 0,42 de
+// demi-largeur, et ce sont ses QUATRE coins qui doivent tenir sur du sol praticable. Un centre sur
+// du vide et un coin dans le mur, et le brawler ne bouge plus de la partie. Vérifier le placement
+// avec le `free()` du jeu prouverait seulement que le jeu est d'accord avec lui-même ; cette copie
+// est une seconde opinion, et elle est comparée à l'originale juste en dessous.
+assert.strictEqual(SIMU.R, 0.42, 'le rayon du corps a changé dans le jeu : ce test le suppose');
 const libreSur = (cells, N) => {
   const bloque = (x, z) => { const xi = Math.floor(x), zi = Math.floor(z);
     return (xi < 0 || zi < 0 || xi >= N || zi >= N) ? true : C.BLOCKING(cells[xi * N + zi]); };
   return (x, z) => !bloque(x - 0.42, z - 0.42) && !bloque(x + 0.42, z - 0.42)
                 && !bloque(x - 0.42, z + 0.42) && !bloque(x + 0.42, z + 0.42);
 };
-// `spawnPoints` vit dans le bloc `Game`, donc hors de tout ce que ce fichier charge. On l'exécute
-// quand même : sa source est extraite du fichier et fermée sur ce dont elle a besoin — `C`, `N` et
-// `free`. C'est du vrai code du jeu qui tourne, pas une récitation.
-const faireSpawnPoints = (S, MathUtil) =>
-  new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
-    .call(null, S, S.MAP, libreSur(S.generateMap(0), S.MAP), MathUtil);
-test('spawnPoints place un corps entier, sur toutes les graines et tous les modes', () => {
-  // L'invariant que la correction du point d'apparition avait gagné sans laisser de test : un
-  // centre sur du sol libre ne suffit pas, il faut que les quatre coins du corps tiennent.
+// `spawnPoints` est descendue dans le bloc SIM : elle s'appelle désormais telle quelle, sur un
+// état de partie réduit à ce dont elle a besoin. Plus d'extraction de source, plus de `free`
+// injecté — c'est le vrai code du jeu, chargé comme le navigateur le charge.
+const faireSpawnPoints = (S, MathUtil) => {
+  const SS = MathUtil ? chargerSim(S, MathUtil) : SIMU;
+  return (cells, rng, teams, teamSize) => SS.spawnPoints({ cells }, rng, teams, teamSize);
+};
+test('spawnPoints place un corps entier, sur deux cents graines et les cinq modes', () => {
+  // LE TEST DE NON-RÉGRESSION QUI MANQUAIT, et rien d'autre : le bug est corrigé dans le code
+  // depuis longtemps — `spawnPoints` balaie sur `free()` et non sur `isWall()`. Ce qui n'existait
+  // pas, c'est la preuve qu'il le reste. Un centre sur du sol libre ne suffit pas : il faut que
+  // les quatre coins du corps tiennent, sans quoi `tryMove()` refuse les deux axes et ce brawler
+  // ne bouge plus de la partie — ni ne peut être touché, les balles mourant sur le mur qu'il
+  // chevauche. Mesuré à l'époque : un bot par partie en moyenne, au moins un dans 69 % des cartes.
   const MODES = Object.values(C.MODES);
-  for (let graine = 0; graine < 40; graine++) {
+  const spawn = faireSpawnPoints(C);
+  for (let graine = 0; graine < 200; graine++) {
     const cells = C.generateMap(graine), libre = libreSur(cells, C.MAP);
-    const spawnPoints = new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
-      .call(null, C, C.MAP, libre, Math);
     for (const mode of MODES) {
-      const pts = spawnPoints(C.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+      const pts = spawn(cells, C.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
       assert.strictEqual(pts.length, mode.teams * mode.teamSize, `graine ${graine} ${mode.id}`);
       for (const p of pts) {
         assert.ok(libre(p.x, p.z), `graine ${graine} ${mode.id} : un corps ne tient pas en ${p.x},${p.z}`);
@@ -3010,17 +3044,15 @@ test('bac à sable : la géométrie de la graine tourne alors que les transcenda
   // Une carte entièrement murée force le balayage de repli de spawnPoints, celui qui cherche un
   // creux en tournant puis en rentrant — la branche qu'aucune graine réelle n'exerce à coup sûr.
   const muree = new Uint8Array(S.MAP * S.MAP).fill(1);
-  const spawnMure = new Function('C', 'N', 'free', 'Math', corpsDe('spawnPoints') + '\nreturn spawnPoints;')
-    .call(null, S, S.MAP, libreSur(muree, S.MAP), piege);
   const spawn = faireSpawnPoints(S, piege);
   mordant = true;
   try {
     for (let graine = 0; graine < 6; graine++) {
       S.generateBiomes(graine);
-      S.generateMap(graine);
+      const cells = S.generateMap(graine);
       for (const mode of Object.values(S.MODES)) {
-        spawn(S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
-        spawnMure(S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+        spawn(cells, S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+        spawn(muree, S.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
         const plan = S.zonePlan(graine, mode);
         for (let t = 0; t <= 220; t += 3) S.zoneAt(plan, t);
       }
@@ -3086,31 +3118,228 @@ test('même graine, mêmes bots et mêmes points de départ — deux fois, et da
                                 return Array.from({ length: 40 }, () => r()); };
   assert.deepStrictEqual(identites(4242), identites(4242));
   assert.notDeepStrictEqual(identites(4242), identites(4243));
-  const spawn = faireSpawnPoints(C, Math);
-  const depart = graine => spawn(C.makeFlux(graine)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize);
+  const spawn = faireSpawnPoints(C);
+  const cells0 = C.generateMap(0);
+  const depart = graine => spawn(cells0, C.makeFlux(graine)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize);
   assert.deepStrictEqual(depart(4242), depart(4242));
   const attendu = JSON.stringify({ identites: identites(4242), depart: depart(4242) });
   const dehors = require('child_process').execFileSync(process.execPath, ['-e', `
     const fs = require('fs');
     const html = fs.readFileSync(process.env.WB_FICHIER, 'utf8');
     const bloc = html.slice(html.indexOf('/*CORE-' + 'START*/'), html.indexOf('/*CORE-' + 'END*/'));
-    const jeu = html.slice(html.indexOf('/*CORE-' + 'END*/'));
+    const sim = html.slice(html.indexOf('/*SIM-' + 'START*/'), html.indexOf('/*SIM-' + 'END*/'));
     const m = { exports: {} }; new Function('module', 'exports', bloc)(m, m.exports);
     const C = m.exports;
-    const d = jeu.indexOf('\\nfunction spawnPoints(');
-    const src = jeu.slice(d + 1, jeu.indexOf('\\n}\\n', d) + 3);
-    const bloque = (cells, N, x, z) => { const xi = Math.floor(x), zi = Math.floor(z);
-      return (xi < 0 || zi < 0 || xi >= N || zi >= N) ? true : C.BLOCKING(cells[xi * N + zi]); };
-    const cells = C.generateMap(0);
-    const free = (x, z) => !bloque(cells, C.MAP, x - 0.42, z - 0.42) && !bloque(cells, C.MAP, x + 0.42, z - 0.42)
-                        && !bloque(cells, C.MAP, x - 0.42, z + 0.42) && !bloque(cells, C.MAP, x + 0.42, z + 0.42);
-    const spawnPoints = new Function('C', 'N', 'free', src + '\\nreturn spawnPoints;')(C, C.MAP, free);
+    const s = { exports: {} }; new Function('module', 'exports', 'WBCore', sim)(s, s.exports, C);
+    const G = { cells: C.generateMap(0) };
     const r = C.makeFlux(4242)('bots/identite');
     process.stdout.write(JSON.stringify({
       identites: Array.from({ length: 40 }, () => r()),
-      depart: spawnPoints(C.makeFlux(4242)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize) }));
+      depart: s.exports.spawnPoints(G, C.makeFlux(4242)('apparition'), C.MODES.duo.teams, C.MODES.duo.teamSize) }));
   `], { encoding: 'utf8', env: Object.assign({}, process.env, { WB_FICHIER: path.join(__dirname, GAME) }) });
   assert.strictEqual(dehors, attendu, 'un processus neuf ne rejoue pas les mêmes bots ni les mêmes départs');
+});
+
+console.log('Le bloc SIM : l\'état et la grille sortent du rendu');
+// Le bloc SIM est le premier morceau du jeu, hors de WBCore, que ce fichier EXÉCUTE réellement.
+// Les trois gardes ci-dessous protègent la seule chose qui rende cela possible : qu'il ne dépende
+// de rien. La panne qu'elles empêchent est SILENCIEUSE — une attache au rendu qui survit, et le
+// bloc cesse de tourner dans Node sans que rien ne casse dans le navigateur.
+test('bac à sable : SIM se charge ET tourne sans document, window, THREE, Math.random, Date.now ni performance', () => {
+  const sansRandom = new Proxy(Math, { get: (t, p) => p === 'random' ? undefined : Reflect.get(t, p) });
+  const sansNow = new Proxy(Date, { get: (t, p) => p === 'now' ? undefined : Reflect.get(t, p) });
+  const bac = new Function('module', 'exports', 'WBCore', 'document', 'window', 'THREE', 'performance',
+                           'localStorage', 'fetch', 'requestAnimationFrame', 'Math', 'Date', sim);
+  const m = { exports: {} };
+  bac(m, m.exports, C, undefined, undefined, undefined, undefined, undefined, undefined, undefined, sansRandom, sansNow);
+  const Z = m.exports;
+  assert.strictEqual(typeof Z.moveEntity, 'function', 'le bloc ne s\'est pas chargé dans le bac à sable');
+  // Et il TOURNE là-dedans : le chargement seul prouverait seulement qu'aucune ligne de haut
+  // niveau ne touche à l'environnement.
+  const cells = C.generateMap(11);
+  const G = { cells, zone: { cx: C.MAP / 2, cz: C.MAP / 2, r: 40 }, smokes: [], alea: C.makeFlux(11), ents: [] };
+  const pts = Z.spawnPoints(G, C.makeFlux(11)('apparition'), 20, 1);
+  const e = Z.makeEntity(G, 'moi', pts[0].x, pts[0].z, 0.5, true, C.BRAWLERS.bolt, 0, 0);
+  const f = Z.makeEntity(G, 'lui', pts[1].x, pts[1].z, 0.5, false, C.BRAWLERS.hex, 0.8, 1);
+  // AUCUN pointeur de rendu ne survit dans une entité, même « le temps de la transition » : c'est
+  // exactement le patron du `respawn()` défini deux fois, et la copie vivante finirait du côté que
+  // rien n'exécute.
+  assert.ok(!('mesh' in e), 'une entité porte de nouveau un objet de la scène');
+  // `eid` est l'identifiant, et il est distinct pour chaque entité. `id`, lui, est la personnalité
+  // d'un bot : deux bots peuvent la partager, et le rendu qui s'en servirait mélangerait leurs corps.
+  assert.strictEqual(e.eid, 1); assert.strictEqual(f.eid, 2);
+  for (let i = 0; i < 30; i++) Z.moveEntity(G, e, 1, 0.3, C.SIM.stepS);
+  assert.ok(Z.free(G, e.x, e.z), 'une entité a fini là où son corps ne tient pas');
+  assert.strictEqual(typeof Z.canSee(G, e, f), 'boolean');
+  assert.strictEqual(Z.isWall(G, -1, -1), true, 'hors carte doit valoir mur');
+  assert.strictEqual(Z.inZone(G, C.MAP / 2, C.MAP / 2, 0), true);
+});
+test('garde textuelle : rien du rendu ne franchit les marqueurs du bloc SIM', () => {
+  // Garde PERMANENTE, commentaires compris — un commentaire qui parle de `mesh` est le premier pas
+  // vers une ligne qui en touche un. La liste est celle de docs/PHASE-02B.md, plus ce qui rendrait
+  // le bloc dépendant d'une horloge ou d'une entropie que le serveur ne peut pas refaire.
+  const INTERDITS = ['mesh', 'THREE', 'document', 'window', '$(', 'snd(', 'floatText(', 'feed(',
+                     'Math.random', 'Date.now', 'performance', 'localStorage', 'fetch(',
+                     'requestAnimationFrame', 'setTimeout', 'navigator'];
+  for (const i of INTERDITS)
+    assert.ok(!sim.includes(i), `« ${i} » a franchi les marqueurs du bloc SIM`);
+  // Et le bloc est bien celui qu'on croit : des marqueurs qui auraient glissé rendraient toutes
+  // les assertions ci-dessus vraies sur une chaîne vide.
+  assert.ok(sim.length > 3000 && sim.includes('function moveEntity('), 'le bloc SIM n\'a pas été retrouvé');
+});
+test('une seule copie de chaque règle : SIM appelle WBCore, il ne le recopie pas', () => {
+  // Le bloc reçoit WBCore comme le navigateur le lui donne, et s'en sert. S'il cessait de
+  // l'appeler, c'est qu'il aurait recopié une règle déjà testée ailleurs — le patron du
+  // `zoneUpdate` qui refaisait l'interpolation du gaz à la main.
+  for (const nom of ['C.BLOCKING', 'C.smokeSightBlocked', 'C.unitAt', 'C.smokeStart'])
+    assert.ok(sim.includes(nom), `SIM n'appelle plus ${nom} : la règle a-t-elle été recopiée ?`);
+  assert.ok(sim.includes('const C = WBCore'), 'SIM doit recevoir WBCore comme le fait le bloc Game');
+});
+test('un seul écrivain de corps d\'entité dans le bloc Game : syncMeshes, et rien d\'autre', () => {
+  // La garde qui manquait au `respawn()` défini deux fois, transposée. Les corps vivent dans une
+  // table annexe ; un seul site la lit pour écrire dans la scène, et un seul site appelle ce site.
+  const jeu = sansCommentaires(JEU);
+  assert.strictEqual(compte(jeu, /MESHES\.get\(/g), 1,
+    'un second site lit la table des corps : il y aurait deux écrivains, et la copie vivante finirait du côté que rien n\'exécute');
+  assert.ok(sansCommentaires(corpsDe('syncMeshes')).includes('MESHES.get('),
+    'l\'unique lecteur de la table doit être syncMeshes');
+  assert.strictEqual(compte(jeu, /\bsyncMeshes\(\)/g), 2,
+    'syncMeshes doit être déclarée une fois et appelée une fois — et depuis la boucle d\'image');
+  assert.ok(sansCommentaires(corpsDe('loop')).includes('syncMeshes();'),
+    'la recopie se fait une fois par image, pas une fois par pas de simulation');
+  // Et aucune fonction de simulation n'écrit plus dans un corps.
+  for (const nom of ['moveEntity', 'respawn', 'kill', 'botCashOut', 'dashUpdate', 'commonUpdate',
+                     'botUpdate', 'playerUpdate', 'makeEntity', 'simPas'])
+    assert.ok(!sansCommentaires(corpsDe(nom)).includes('.mesh'),
+      `${nom} touche de nouveau à un corps : l'unique écrivain est syncMeshes`);
+});
+
+// LE CORPUS GELÉ. Il a été capturé sur le code d'AVANT ce module, par un harnais qui extrayait du
+// bloc `Game` les fonctions de grille, de mouvement et de vue, les fermait sur un environnement
+// réduit et jouait la séquence rejouée ci-dessous. C'est la SEULE preuve écrite qu'un code a bougé
+// sans changer : les tests d'invariants, eux, diraient la même chose d'un code qui aurait changé
+// en restant juste.
+//
+// CE QU'IL COUVRE : la couche mouvement et grille, et elle seule — `cellAt`, `isWall`, `free`,
+// `tryMove`, `moveEntity`, `losClear`, `inZone`, `inBush`, `canSee`, `obscured`, les deux ponts
+// vers `smokeSightBlocked`, et `spawnPoints` sur les cinq modes. Les positions sont comparées
+// EXACTEMENT, sans tolérance : ce sont les mêmes opérations, dans le même ordre, sur le même
+// moteur.
+//
+// CE QU'IL NE COUVRE PAS, et il faut le dire : rien du combat, rien du butin, rien des bots, rien
+// du gaz, rien de ce que le joueur VOIT. Les entités y sont synthétiques — elles n'ont ni arme, ni
+// vie, ni objectif — et leurs directions sont scriptées, donc le corpus ne dit rien de la façon
+// dont le jeu choisit une direction. Il ne dit rien non plus du rendu : que `syncMeshes()` dessine
+// la même chose qu'avant n'est prouvé par aucun test, ici comme ailleurs, et ne peut l'être que
+// par un humain qui joue.
+const corpus = JSON.parse(fs.readFileSync(path.join(__dirname, 'corpus-grille.json'), 'utf8'));
+test('le code a bougé sans changer : le corpus gelé des requêtes de grille et du mouvement', () => {
+  assert.ok(corpus.parGraine.length >= 8, 'le corpus gelé est vide ou tronqué');
+  // Les entités du corpus, refaites à l'identique : `speed` et `id` sont des entrées, pas des
+  // tirages, pour que rien de ce qui est comparé ne dépende d'un flux de hasard.
+  const ent = (n, x, z, team, isPlayer) => ({
+    name: 'e' + n, x, z, team, isPlayer: !!isPlayer, vx: 0, vz: 0, ax: 0, az: -1,
+    knockx: 0, knockz: 0, speed: 3.2 + (n % 5) * 0.17, id: (n * 0.137) % 1,
+  });
+  for (const bloc of corpus.parGraine) {
+    const graine = bloc.graine, ou = m => `graine ${graine} · ${m}`;
+    const cells = C.generateMap(graine);
+    const z0 = C.zoneAt(C.zonePlan(graine, C.MODES.solo), 40);
+    const G = { cells, time: 0, smokes: [], zone: { cx: z0.cx, cz: z0.cz, r: z0.r } };
+    assert.deepStrictEqual([G.zone.cx, G.zone.cz, G.zone.r], bloc.zone, ou('le cercle de gaz'));
+
+    for (const mode of Object.values(C.MODES)) {
+      const pts = SIMU.spawnPoints(G, C.makeFlux(graine)('apparition'), mode.teams, mode.teamSize);
+      assert.deepStrictEqual(pts.map(p => [p.x, p.z, p.team]), bloc.depart[mode.id], ou('départs ' + mode.id));
+    }
+
+    const grille = [];
+    for (let i = 0; i < 40; i++) {
+      const x = (i * 3.77) % C.MAP, z = (i * 7.31 + 1.5) % C.MAP;
+      grille.push([x, z, SIMU.cellAt(G, x, z), SIMU.isWall(G, x, z) ? 1 : 0, SIMU.free(G, x, z) ? 1 : 0]);
+    }
+    for (const [x, z] of [[-1, -1], [0, 0], [C.MAP - 0.01, C.MAP - 0.01], [C.MAP, 0], [0, C.MAP], [75.5, 75.5]])
+      grille.push([x, z, SIMU.cellAt(G, x, z), SIMU.isWall(G, x, z) ? 1 : 0, SIMU.free(G, x, z) ? 1 : 0]);
+    assert.deepStrictEqual(grille, bloc.grille, ou('requêtes de grille'));
+
+    const pts = SIMU.spawnPoints(G, C.makeFlux(graine)('apparition'), 20, 1);
+    const ents = [];
+    for (let i = 0; i < 12; i++) ents.push(ent(i, pts[i].x, pts[i].z, i % 4, i === 0));
+    const mouvement = [], dt = C.SIM.stepS;
+    for (let pas = 0; pas < 100; pas++) {
+      G.time += dt;
+      for (let i = 0; i < ents.length; i++) {
+        const e = ents[i];
+        const a = (pas * (0.11 + i * 0.013) + i * 0.7);
+        const mx = Math.cos(a), mz = Math.sin(a * 1.3);
+        e.ax = mx; e.az = mz;
+        if (pas === 30 && i % 3 === 0) { e.knockx = 6 - i * 0.4; e.knockz = -4 + i * 0.3; }
+        SIMU.moveEntity(G, e, mx, mz, dt);
+      }
+      if (pas % 10 === 9) mouvement.push(ents.map(e => [e.x, e.z, e.vx, e.vz, e.knockx, e.knockz]));
+    }
+    assert.deepStrictEqual(mouvement, bloc.mouvement, ou('cent pas de moveEntity'));
+
+    const glissade = [];
+    for (let i = 0; i < 20; i++) {
+      const e = ent(100 + i, pts[i].x, pts[i].z, 0, false);
+      for (const [dx, dz] of [[0.9, 0], [0, 0.9], [-1.3, 1.3], [0.4, -2.2], [3, 3]]) SIMU.tryMove(G, e, dx, dz);
+      glissade.push([e.x, e.z]);
+    }
+    assert.deepStrictEqual(glissade, bloc.glissade, ou('glissement le long des murs'));
+    assert.deepStrictEqual(ents.map(e => [e.x, e.z, e.vx, e.vz, e.speed, e.id]), bloc.etats, ou('états finaux'));
+
+    const vue = [];
+    for (let i = 0; i < ents.length; i++) for (let j = 0; j < ents.length; j++) {
+      if (i === j) continue;
+      vue.push([i, j, SIMU.canSee(G, ents[i], ents[j]) ? 1 : 0, SIMU.obscured(G, ents[i], ents[j]) ? 1 : 0,
+                SIMU.losClear(G, ents[i].x, ents[i].z, ents[j].x, ents[j].z) ? 1 : 0,
+                SIMU.inBush(G, ents[j]) ? 1 : 0, SIMU.inZone(G, ents[j].x, ents[j].z, 1.5) ? 1 : 0]);
+    }
+    assert.deepStrictEqual(vue, bloc.vue, ou('ligne de vue'));
+
+    const a0 = ents[0], b0 = ents[1];
+    G.smokes = [{ x: (a0.x + b0.x) / 2, z: (a0.z + b0.z) / 2, age: 0.5, team: a0.team },
+                { x: (a0.x + b0.x) / 2 + 3, z: (a0.z + b0.z) / 2, age: 3.2, team: 9 }];
+    const fumee = [];
+    for (let i = 0; i < ents.length; i++) for (let j = 0; j < ents.length; j++) {
+      if (i === j) continue;
+      fumee.push([i, j, SIMU.canSee(G, ents[i], ents[j]) ? 1 : 0,
+                  SIMU.smokeBetween(G, ents[i], ents[j]) ? 1 : 0,
+                  SIMU.smokeAt(G, ents[i].x, ents[i].z, ents[j].x, ents[j].z, ents[i].team) ? 1 : 0]);
+    }
+    assert.deepStrictEqual(fumee, bloc.fumee, ou('le pont vers smokeSightBlocked'));
+    G.smokes = [];
+
+    const proches = [];
+    for (let i = 0; i < 20; i++) {
+      const t = i * 0.9, rr = 0.6 + i * 0.55;
+      proches.push(ent(200 + i, C.MAP / 2 + Math.cos(t) * rr, C.MAP / 2 + Math.sin(t) * rr, i % 3, i === 0));
+    }
+    assert.deepStrictEqual(proches.map(e => [e.x, e.z, e.team]), bloc.proches, ou('la grappe du centre'));
+    const vuePres = [];
+    for (let i = 0; i < proches.length; i++) for (let j = 0; j < proches.length; j++) {
+      if (i === j) continue;
+      vuePres.push([i, j, SIMU.canSee(G, proches[i], proches[j]) ? 1 : 0, SIMU.obscured(G, proches[i], proches[j]) ? 1 : 0,
+                    SIMU.losClear(G, proches[i].x, proches[i].z, proches[j].x, proches[j].z) ? 1 : 0,
+                    SIMU.inBush(G, proches[j]) ? 1 : 0, SIMU.cellAt(G, proches[j].x, proches[j].z),
+                    SIMU.inZone(G, proches[j].x, proches[j].z, 0) ? 1 : 0]);
+    }
+    assert.deepStrictEqual(vuePres, bloc.vuePres, ou('la règle du buisson, à courte portée'));
+  }
+});
+test('le corpus gelé discrimine vraiment : il contient les deux réponses de chaque règle', () => {
+  // Un corpus dont toutes les réponses seraient « faux » passerait sur n'importe quel code. Celui
+  // de la règle du buisson est le plus fragile des trois : il faut des entités DANS un buisson et
+  // d'autres dehors, à moins de quatre blocs les unes des autres.
+  let murs = 0, libres = 0, vus = 0, caches = 0, buissons = 0, fumes = 0;
+  for (const b of corpus.parGraine) {
+    for (const g of b.grille) { if (g[3]) murs++; else libres++; }
+    for (const v of b.vuePres) { if (v[2]) vus++; else caches++; if (v[5]) buissons++; }
+    for (const f of b.fumee) if (f[3]) fumes++;
+  }
+  for (const [nom, n] of Object.entries({ murs, libres, vus, caches, buissons, fumes }))
+    assert.ok(n >= 20, `le corpus ne contient que ${n} cas de « ${nom} » : il ne prouverait presque rien`);
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

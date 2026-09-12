@@ -24,22 +24,26 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 290 tests sur le jeu + 104 sur l'API, sans dépendance
+npm test        # 319 tests sur le jeu + 104 sur l'API, sans dépendance
 ```
 
-Les règles du jeu vivent dans un bloc pur (`WBCore`) à l'intérieur de `index.html`, sans DOM ni
-WebGL. `test.js` extrait ce bloc et l'exécute dans Node : économie, paiements, génération de
-carte, équilibrage des brawlers, files d'attente, chat, qualité graphique, grenade fumigène, connexion au
-compte. Le rendu, lui, n'est pas couvert — il demande un navigateur.
+Les règles du jeu vivent dans deux blocs purs à l'intérieur de `index.html`, sans DOM ni WebGL :
+`WBCore` pour les règles sans état, `WBSim` pour l'état d'une partie et ce qui le fait avancer.
+`test.js` les extrait et les exécute dans Node : économie, paiements, génération de carte,
+équilibrage des brawlers, files d'attente, chat, qualité graphique, grenade fumigène, connexion au
+compte, puis la grille, le mouvement, la ligne de vue et les points de départ. Le rendu, lui, n'est
+pas couvert — il demande un navigateur.
 
 ## Structure
 
 ```
 index.html              le jeu entier
   ├── <style>           lobby, HUD, écrans
-  ├── <script> WBCore   règles pures, testables      ← la partie couverte par les tests
+  ├── <script> WBCore   règles pures, sans état      ← couvert par les tests
+  ├── <script> WBSim    état de partie, grille, mouvement, vue   ← couvert par les tests
   └── <script> Game     rendu Three.js, entrées, IA, audio
 test.js                 harnais Node du jeu
+corpus-grille.json      corpus gelé : la preuve que le code a bougé sans changer
 api/                    serveur Node, testable sans base : comptes et profils (phase 01),
                         billet et verdict de partie (phase 02a)
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran

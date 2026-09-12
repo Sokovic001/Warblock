@@ -40,6 +40,8 @@ ce qui a suivi découle de ce choix.
 | **Deux graines, et la secrète ne sort jamais** | Elle ne sert à rien en 02a puisque rien n'est simulé, et c'est exactement pourquoi elle est créée maintenant : le jour où le serveur décidera du contenu des caisses, il faudra que le client ne l'ait jamais reçue. Une colonne ajoutée avant qu'une base ne tourne coûte zéro migration. |
 | **L'idempotence est arbitrée par la base, jamais par un `select` préalable** | Même doctrine que `name_key` : demander « est-ce libre ? » puis insérer laisse une fenêtre entre les deux. Trois clés nommées — `(user_id, client_key)`, l'index partiel « un seul billet ouvert », `(match_id)` pour le règlement. La clé fournie par le client n'est pas un détail : sans elle, un `POST` dont la réponse se perd est indistinguable d'un `POST` jamais arrivé. |
 | **Un rapport de partie refuse les champs inconnus ; un profil les ignore** | `PATCH /api/me` peut ignorer le superflu sans conséquence. Sur un corps qui décide d'un montant, le silence est la mauvaise valeur par défaut : tout champ inconnu vaut un refus, avec un code. La même indulgence aux deux endroits aurait été une règle uniforme et fausse. |
+| **Le rendu lit l'état, il ne le produit plus — et il n'a qu'un seul écrivain** | Le module 3 de la phase 02b a sorti la grille, le mouvement et la vue du bloc `Game`. Un troisième `<script>` est une **frontière de portée dure** : le `G` de portée lexicale disparaît et devient un paramètre explicite, ce qui est le coût réel du déplacement. Le reste est une discipline : les corps des entités vivent dans une table annexe du bloc `Game`, indexée par un identifiant d'insertion, et un **unique** `syncMeshes()` les recopie depuis l'état, une fois par image. Laisser la simulation porter un pointeur vers la scène « le temps de la transition » aurait été le patron du `respawn()` défini deux fois : la copie vivante finit du côté que rien n'exécute, et la panne est muette. |
+| **Un déplacement de code se prouve par un corpus gelé, jamais par ses invariants** | Les tests d'invariants diraient la même chose d'un code qui aurait changé en restant juste. La seule preuve qu'un code a bougé **sans changer** est une capture faite **avant** le déplacement, comparée exactement après. `corpus-grille.json` est donc une **donnée**, pas un test : le régénérer le viderait de tout sens. Il dit aussi ce qu'il ne couvre pas — rien du combat, rien des bots, rien de ce que le joueur voit. |
 | **Le chemin de secours du client se teste comme un cas normal, et s'écrit en premier** | `seedFor`, `matchFlow`, `reportFrom` et `checkReport` ont été livrées avant les routes, précisément pour geler le contrat que le serveur devrait servir. Le module qui branche le jeu est le dernier et porte tout le risque : s'il glissait, trois modules de serveur restaient du code mort que personne n'aurait vu tourner. |
 
 ---
@@ -315,16 +317,25 @@ la doublure prouve la doublure.
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
-- **Serveur autoritaire** : c'est la phase 02b, **pas commencée**. Le serveur possède l'identité
-  d'une partie, pas son déroulement : mouvement, tirs, dégâts et bots vivent toujours dans le bloc
-  `Game`, hors de toute partie testée, et le solde reste modifiable depuis la console. Le verdict
-  de 02a est une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter
-  comme un premier étage d'anti-triche.
+- **Serveur autoritaire** : c'est la phase 02b, **en cours**, modules 1 à 3 livrés sur sept. Le
+  serveur possède l'identité d'une partie, pas son déroulement. Ce qui a bougé : le pas est fixe,
+  le hasard de la simulation descend de la graine, et le bloc `WBSim` existe — la grille, le
+  mouvement, la vue, les points de départ et l'état d'une entité y vivent, et tournent dans Node.
+  Ce qui n'a pas bougé : **tirs, dégâts, butin et bots** vivent toujours dans le bloc `Game`, hors
+  de toute partie testée, et le solde reste modifiable depuis la console. Le verdict de 02a est une
+  **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter comme un
+  premier étage d'anti-triche.
 - **Aucune base n'a jamais tourné.** Les contraintes qui arbitrent l'unicité n'ont été éprouvées
   que contre une doublure.
 - **Aucun test ne regarde le jeu tourner.** Deux bugs de ce journal n'ont été trouvés que par un
-  test navigateur, et il n'en existe pas de harnais. La seule preuve que le gaz déterministe n'a
-  pas rendu les parties ennuyeuses est un humain qui joue une partie entière.
+  test navigateur, et il n'en existe pas de harnais. Depuis le module 3 de la phase 02b, `node
+  test.js` fait bouger de vraies entités sur une vraie carte — mais des entités synthétiques, sur
+  des directions scriptées : c'est la couche mouvement qui est couverte, pas une partie. Le trou se
+  referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
+  ennuyeuses reste un humain qui joue une partie entière.
+- **La session de jeu réelle due après le module 1 n'a toujours pas eu lieu**, et elle a désormais
+  deux changements de ressenti à juger : le pas fixe, et la personnalité des bots qui a changé
+  d'un coup au module 2. Le module 3 n'en ajoute pas — c'est un déplacement, pas une règle.
 - **Cadre légal** avant tout argent réel, et la décision d'exploitation ci-dessus — la maison est
   la contrepartie de chaque pot — à trancher avant la phase 04.
 - **Icône définitive** : plusieurs directions explorées, décision non figée.

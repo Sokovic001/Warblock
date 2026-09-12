@@ -17,24 +17,35 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 
 ## Architecture
 
-`index.html` contient trois parties, dans cet ordre :
+`index.html` contient quatre parties, dans cet ordre :
 
 1. `<style>` — lobby, HUD, sas d'attente, écrans de fin.
 2. `<script>` **`WBCore`** — les règles pures, entre les marqueurs `/*CORE-START*/` et
-   `/*CORE-END*/`. Aucun accès au DOM ni à Three.js. C'est la seule partie testée.
-3. `<script>` **Game** — rendu Three.js, entrées clavier/tactile, IA des bots, audio, HUD.
+   `/*CORE-END*/`. Aucun état, aucun accès au DOM ni à Three.js.
+3. `<script>` **`WBSim`** — l'**état** d'une partie et ce qui le fait avancer, entre
+   `/*SIM-START*/` et `/*SIM-END*/`. Même discipline que `WBCore` : ni DOM, ni Three.js, ni
+   horloge, ni `Math.random`. L'état d'une partie n'y est jamais une fermeture lexicale, c'est
+   toujours un **paramètre explicite**, le premier, nommé `G`. Depuis la phase 02b y vivent la
+   grille, le mouvement, la ligne de vue, les points de départ et l'état d'une entité.
+4. `<script>` **Game** — rendu Three.js, entrées clavier/tactile, IA des bots, audio, HUD. Il
+   reprend les noms de `WBSim` en une seule ligne de déstructuration, garde les corps des entités
+   dans une table annexe indexée par `eid`, et un **unique** `syncMeshes()` recopie l'état vers la
+   scène, une fois par image.
+
+Les blocs 2 et 3 sont les deux parties testées. Plus la logique y descend, mieux le projet se
+porte : le reste a besoin d'un navigateur pour tourner.
 
 ## Règles de travail
 
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 313 tests sur le jeu (`node test.js`) et
+- **Lancer `npm test` après chaque modification.** 319 tests sur le jeu (`node test.js`) et
   104 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
-- **La syntaxe des blocs `<script>` est vérifiée par `npm test`** : un test extrait les deux blocs
+- **La syntaxe des blocs `<script>` est vérifiée par `npm test`** : un test extrait les trois blocs
   d'`index.html` et les fait parser par `vm.Script`. Une erreur de syntaxe dans le bloc `Game` — le
   mode de défaillance le plus fréquent de ce dépôt — tombe donc avant d'ouvrir le navigateur, et
   avant que le workflow de publication ne serve le fichier. Le faire à la main reste utile en cours
@@ -96,7 +107,22 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
   (`ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible) sont testés comme des cas
   normaux, et un billet qui tarde ne retarde jamais le coup d'envoi.
 - Chaque bloc `<script>` d'`index.html` est du JavaScript valide — un test l'extrait et le fait
-  parser par `vm.Script`.
+  parser par `vm.Script`. Ils sont exactement **trois**, tous **internes** : aucun `src=` ne pointe
+  vers un fichier local, sans quoi le fichier unique ne serait plus unique.
+- Le bloc **SIM ne dépend d'aucun environnement** : il se charge et il **tourne** avec `document`,
+  `window`, `THREE`, `Math.random`, `Date.now` et `performance` indéfinis — la même garde que
+  `WBCore` — et une garde textuelle permanente interdit à `mesh`, `THREE`, `document`, `$(`,
+  `snd(`, `floatText(`, `feed(` et à toute horloge de franchir ses marqueurs.
+- **Un seul écrivain de corps d'entité** dans le bloc `Game` : les corps vivent dans une table
+  annexe indexée par `eid`, un unique `syncMeshes()` la lit, et la boucle d'image est son unique
+  appelant. Garde textuelle : aucune fonction de simulation ne touche plus à `.mesh` — c'est le
+  patron du `respawn()` défini deux fois, transposé.
+- **Le code a bougé sans changer** : un corpus gelé, capturé sur le code d'avant le déplacement,
+  rejoue cent pas de `moveEntity`, les requêtes de grille, la ligne de vue et `spawnPoints` sur
+  huit graines, et compare **exactement**. `corpus-grille.json` est une donnée, pas un test : il ne
+  se régénère pas, sinon il ne prouverait plus rien.
+- Les points d'apparition placent un **corps entier** : `spawnPoints` balaie sur `free()` et jamais
+  sur `isWall()`, vérifié sur deux cents graines et les cinq modes.
 
 ## Argent des joueurs
 
@@ -120,12 +146,14 @@ tout solde y est modifiable depuis la console.
   - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
     simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
     refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
-    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 et 2 sont livrés — pas fixe,
-    arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés et géométrie de
-    la graine sans transcendantes — et les cinq autres restent à faire. Le mouvement, les
-    tirs et les bots vivent toujours dans le script `Game`, hors de toute partie testée, et
-    `net_cents` vient toujours d'une sacoche déclarée par le client. Ce n'est pas une autorité
-    temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à arbitrer en direct.
+    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 à 3 sont livrés — pas fixe,
+    arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés, géométrie de
+    la graine sans transcendantes, et le bloc SIM qui existe désormais, avec l'état d'une entité,
+    la grille, le mouvement, la vue et les points de départ — et les quatre autres restent à faire.
+    Les **tirs, les dégâts, le butin et les bots** vivent toujours dans le script `Game`, hors de
+    toute partie testée, et `net_cents` vient toujours d'une sacoche déclarée par le client. Ce
+    n'est pas une autorité temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à
+    arbitrer en direct.
   Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de
   02a est une enveloppe de plausibilité, pas de l'anti-triche, et il n'arrête presque rien en
   pratique. Une phase 02a « faite » ne doit jamais se lire comme une phase 02 finie.

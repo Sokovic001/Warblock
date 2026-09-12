@@ -271,6 +271,15 @@ La forme retenue, qui limite le nombre de ces remplacements :
   d'appel restants n'aient **pas** à être préfixés un par un. C'est la seule économie réelle, et elle
   vaut d'être écrite ici plutôt que redécouverte au troisième module.
 
+*Mesuré au module 3, pour que le chiffrage des modules 4 et 5 ne reparte pas de l'intuition.* Le
+premier découpage a coûté **une cinquantaine** de sites d'appel à reprendre, pas des centaines : la
+ligne de déstructuration tient sa promesse, et ce qui reste — ajouter `G` en premier argument — est
+mécanique mais individuel. Deux choses ont coûté plus cher que le déplacement lui-même, et elles
+reviendront : trouver les **écritures de rendu cachées au milieu d'une ligne de simulation**
+(`e.mesh.visible=false` au milieu de `kill`, `e.lastOp=-1` au milieu de `respawn` et de `useSuper`),
+et décider ce qui, dans une fonction, est un **fait** et ce qui n'en est qu'une lecture — `e.flash`
+se décompte dans la simulation, sa couleur se déduit au rendu.
+
 Conséquence sur le découpage : les modules qui vident `Game` sont trois, pas un. `npm test` est vert
 entre chaque, et le corpus gelé du module 3 puis le harnais de partie du module 5 servent de filet
 pendant que les suivants se font.
@@ -290,6 +299,15 @@ vivent dans une table annexe de `Game`, indexée par identifiant d'entité, et u
 patron du `respawn()` défini deux fois — la copie vivante finit du côté que rien n'exécute. La garde
 est textuelle et permanente, comme celle qui interdit un second lecteur du plan de zone : entre les
 marqueurs, ni `mesh`, ni `THREE`, ni `document`, ni `$(`, ni `snd(`, ni `floatText(`, ni `feed(`.
+
+*Fait au module 3, pour les entités, avec la précision qui manquait.* La table annexe est indexée
+par `eid`, un **compteur d'insertion neuf**, et non par `id`. C'est important et ce n'était écrit
+nulle part : `id` n'est pas un identifiant, c'est la **personnalité** d'un bot — un nombre tiré du
+flux `bots/identite`, dont `botUpdate` sort la nervosité et la distance préférée. Deux bots peuvent
+la partager ; un rendu indexé dessus aurait mélangé leurs corps, sans rien casser. `syncMeshes()`
+tourne **une fois par image**, pas une fois par pas : un pas que personne ne verra n'a aucune raison
+de toucher à la scène. Les corps des projectiles, des caisses, du butin et du gaz, eux, restent
+écrits là où ils le sont — ils descendront avec leurs subsystèmes, aux modules 4 et 5.
 
 ### La collision de projectile devient BALAYÉE
 
@@ -435,12 +453,12 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 | La géométrie tirée de la seule graine n'appelle aucune transcendante | garde textuelle sur `generateMap`, `generateBiomes`, `zonePlan`, `zoneAt`, `spawnPoints` : aucun `Math.cos`, `Math.sin`, `Math.hypot`, `Math.pow`, `Math.atan2`, `Math.exp` ; bac à sable où ces fonctions **lancent** |
 | Même graine et même trace donnent le même état final et la même empreinte | deux fois dans le processus et une fois dans un processus fils — le patron déjà employé pour `zonePlan` ; et changer **un seul** pas de la trace change l'empreinte, sans quoi elle ne prouve rien |
 | L'ordre de résolution est figé | `G.ents` garde un ordre d'insertion stable ; aucune itération de `Set`, de `Map` ou de clés d'objet ne décide d'un ordre de résolution ; aucun tri instable ; garde textuelle sur les sites concernés |
-| Le code a bougé sans changer | corpus **gelé avant le déplacement** : les requêtes de grille et `moveEntity` rendent exactement les mêmes positions qu'avant, sur une trace capturée et figée dans `test.js` |
+| Le code a bougé sans changer | corpus **gelé avant le déplacement** : les requêtes de grille et `moveEntity` rendent exactement les mêmes positions qu'avant, sur une trace capturée et figée dans `corpus-grille.json`, lue par `test.js`. *Livré au module 3 : huit graines, cent pas de `moveEntity` sur douze entités synthétiques, le glissement le long des murs, la ligne de vue de près comme de loin, et `spawnPoints` sur les cinq modes — comparés **exactement**, sans tolérance. Un second test vérifie que le corpus contient les deux réponses de chaque règle, sans quoi il passerait sur n'importe quel code* |
 | Une seule copie de chaque règle | `critShot`, `hexDamage`, `dmgMult`, `boxDrop`, `bucketAfterKill`, `cashoutPayout`, `segmentHitsDisc` restent **appelées** depuis `WBCore` ; garde textuelle contre une seconde règle de critique et contre le retour de `CRIT_TEST` ; `api/sim.js` charge le bloc depuis `index.html`, garde bruyante au démarrage |
 | Un seul écrivain de mesh dans `Game` | garde textuelle : un seul `syncMeshes()` écrit dans la scène ; aucun autre site n'écrit `.mesh.position` |
 | Le jeu tourne | sur dix graines et les cinq modes, une partie complète atteint une fin en moins de `zoneTotalS + GRACE`, personne ne termine coincé contre un mur, et le chien de garde `stuckT` est exercé pour de vrai |
 | Les tirs ne traversent plus les corps ni les murs | collision **balayée** par `WBCore.segmentHitsDisc` sur le segment d'un pas, éprouvée aux vitesses de projectile les plus hautes du jeu, corps comme murs |
-| Les points d'apparition placent un corps entier | `spawnPoints` place chaque brawler là où son corps de 0,42 tient, sur deux cents graines et les cinq modes. **Le bug est déjà corrigé dans le code** ; ce qui manque est le test de non-régression, et le module le livre comme tel |
+| Les points d'apparition placent un corps entier | `spawnPoints` place chaque brawler là où son corps de 0,42 tient, sur deux cents graines et les cinq modes. **Le bug est déjà corrigé dans le code** ; ce qui manque est le test de non-régression, et le module le livre comme tel. *Fait au module 3 : `spawnPoints` étant descendue dans SIM, le test l'appelle telle quelle au lieu d'en extraire la source, et vérifie le placement avec un `free()` réécrit exprès — une seconde opinion, pas la même* |
 | La conservation de l'argent est vraie à chaque pas de la **vraie** simulation | à chaque pas d'une partie complète, sacoches des vivants + sacoches au sol + butin + encaissé = mise × sièges, sur les quatre tables et les cinq modes ; et **assertée une fois de plus au moment du règlement**, sur la partie réellement rejouée |
 | Les trois chemins de la sacoche tiennent | un kill la transfère entière, une mort par gaz la lâche au sol, un encaissement la met à zéro |
 | Aucun montant ne vient du client | `net_cents` sort de la partie rejouée ; un corps dont les kills, la sacoche et la durée sont gonflés écrit une ligne **strictement identique** à celle d'un corps sincère — patron de la 02a étendu des paramètres aux faits |
@@ -510,6 +528,12 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 2. **Le hasard semé et la géométrie sans transcendantes.** La seconde précondition, et la seule
    correction qui soit encore gratuite.
 3. **L'état et la grille descendent dans SIM.** Naissance du bloc, et corpus gelé de non-régression.
+   **Fait.** `WBSim` existe, troisième `<script>` interne : la grille (`cellAt`, `isWall`, `inBush`,
+   `free`, `tryMove`, `moveEntity`, `losClear`, `inZone`), la vue (`canSee`, `obscured`, les deux
+   ponts vers `smokeSightBlocked`), `spawnPoints` et l'état d'une entité y vivent, l'état de partie
+   passé en premier argument. Le corpus gelé — `corpus-grille.json`, capturé sur le code d'avant le
+   déplacement — est une **donnée**, pas un test : il ne se régénère pas, sinon il ne prouve plus
+   rien. Ce qu'il couvre est écrit à côté de lui dans `test.js`, ce qu'il ne couvre pas aussi.
 4. **Les faits : projectiles balayés, dégâts, mort, butin, flux d'événements.**
 5. **Les bots, et une partie entière sans navigateur.** Le trou le plus ancien du dossier se referme
    **avant** que le serveur n'ait besoin de quoi que ce soit.
