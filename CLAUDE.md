@@ -5,6 +5,11 @@
 Un jeu HTML5 complet dans **un seul fichier**, `index.html` : styles, règles et rendu.
 Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé depuis un CDN.
 
+À côté, depuis la phase 01 du chantier « argent réel », un dossier `api/` : un petit serveur Node
+qui détient les comptes et les profils. **Le jeu reste un seul fichier statique** ; il appelle
+l'API par HTTPS. L'API ne recopie aucune règle : `api/core.js` charge le bloc `WBCore` depuis
+`index.html`, celui-là même que le navigateur exécute.
+
 ## Architecture
 
 `index.html` contient trois parties, dans cet ordre :
@@ -19,7 +24,9 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `node test.js` après chaque modification.** 191 tests, aucune dépendance.
+- **Lancer `npm test` après chaque modification.** 198 tests sur le jeu (`node test.js`) et
+  25 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres.
 - **Vérifier la syntaxe des blocs `<script>`** après une édition automatisée : une regex qui
   extrait les blocs puis `node --check` attrape les erreurs avant d'ouvrir le navigateur.
 - **Ne jamais mettre un commentaire `//` en fin d'une ligne existante** lors d'une édition par
@@ -49,6 +56,22 @@ Pas de build, pas de bundler, pas de `node_modules`. Three.js r128 est chargé d
 - Le sens unique de la fumée est borné : la fenêtre appartient à l'équipe qui a lancé et se ferme
   avant que le nuage ne commence à se dissiper. Passé la fenêtre, le nuage aveugle les deux côtés.
 - La fumée n'arrête jamais un projectile, et ne cache jamais quelqu'un collé à soi.
+
+## Argent des joueurs
+
+Le plan complet est en sept phases, et **l'ordre n'est pas négociable** : le serveur doit posséder
+l'état du jeu avant qu'un euro n'entre. Aujourd'hui `wallet` est une variable du navigateur, donc
+tout solde y est modifiable depuis la console.
+
+- Phase 01 — comptes et profils. **Faite** : `api/`, aucun argent.
+- Phase 02 — le serveur devient l'autorité du jeu. `WBCore` tourne déjà dans Node, c'est le socle.
+- Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
+  de flottant, jamais d'écrasement de solde.
+- Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
+
+Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
+n'existe pas ; le client ne peut écrire que son pseudo, son avatar et son pays ; aucun secret dans
+le dépôt, `.env` est ignoré.
 
 ## Historique
 

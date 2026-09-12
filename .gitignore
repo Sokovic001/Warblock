@@ -5,3 +5,8 @@ Thumbs.db
 *.log
 .vscode/
 .idea/
+
+# secrets : jamais dans l'historique
+.env
+.env.*
+!.env.example

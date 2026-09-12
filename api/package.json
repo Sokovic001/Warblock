@@ -1,0 +1,18 @@
+{
+  "name": "warblock-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Comptes et profils Warblock. Phase 01 : aucune logique d'argent.",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@clerk/backend": "^1.0.0",
+    "pg": "^8.11.0"
+  }
+}

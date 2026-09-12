@@ -24,7 +24,7 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 191 tests, sans dépendance
+npm test        # 198 tests sur le jeu + 25 sur l'API, sans dépendance
 ```
 
 Les règles du jeu vivent dans un bloc pur (`WBCore`) à l'intérieur de `index.html`, sans DOM ni
@@ -39,7 +39,8 @@ index.html              le jeu entier
   ├── <style>           lobby, HUD, écrans
   ├── <script> WBCore   règles pures, testables      ← la partie couverte par les tests
   └── <script> Game     rendu Three.js, entrées, IA, audio
-test.js                 harnais Node
+test.js                 harnais Node du jeu
+api/                    comptes et profils (phase 01) — serveur Node, testable sans base
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage

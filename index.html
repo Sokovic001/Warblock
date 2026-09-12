@@ -989,6 +989,16 @@ const WBCore = (function(){
     return clean.slice(0, NAME.max);
   }
   function validName(text){ return sanitizeName(text).length >= NAME.min; }
+  // La clé d'unicité d'un pseudo. « Loïc », « loic » et « LO.IC » sont le même nom à l'œil : les
+  // autoriser côte à côte, c'est offrir l'usurpation à qui la demande. On replie les accents, la
+  // casse et les séparateurs pour obtenir une clé, et c'est elle qui porte l'index unique en base.
+  // Le pseudo affiché reste celui que le joueur a écrit — on compare les clés, on montre les noms.
+  function nameKey(text){
+    return sanitizeName(text)
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[ _.\-]/g, '');
+  }
   function nameOr(text, fallback){ const n = sanitizeName(text); return validName(n) ? n : (fallback || NAME.fallback); }
   // ---- Music tension, 0..1. Drives tempo and how many layers play. Kept pure so the curve can be
   // reasoned about and tested rather than tuned blind.
@@ -1476,7 +1486,7 @@ const WBCore = (function(){
   function dmgMult(cubes){ return 1+CUBE.dmgBonus*Math.min(cubes,CUBE.max); }
   function hexDamage(atk, travelled){ const k=Math.min(1,travelled/atk.range); return Math.round(atk.dmg+(atk.dmgFar-atk.dmg)*k); }
   function botAimError(acc){ return (1-acc)*0.42; }   // max angular error in radians
-  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
+  return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError };

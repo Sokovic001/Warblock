@@ -148,6 +148,43 @@ test('a crit is never a first shot, so it can never one-shot anyone', () => {
   }
 });
 
+console.log('Pseudos : cle d\'unicite');
+test('deux pseudos qui se lisent pareil partagent la meme cle', () => {
+  const k = C.nameKey('Loic');
+  for (const n of ['Loic','loic','LOIC','LoIc','Lo ic','lo_ic','l.o.i.c','lo-ic','  loic  '])
+    assert.strictEqual(C.nameKey(n), k, n);
+});
+test('les accents sont replies, le nom affiche ne l\'est pas', () => {
+  assert.strictEqual(C.nameKey('Loic'), C.nameKey('Lo\u00efc'));
+  assert.strictEqual(C.nameKey('Rene'), C.nameKey('Ren\u00e9'));
+  assert.strictEqual(C.nameKey('Ana'), C.nameKey('A\u00f1a'));
+  // la cle sert d'index, pas d'affichage : sanitizeName rend toujours le nom tel qu'ecrit
+  assert.strictEqual(C.sanitizeName('Lo\u00efc'), 'Lo\u00efc');
+});
+test('deux pseudos reellement differents gardent des cles differentes', () => {
+  const noms = ['loic','loica','oic','lo1c','zoe','zoey'];
+  const cles = noms.map(C.nameKey);
+  assert.strictEqual(new Set(cles).size, noms.length, cles.join(' '));
+});
+test('la cle ne contient ni espace, ni majuscule, ni separateur', () => {
+  for (const n of ['Jean-Pierre Ier','A_B.C D','  Zoe  ', 'Ren\u00e9 92'])
+    assert.ok(/^[\p{Ll}\p{N}]*$/u.test(C.nameKey(n)), `${n} -> ${C.nameKey(n)}`);
+});
+test('replier une cle deja repliee ne la change plus', () => {
+  for (const n of ['Lo\u00efc','Jean-Pierre','A B C'])
+    assert.strictEqual(C.nameKey(C.nameKey(n)), C.nameKey(n), n);
+});
+test('une entree qui n\'est pas un pseudo rend une cle vide, jamais une erreur', () => {
+  for (const junk of [undefined, null, 42, {}, [], '', '   ', '@@@@'])
+    assert.strictEqual(C.nameKey(junk), '', String(junk));
+});
+test('un pseudo refuse par validName ne doit jamais etre indexe', () => {
+  // la cle seule ne suffit pas a autoriser : le serveur valide d'abord, indexe ensuite
+  assert.strictEqual(C.validName('a'), false);
+  assert.ok(C.nameKey('a').length > 0, 'la cle existe pourtant, d\'ou la regle');
+  assert.strictEqual(C.validName('Lo\u00efc'), true);
+});
+
 console.log('Modes');
 test('three modes: solo 20×1, duo 10×2, trio 10×3', () => {
   const M = C.MODES; assert.deepStrictEqual([M.solo.teams,M.solo.teamSize],[20,1]); assert.deepStrictEqual([M.duo.teams,M.duo.teamSize],[10,2]); assert.deepStrictEqual([M.trio.teams,M.trio.teamSize],[10,3]);

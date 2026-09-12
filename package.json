@@ -4,8 +4,10 @@
   "private": true,
   "description": "Top-down battle royale with stakes. Single-file HTML5 game, demo credits only.",
   "scripts": {
-    "test": "node test.js",
-    "start": "python3 -m http.server 8080"
+    "test": "node test.js && node api/test.js",
+    "start": "python3 -m http.server 8080",
+    "test:game": "node test.js",
+    "test:api": "node api/test.js"
   },
   "engines": {
     "node": ">=18"

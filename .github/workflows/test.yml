@@ -14,3 +14,6 @@ jobs:
         with:
           node-version: '20'
       - run: node test.js
+      # L'API n'a besoin d'aucune dépendance pour ses tests : la base et la vérification du jeton
+      # sont injectées, et les tests les remplacent par des doublures.
+      - run: node api/test.js
