@@ -1,7 +1,11 @@
 # Phase 02a — le serveur possède l'identité de la partie
 
-État : **en cours**. Spécification écrite avant le premier module, pour que chacun sache ce qu'il
-construit et, surtout, ce qu'il n'a pas le droit de casser.
+État : **faite**, les six modules livrés et le jeu branché. Spécification écrite avant le premier
+module, pour que chacun sache ce qu'il construit et, surtout, ce qu'il n'a pas le droit de casser.
+Elle est laissée telle quelle, y compris ses risques assumés : ils sont toujours vrais.
+
+**La phase 02 n'est pas faite pour autant.** 02b — la simulation autoritaire — n'est pas commencée,
+et aucun euro n'entre avant elle.
 
 ---
 
@@ -27,7 +31,7 @@ La phase 02 est donc **scindée**, et les deux documents qui font foi le disent 
 
 | | Ce que c'est | État |
 |---|---|---|
-| **02a** | Billet, verdict, parties immuables, statistiques par agrégat | en cours (ce document) |
+| **02a** | Billet, verdict, parties immuables, statistiques par agrégat | faite (ce document) |
 | **02b** | Le serveur simule la partie : mouvement, tirs, dégâts, gaz | pas commencée |
 
 **Tant que 02b n'est pas faite, la phase 02 n'est pas faite, et aucun euro n'entre.** L'ordre des

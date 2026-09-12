@@ -29,7 +29,7 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 269 tests sur le jeu (`node test.js`) et
+- **Lancer `npm test` après chaque modification.** 278 tests sur le jeu (`node test.js`) et
   97 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
@@ -79,10 +79,16 @@ tout solde y est modifiable depuis la console.
   croie jamais la phase finie alors qu'elle ne l'est qu'à moitié :
   - Phase 02a — le serveur possède l'**identité** de la partie : il émet le billet (graines, mode,
     mise en centimes entiers, heure d'ouverture, expiration), il juge le rapport rendu et recalcule
-    lui-même tout montant. **En cours.** Spécification : `docs/PHASE-02.md`.
-  - Phase 02b — le serveur **simule** la partie : mouvement, tirs, dégâts, gaz. Pas commencée.
-  Tant que 02b n'est pas faite, la phase 02 n'est pas faite : le verdict de 02a est une enveloppe de
-  plausibilité, pas de l'anti-triche, et aucun euro n'entre.
+    lui-même tout montant. **Faite**, jeu branché compris : `index.html` demande son billet quand il
+    a un compte et une adresse de serveur, tire sa graine de `seedFor`, rend son rapport à la fin, et
+    se comporte exactement comme avant dès qu'il manque l'un des deux. Spécification :
+    `docs/PHASE-02.md`.
+  - Phase 02b — le serveur **simule** la partie : mouvement, tirs, dégâts, gaz. **PAS COMMENCÉE**, et
+    rien n'en a été entamé : ni bloc de simulation, ni rejeu, ni netcode. Le mouvement, les tirs et
+    les bots vivent toujours dans le script `Game`, hors de toute partie testée.
+  Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de
+  02a est une enveloppe de plausibilité, pas de l'anti-triche, et il n'arrête presque rien en
+  pratique. Une phase 02a « faite » ne doit jamais se lire comme une phase 02 finie.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde.
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**

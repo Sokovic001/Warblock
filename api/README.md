@@ -394,6 +394,37 @@ n'est que DOM et réseau.
 Une ligne reste à remplir, `ACCOUNT.api` dans `index.html` : l'adresse de ce serveur, le jour où il
 tournera quelque part. Vide, la connexion fonctionne et le profil reste local.
 
+### Le billet, côté jeu
+
+Depuis la phase 02a, le jeu prend son billet et rend son rapport. Tout tient dans un module `Match`
+d'une centaine de lignes, à côté d'`Auth`, et il ne décide de rien : l'enchaînement vient de
+`WBCore.matchFlow`, la graine de `seedFor`, le billet utilisable de `ticketFor`, le rapport de
+`reportFrom`. Trois points de contact seulement — le sas d'attente demande, le coup d'envoi choisit
+la graine, la fin de partie rend le rapport.
+
+**Ce qui compte ici est le chemin de secours, pas le chemin nominal.** Pas de compte, `ACCOUNT.api`
+vide, serveur muet, réponse illisible, billet refusé, ou billet qui décrit une autre table : dans
+tous ces cas le jeu tire sa graine lui-même et se comporte exactement comme avant la phase. Et le
+sas d'attente ne regarde jamais le réseau pour lancer la partie — **un billet qui tarde ne retarde
+jamais le coup d'envoi**, c'est son chronomètre qui tranche, et une réponse arrivée trop tard est
+jetée au lieu de réveiller une partie déjà commencée.
+
+Un cas que seul le branchement a fait apparaître : le serveur n'ouvre qu'un billet à la fois et rend
+le billet déjà ouvert quelle que soit la table redemandée ensuite. Quitter le sas puis revenir sur
+une autre table laisse donc en main un billet qui parle d'ailleurs. `WBCore.ticketFor` compare le
+mode et la mise avant de s'en servir ; s'ils ne concordent pas, la partie se joue hors ligne et le
+billet reste ouvert pour la table qu'il décrit.
+
+**Les statistiques sont adoptées, jamais recopiées.** Le règlement rendu par la route ne porte aucune
+statistique — il porte le verdict d'une partie. Le jeu redemande donc `GET /api/me` après un
+règlement, et c'est `applyAccount` qui arbitre : centimes vers dollars, avatar inconnu conservé,
+réponse tronquée sans effet sur le pseudo. Lire un règlement comme un compte remettrait les quatre
+compteurs à zéro ; un test nommé porte ce piège.
+
+**Le portefeuille de démonstration reste dans le navigateur.** La phase 02a enregistre des parties,
+pas de l'argent : aucun solde ne part au serveur, aucun n'en revient, et `wallet` est toujours une
+variable modifiable depuis la console. C'est la phase 03 qui changera cela, pas celle-ci.
+
 **Ce qui n'a pas pu être vérifié.** Le format exact des échanges avec Crossmint vient de la lecture
 de leur SDK, pas d'un appel réel : le conteneur où ce code a été écrit n'a pas accès à leur domaine.
 La première vraie connexion est donc le moment de vérité. Si une réponse ne ressemble pas à ce qui
@@ -401,23 +432,28 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
 
 ## Limites connues, à traiter avant la production
 
-- **Le verdict n'arrête presque rien, et ce n'est pas un premier étage d'anti-triche.** Une
-  enveloppe volontairement large, des tolérances d'horloge généreuses, et le parti pris de ne
-  jamais refuser à tort : un client modifié ment à l'intérieur de l'enveloppe sans être inquiété.
-  Il ne peut pas se faire payer un montant MAXWIN de son choix, il peut annoncer une sacoche
-  Resurgence quelconque entre zéro et cinquante mises, et il peut mentir sur tous les faits. C'est
-  précisément pour cela qu'**aucun euro n'entre avant que le serveur ne simule** (phase 02b). La
-  valeur réelle de ce module en phase 02a est la répétition générale du grand livre.
+- **Le verdict est une ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE, et il n'arrête presque
+  rien.** Une enveloppe volontairement large, des tolérances d'horloge généreuses, et le parti pris
+  de ne jamais refuser à tort : un client modifié ment à l'intérieur de l'enveloppe sans être
+  inquiété. Il ne peut pas se faire payer un montant MAXWIN de son choix, il peut annoncer une
+  sacoche Resurgence quelconque entre zéro et cinquante mises, et il peut mentir sur tous les faits
+  — durée, kills, cubes, dégâts, rang. Ce n'est pas un premier étage d'anti-triche et il ne faut
+  jamais le présenter comme tel : c'est une borne sur l'impossible, rien de plus. C'est précisément
+  pour cela qu'**aucun euro n'entre avant que le serveur ne simule** (phase 02b). La valeur réelle
+  de ce module en phase 02a est la répétition générale du grand livre.
 - **La table `matches` se remplit de faits DÉCLARÉS par le client, et ces lignes-là ne seront
-  jamais lues par le grand livre de la phase 03.** Borner n'est pas vérifier. La phase 03 attend
+  JAMAIS lues par le grand livre de la phase 03.** Borner n'est pas vérifier. La phase 03 attend
   des lignes produites par simulation serveur ; celles-ci ne valent que pour des statistiques
-  d'affichage et pour mesurer des écarts. Sans cette phrase écrite noir sur blanc, on paiera un
+  d'affichage et pour mesurer des écarts. Le jour où le grand livre existera, il faudra une
+  frontière explicite — une colonne d'origine, une autre table, une date de bascule — et non un
+  `select` sur `matches` qui ramasserait tout. Sans cette phrase écrite noir sur blanc, on paiera un
   jour des chiffres que personne n'a contrôlés.
-- **La limitation de débit est en mémoire, et elle couvre désormais une route qui ÉCRIT en base.**
-  Elle freine un joueur sur une instance ; dès qu'il y en aura deux, chaque instance aura son propre
-  compteur et la limite vaudra le double, puis le triple. C'était déjà vrai en phase 01, où le pire
-  cas était un pseudo martelé ; depuis `POST /api/match`, le pire cas est une table `matches`
-  remplie par quelqu'un qui répartit ses appels. Elle doit passer en magasin partagé avant la
+- **La limitation de débit est en mémoire, et elle couvre désormais DES ROUTES QUI ÉCRIVENT EN
+  BASE.** Elle freine un joueur sur une instance ; dès qu'il y en aura deux, chaque instance aura
+  son propre compteur et la limite vaudra le double, puis le triple. C'était déjà vrai en phase 01,
+  où le pire cas était un pseudo martelé ; depuis `POST /api/match` le pire cas est une table
+  `matches` remplie par quelqu'un qui répartit ses appels, et depuis `POST /api/match/:id/result`
+  c'est en plus un règlement écrit sur chacune. Elle doit passer en magasin partagé avant la
   production. Les seaux sont séparés par route : renommer son personnage ne consomme pas le droit de
   demander une partie, et l'inverse non plus.
 - **Aucune base n'a jamais tourné.** L'index unique partiel sur les billets ouverts, la contrainte

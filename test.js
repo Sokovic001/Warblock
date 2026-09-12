@@ -1927,9 +1927,31 @@ test('mensonge refusé : un rang au-delà du nombre d\'équipes de la table', ()
     const seats = C.seatsOf(mode), b = V_BILLET({ mode: mode.id, seats });
     const bord = V_RAPPORT({ seconds: 60, rank: mode.teams });
     assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true, mode.id);
-    const trop = V_RAPPORT({ seconds: 60, rank: mode.teams + 1 });
+    // Le dernier rang possible est le nombre d'équipes PLUS UNE : le test nommé ci-dessous dit
+    // pourquoi, et c'est le branchement du jeu qui l'a prouvé, pas une lecture du code.
+    const trop = V_RAPPORT({ seconds: 60, rank: mode.teams + 2 });
     assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'rang', mode.id);
   }
+});
+test('joueur honnête accepté : éliminé en Duo pendant que son équipe se bat encore', () => {
+  // Le rang que le jeu rend est celui du JOUEUR, pas celui de son équipe : `endMatch` reçoit
+  // `aliveTeams().size + 1`, et `aliveTeams()` compte une équipe dès qu'un seul de ses membres
+  // est encore en lice. Un joueur de Duo ou de Trio qui perd sa dernière vie alors que son
+  // coéquipier tient encore, et qu'aucune équipe n'a encore été éliminée, annonce donc le nombre
+  // d'équipes plus un. Borner au nombre d'équipes refusait ce joueur-là — exactement ce que la
+  // phase interdit de faire.
+  for (const mode of [C.MODES.duo, C.MODES.trio, C.MODES.resurgenceDuo]) {
+    const seats = C.seatsOf(mode), b = V_BILLET({ mode: mode.id, seats });
+    const r = V_RAPPORT({ seconds: 60, rank: mode.teams + 1, deaths: C.livesFor(mode) });
+    const v = verdict(b, r, V_RENDU(r));
+    assert.strictEqual(v.ok, true, `${mode.id} : ${v.controle} — ${v.motif}`);
+    assert.strictEqual(v.issue, 'defaite', mode.id);
+    assert.strictEqual(v.netCents, 0, 'une élimination ne paie rien');
+  }
+  // Et un rang de plus encore n'a plus d'explication honnête : il est refusé.
+  const b = V_BILLET({ mode: 'duo', seats: C.seatsOf(C.MODES.duo) });
+  const trop = V_RAPPORT({ seconds: 60, rank: C.MODES.duo.teams + 2 });
+  assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'rang');
 });
 test('le net d\'un carton plein retombe au centime sur teamPayout(...).winner', () => {
   // Le carton plein, c'est toute la table dans les poches d'un seul joueur : le pot en MAXWIN, la
@@ -2116,6 +2138,131 @@ test('le verdict est nommé pour ce qu\'il est : une enveloppe de plausibilité,
   const nomsDeTests = fs.readFileSync(path.join(__dirname, 'test.js'), 'utf8');
   assert.ok(nomsDeTests.includes('Le verdict : une enveloppe de plausibilité, pas de l\\\'anti-triche'),
     'la section de tests doit porter le nom de ce que la fonction est');
+});
+
+console.log('Le jeu prend son billet, et sait s\'en passer');
+// Le bloc Game n'est pas testable ici : il lui faut un navigateur. Ce qui EST testable, c'est la
+// décision qu'il délègue — et le fait qu'il la délègue vraiment. Les tests de forme ci-dessous
+// lisent donc le texte du fichier après /*CORE-END*/ : ils ne prouvent pas que le jeu tourne, ils
+// prouvent qu'aucune règle n'a été recopiée à côté de celle qui est testée. La seule preuve que
+// le jeu tourne reste un humain qui joue une partie.
+const JEU = html.slice(html.indexOf('/*CORE-END*/'));
+test('un billet qui décrit une autre table ne se joue pas : la graine locale reprend la main', () => {
+  // Le serveur n'ouvre qu'un billet à la fois et rend le billet déjà ouvert quelle que soit la
+  // table redemandée. Quitter le sas puis revenir sur une autre table laisse donc en main un
+  // billet qui parle d'ailleurs : le jouer ferait juger la partie contre les mauvais chiffres.
+  const billet = { id: '12', mode: 'solo', stakeCents: 50, seats: 20, brawler: 'bolt',
+                   seed: 4242, status: 'open' };
+  assert.strictEqual(C.ticketFor(billet, 'solo', 50), billet, 'la table du billet, elle, se joue');
+  assert.strictEqual(C.ticketFor(billet, 'duo', 50), null, 'un autre mode');
+  assert.strictEqual(C.ticketFor(billet, 'solo', 100), null, 'une autre mise');
+  assert.strictEqual(C.ticketFor(billet, 'solo', C.toCents(10)), null, 'la table SHARK sur un billet STREET');
+  // Le brawler n'entre pas dans la comparaison : en changer n'est pas changer de partie.
+  assert.strictEqual(C.ticketFor({ ...billet, brawler: 'ghost' }, 'solo', 50).id, '12');
+  // Et c'est la composition avec seedFor qui tient la promesse : un billet qui ne convient pas
+  // fait exactement ce que fait un billet absent.
+  assert.strictEqual(C.seedFor(C.ticketFor(billet, 'duo', 50), 777), 777);
+  assert.strictEqual(C.seedFor(C.ticketFor(billet, 'solo', 50), 777), 4242);
+});
+test('ticketFor ne lance sur rien, et refuse un billet qui n\'est plus ouvert', () => {
+  for (const rien of [null, undefined, {}, [], 42, 'billet', Object.create(null)])
+    assert.strictEqual(C.ticketFor(rien, 'solo', 50), null, Object.prototype.toString.call(rien));
+  const billet = { id: '12', mode: 'solo', stakeCents: 50, seed: 1, status: 'open' };
+  for (const statut of ['settled', 'rejected', 'expired', undefined, ''])
+    assert.strictEqual(C.ticketFor({ ...billet, status: statut }, 'solo', 50), null, String(statut));
+  // Une mise que l'appelant n'a pas su convertir ne doit jamais passer pour une correspondance.
+  for (const mise of [null, undefined, NaN, '50', 50.5])
+    assert.strictEqual(C.ticketFor(billet, 'solo', mise), null, String(mise));
+});
+test('un règlement rendu par le serveur n\'est pas un compte, et ne doit pas être lu comme tel', () => {
+  // Le règlement porte le verdict d'UNE partie — douze clés, aucune statistique. Le lire comme un
+  // compte remettrait les quatre compteurs à zéro : `applyAccount` garde le pseudo et l'avatar,
+  // mais les statistiques, elles, sont remplacées par ce qu'annonce l'objet reçu. C'est voulu —
+  // sinon une statistique fausse ne pourrait jamais redescendre — et c'est exactement pourquoi le
+  // jeu redemande /api/me après un règlement au lieu de recycler la réponse.
+  const avatars = C.avatarList(Object.keys(C.BRAWLERS));
+  const local = { name: 'Loic', avatar: avatars[2].id, stats: { matches: 3, wins: 1, kills: 9, best: 5 } };
+  const reglement = { matchId: '12', status: 'settled', issue: 'victoire', controle: null, motif: null,
+                      grossCents: 1000, feeCents: 200, netCents: 800, purseCents: 1000,
+                      declaredNetCents: 800, ecartCents: 0, settledAt: '2026-03-01T18:05:00Z' };
+  const p = C.applyAccount(local, reglement, avatars);
+  assert.strictEqual(p.name, 'Loic', 'un règlement n\'a pas de pseudo, et n\'a pas à en effacer un');
+  assert.strictEqual(p.avatar, avatars[2].id);
+  assert.deepStrictEqual(p.stats, { matches: 0, wins: 0, kills: 0, best: 0 },
+    'aucune statistique dans un règlement : le lire comme un compte les efface');
+  // Et le vrai chemin, celui que le jeu emprunte : /api/me, dont l'agrégat porte les quatre.
+  const q = C.applyAccount(local, { stats: { matches: 4, wins: 2, kills: 11, best: 800 } }, avatars);
+  assert.deepStrictEqual(q.stats, { matches: 4, wins: 2, kills: 11, best: 8 });
+});
+test('le jeu tire sa graine de seedFor, et ne la tire plus lui-même', () => {
+  const start = JEU.slice(JEU.indexOf('function startMatch('), JEU.indexOf('// ---------- end screen'));
+  assert.ok(start.length > 500, 'startMatch n\'a pas été retrouvée');
+  assert.match(start, /const seed=C\.seedFor\(billet,graineLocale\)/, 'la graine passe par seedFor');
+  // La graine de secours est toujours là, et c'est bien elle qu'on donne à seedFor : sans compte,
+  // sans serveur, sans réseau, la partie repart exactement comme avant la phase.
+  assert.match(start, /const graineLocale=\(Date\.now\(\)\^\(Math\.random\(\)\*1e9\)\)>>>0/);
+  const lignes = start.split('\n').filter(l => /Math\.random\(\)\*1e9/.test(l) && !l.trim().startsWith('//'));
+  assert.strictEqual(lignes.length, 1, 'un seul tirage de graine, et il sert de secours');
+  assert.ok(!/const seed=\(Date\.now\(\)/.test(start), 'la graine ne se tire plus directement dans startMatch');
+});
+test('le sas d\'attente ne regarde jamais le réseau pour lancer la partie', () => {
+  // L'invariant le plus important de la phase : un billet qui tarde ne retarde JAMAIS le coup
+  // d'envoi. Le sas demande son billet et n'en reparle plus ; c'est son chronomètre qui tranche.
+  const sas = JEU.slice(JEU.indexOf('function enterWaiting('), JEU.indexOf('function wFeed('));
+  assert.ok(sas.length > 500, 'enterWaiting n\'a pas été retrouvée');
+  assert.match(sas, /Match\.sas\(selMode,stake,selBrawler\)/);
+  assert.ok(!/await/.test(sas), 'enterWaiting ne doit rien attendre');
+  const tick = JEU.slice(JEU.indexOf('function waitTick('), JEU.indexOf('$(\'wLeave\')'));
+  assert.ok(tick.includes('startMatch(st)'), 'waitTick n\'a pas été retrouvée');
+  for (const interdit of ['await', 'fetch', 'Auth.', 'ticket', 'billet'])
+    assert.ok(!tick.includes(interdit), `le décompte du sas ne doit pas connaître ${interdit}`);
+});
+test('le rapport part par reportFrom, et les montants par toCents', () => {
+  const fin = JEU.slice(JEU.indexOf('function endMatch('), JEU.indexOf('// ---------- live wins ticker'));
+  assert.ok(fin.length > 2000, 'endMatch n\'a pas été retrouvée');
+  assert.match(fin, /Match\.fin\(\{/, 'la fin de partie passe par le module du billet');
+  const rapport = fin.slice(fin.indexOf('Match.fin({'), fin.indexOf('setTimeout('));
+  assert.match(rapport, /purseCents:C\.toCents\(p\.pouch\)/);
+  assert.match(rapport, /declaredNetCents:C\.toCents\(netGagne\)/);
+  // Aucun montant construit à la main : la conversion dollars → centimes a UN seul point, et
+  // c'est toCents. Une multiplication par 100 ici serait un second, exactement celui que la
+  // couche monétaire existe pour empêcher.
+  const dur = rapport.split('\n').filter(l => !l.trim().startsWith('//') && /[*/]\s*100\b/.test(l));
+  assert.deepStrictEqual(dur, [], 'le rapport convertit à la main au lieu d\'appeler toCents');
+  // Et aucun montant de plus que les deux que REPORT_FIELDS autorise.
+  const montants = (rapport.match(/\w+Cents:/g) || []).map(s => s.slice(0, -1)).sort();
+  assert.deepStrictEqual(montants, ['declaredNetCents', 'purseCents'], 'un montant de plus part au serveur');
+  // Et le rapport lui-même est construit par WBCore : le bloc Game ne choisit pas ce qui traverse.
+  const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
+  assert.ok(module.length > 1000, 'le module du billet n\'a pas été retrouvé');
+  assert.match(module, /C\.reportFrom\(etat\)/);
+});
+test('le branchement ne décide rien : tout passe par une fonction de WBCore', () => {
+  const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
+  // L'état du flux vient de matchFlow et de rien d'autre : pas de drapeau improvisé à côté.
+  for (const attendu of ['C.matchFlow(step,', 'C.ticketFor(ticket,', 'C.reportFrom(etat)', 'C.seedFor(r.data,null)'])
+    assert.ok(module.includes(attendu), `${attendu} manque au branchement`);
+  // Les six noms d'états n'ont pas à être réécrits : seul 'hors-ligne' est un point de départ, et
+  // les comparaisons portent sur les états que la table rend.
+  const inventes = ['\'demande\'', '\'billet\'', '\'partie\'', '\'rapport\'', '\'fini\''];
+  for (const nom of inventes)
+    assert.ok(!module.includes('step=' + nom), `le branchement écrit ${nom} au lieu de le recevoir de matchFlow`);
+  // Le portefeuille de démonstration reste dans le navigateur : rien ne part, rien n'arrive.
+  for (const interdit of ['wallet', 'START_WALLET', 'balance', 'solde'])
+    assert.ok(!module.includes(interdit), `${interdit} n'a rien à faire dans le module du billet`);
+});
+test('les statistiques venues du serveur passent par applyAccount, jamais par une écriture directe', () => {
+  // Le seul endroit qui écrit `profile.stats` sans passer par applyAccount est endMatch, et il
+  // écrit ce que la partie VIENT de produire en local — c'est ce qui fait que le jeu hors ligne
+  // tient ses compteurs tout seul. Tout ce qui vient du réseau, lui, passe par applyAccount.
+  const reseau = JEU.slice(JEU.indexOf('  // ---- notre API de profils ----'), JEU.indexOf('  // ---- l\'ecran ----'));
+  assert.ok(reseau.length > 400, 'la partie réseau d\'Auth n\'a pas été retrouvée');
+  const ecritures = reseau.split('\n').filter(l => /profile\.stats\s*=/.test(l));
+  assert.strictEqual(ecritures.length, 1, 'une seule écriture des statistiques depuis le réseau');
+  assert.match(ecritures[0], /profile\.stats=p\.stats/, 'et elle vient de ce qu\'applyAccount a rendu');
+  const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
+  assert.ok(!module.includes('profile.stats'), 'le règlement ne doit jamais écrire les statistiques lui-même');
+  assert.ok(module.includes('Auth.sync()'), 'après un règlement, le profil se redemande au serveur');
 });
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

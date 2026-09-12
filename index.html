@@ -1820,6 +1820,27 @@ const WBCore = (function(){
     if (typeof seed !== 'number' || !Number.isInteger(seed) || seed < 0 || seed > 0xFFFFFFFF) return fallbackSeed;
     return seed;
   }
+  // Le billet qu'on a en main décrit-il LA partie qu'on s'apprête à jouer ? La question n'existait
+  // pas tant que rien n'était branché, et le branchement l'a fait apparaître : le serveur n'ouvre
+  // qu'un billet à la fois par joueur et rend le billet déjà ouvert quelles que soient les tables
+  // demandées ensuite. Quitter le sas d'attente puis revenir sur une autre table laisse donc en
+  // main un billet qui parle d'un autre mode et d'une autre mise. Le jouer quand même ferait juger
+  // la partie contre les mauvais chiffres et enregistrerait une table que personne n'a jouée.
+  //
+  // Rendre `null` plutôt que lancer, et se composer avec `seedFor` : un billet qui ne convient pas
+  // fait alors exactement ce que fait un billet absent — la graine locale, et la partie part comme
+  // aujourd'hui. Le billet, lui, reste ouvert côté serveur et resservira à la table qu'il décrit.
+  //
+  // Le brawler n'entre pas dans la comparaison : le billet le porte, mais ni le rapport ni le
+  // verdict ne s'en servent, et en changer entre le sas et le coup d'envoi n'est pas une autre
+  // partie.
+  function ticketFor(ticket, modeKey, stakeCents){
+    if (!ticket || typeof ticket !== 'object') return null;
+    if (ticket.status !== 'open') return null;
+    if (ticket.mode !== modeKey) return null;
+    if (!Number.isSafeInteger(stakeCents) || ticket.stakeCents !== stakeCents) return null;
+    return ticket;
+  }
   // L'enchaînement d'une partie, bâti comme `authNext` : une table de transitions, et tout
   // événement inconnu laisse l'état où il est. Le tableau ci-dessous EST le contrat ; le code qui
   // l'appelle n'en est que l'usage.
@@ -2005,7 +2026,7 @@ const WBCore = (function(){
       victoire:     'une victoire annoncée avant que l\'horloge du serveur ne l\'autorise',
       encaissement: 'un encaissement Resurgence avant la fin du verrou de CASHOUT.lock',
       cubes:        'plus de cubes que CUBE.max',
-      rang:         'un rang au-delà du nombre d\'équipes de la table',
+      rang:         'un rang au-delà du nombre d\'équipes de la table, le joueur éliminé compris',
       sacoche:      'une sacoche au-delà de mise × sièges',
     },
     // LES TOLÉRANCES SONT LARGES, ET C'EST UNE DÉCISION, pas un oubli. Aucun argent n'est en jeu
@@ -2071,7 +2092,12 @@ const WBCore = (function(){
       // La borne haute d'une partie que personne ne gagne : tout le plan de zone, la protection au
       // réapparition initiale, et la marge.
       dureeMaxS: zoneTotalS(zonePlan(b.seed, mode)) + GRACE + ENVELOPPE.margeDureeS,
-      rangMax: Math.max(1, Math.round(seats / mode.teamSize)),
+      // PLUS UN, ET C'EST LE BRANCHEMENT DU JEU QUI L'A PROUVÉ. Le rang rendu est celui du
+      // JOUEUR, pas celui de son équipe : `endMatch` reçoit `aliveTeams().size + 1`, et en Duo
+      // comme en Trio l'équipe du joueur peut être encore debout au moment où lui est éliminé —
+      // elle compte alors dans les équipes debout, et le rang annoncé vaut le nombre d'équipes
+      // plus un. Ce joueur-là est honnête : borner au nombre d'équipes le refusait.
+      rangMax: Math.max(1, Math.round(seats / mode.teamSize)) + 1,
       sacocheMaxCents: purseBound(stakeCents, seats).maxCents,
     };
 
@@ -2096,7 +2122,7 @@ const WBCore = (function(){
     if (r.cubes > CUBE.max)
       return refus('cubes', `${r.cubes} cubes de puissance pour ${CUBE.max} au maximum.`);
     if (r.rank > limites.rangMax)
-      return refus('rang', `Rang ${r.rank} sur une table qui compte ${limites.rangMax} équipes.`);
+      return refus('rang', `Rang ${r.rank} sur une table où le dernier rang possible est ${limites.rangMax}.`);
     if (r.purseCents > limites.sacocheMaxCents)
       return refus('sacoche', `Sacoche de ${r.purseCents} centimes pour ${limites.sacocheMaxCents} sur la table (mise × sièges).`);
     if (r.seconds > limites.dureeMaxS)
@@ -2151,7 +2177,7 @@ const WBCore = (function(){
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
+           seedFor, ticketFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
@@ -2454,6 +2480,19 @@ const Auth=(function(){
   // Tant que `ACCOUNT.api` est vide, le serveur n'existe pas encore : on se connecte quand meme, et
   // le profil reste local. Le jour ou il tourne, rien d'autre ne change ici.
   const mine=path=>ACCOUNT.api?ACCOUNT.api.replace(/\/+$/,'')+path:null;
+  // Les deux conditions du billet, reunies en un seul mot : une session ET une adresse de serveur.
+  // C'est l'appelant qui tranche entre `sas-en-ligne` et `sas-hors-ligne`, parce que WBCore n'a pas
+  // a connaitre l'existence d'un jeton.
+  const online=()=>has()&&!!ACCOUNT.api;
+  // Un appel a NOTRE api, signe. Il ne lance jamais : `call` rend toujours un etat lisible, et un
+  // serveur muet rend status 0 — ce que le flux traduit en « delai ».
+  async function send(path,body,method){
+    if(!online()) return {ok:false,status:0,data:null};
+    const head={authorization:'Bearer '+session.jwt};
+    if(body!==undefined) head['content-type']='application/json';
+    return call(mine(path),{method:method||(body!==undefined?'POST':'GET'),headers:head,
+      body:body!==undefined?JSON.stringify(body):undefined});
+  }
   async function sync(){
     if(!has()||!ACCOUNT.api) return;
     const r=await call(mine('/api/me'),{headers:{authorization:'Bearer '+session.jwt}});
@@ -2555,9 +2594,88 @@ const Auth=(function(){
     if(C.sessionLive(s.jwt)){ plan(); render(); sync(); }
     else renew();
   }
-  return { wire, restore, pushProfile, signOut };
+  return { wire, restore, pushProfile, signOut, online, send, sync };
 })();
 Auth.wire(); Auth.restore();
+// ---------- le billet de partie, le rapport, et le chemin de secours ----------
+// Depuis la phase 02a le serveur possede l'identite d'une partie : il emet le billet (graines,
+// mode, mise en centimes entiers, heure d'ouverture, expiration) et juge le rapport rendu. Rien
+// ici ne DECIDE : l'enchainement vient de `C.matchFlow`, la graine de `C.seedFor`, le billet
+// utilisable de `C.ticketFor`, le rapport de `C.reportFrom`. Il ne reste que du DOM, du reseau et
+// l'heure — exactement le partage deja fait pour l'ecran de connexion.
+//
+// CE QUI COMPTE LE PLUS ICI EST LE CHEMIN DE SECOURS, PAS LE CHEMIN NOMINAL. Pas de compte,
+// `ACCOUNT.api` vide, serveur muet, reponse illisible, billet refuse, billet qui decrit une autre
+// table : dans tous ces cas la partie part sur la graine du navigateur et se comporte exactement
+// comme avant la phase. Et le sas d'attente ne regarde jamais le reseau pour lancer la partie :
+// un billet qui tarde ne retarde JAMAIS le coup d'envoi, c'est le chronometre du sas qui tranche.
+const Match=(function(){
+  let step='hors-ligne';          // l'etat vient de matchFlow, jamais d'un drapeau improvise
+  let ticket=null;                // le dernier billet recu, ou null
+  let enJeu=null;                 // le billet de LA partie en cours, s'il decrit bien cette table
+  // Une demande en vol que le coup d'envoi a laissee derriere lui ne doit pas reveiller la partie
+  // suivante. Le numero de generation suffit : il change des qu'on relance ou qu'on lance.
+  let gen=0;
+  // La cle d'idempotence, tiree par le client : sans elle, un POST dont la reponse se perd est
+  // indistinguable d'un POST jamais arrive. Une cle NEUVE par tentative, comme l'API le demande.
+  function cleNeuve(){
+    return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10);
+  }
+  // Entree dans le sas d'attente. On choisit l'evenement selon ce qu'on a sous la main, et c'est
+  // la table de matchFlow qui decide s'il y a une demande a faire : depuis `demande` ou `billet`,
+  // un second clic ne relance rien et ne jette pas le billet deja recu.
+  function sas(modeKey,stake,brawler){
+    const avant=step;
+    step=C.matchFlow(step,Auth.online()?'sas-en-ligne':'sas-hors-ligne');
+    if(step==='demande'&&avant!=='demande') demander(modeKey,stake,brawler);
+  }
+  async function demander(modeKey,stake,brawler){
+    const n=++gen;
+    const r=await Auth.send('/api/match',{mode:modeKey,stake,brawler,clientKey:cleNeuve()});
+    // Le coup d'envoi est peut-etre deja parti, ou une autre demande a pris la place : cette
+    // reponse-la ne concerne plus personne.
+    if(n!==gen||step!=='demande') return;
+    if(!r.ok){ step=C.matchFlow(step,r.status?'echec':'delai'); return; }
+    // « Reponse illisible » n'est pas une question de JSON : c'est un billet dont on ne saurait
+    // rien faire. `seedFor` est deja le juge de cette question, on ne lui invente pas un double.
+    if(C.seedFor(r.data,null)===null||!r.data.id){ step=C.matchFlow(step,'illisible'); return; }
+    ticket=r.data;
+    step=C.matchFlow(step,'billet');
+  }
+  // Le coup d'envoi. Il rend le billet a jouer, ou null — et il ne demande rien a personne : a ce
+  // moment precis le reseau n'a plus voix au chapitre.
+  function coupDenvoi(modeKey,stakeCents){
+    gen++;
+    // L'evenement se REAPPLIQUE jusqu'a ce que l'etat ne bouge plus : depuis `demande`, la table
+    // lache d'abord la demande (demande → hors-ligne) puis lance la partie (hors-ligne → partie).
+    // C'est le contrat ecrit dans WBCore, et c'est sans danger : `partie` n'y reagit pas.
+    for(let i=0;i<C.MATCH_STEPS.length;i++){ const s=C.matchFlow(step,'coup-denvoi'); if(s===step) break; step=s; }
+    enJeu=C.ticketFor(ticket,modeKey,stakeCents);
+    return enJeu;
+  }
+  // Fin de partie. Le rapport ne part que s'il y a un billet qui decrit CETTE partie ; sinon
+  // personne n'attend rien et l'enchainement se termine sur place.
+  function fin(etat){
+    const billet=enJeu; enJeu=null;
+    step=C.matchFlow(step,billet?'fin-en-ligne':'fin-hors-ligne');
+    if(step!=='rapport') return;
+    rendre(billet,C.reportFrom(etat));
+  }
+  async function rendre(billet,rapport){
+    const r=await Auth.send('/api/match/'+encodeURIComponent(billet.id)+'/result',rapport);
+    const regle=!!(r.ok&&r.data&&typeof r.data==='object');
+    step=C.matchFlow(step,regle?'reglement':'echec');
+    if(!regle) return;
+    // Le billet est clos cote serveur : on ne le rejouera pas.
+    ticket=null;
+    // LES STATISTIQUES SONT ADOPTEES, JAMAIS RECOPIEES. Le reglement ne porte aucune statistique —
+    // il porte le verdict d'UNE partie — et le lire comme un compte remettrait le profil a zero.
+    // On redemande donc le profil, et c'est `applyAccount` qui arbitre : centimes vers dollars,
+    // avatar inconnu conserve, reponse tronquee sans effet sur le pseudo.
+    Auth.sync();
+  }
+  return { sas, coupDenvoi, fin };
+})();
 const rulesEl=$('rules');
 function showRules(v){ rulesEl.classList.toggle('on',v); rulesEl.setAttribute('aria-hidden',String(!v)); }
 $('rulesBtn').onclick=()=>showRules(true);
@@ -4534,6 +4652,10 @@ function enterWaiting(stake){
   wallet-=stake; lastStake=stake;                                   // charged on entry, refunded if you leave
   const queue=C.queueFor(C.onlineTotal(),selMode,stake), rate=C.joinRate(queue,seats);
   W={stake,mode,seats,rate,t:0,seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,names:BOT_NAMES.slice().sort(()=>Math.random()-0.5),ni:0};
+  // On demande son billet au serveur ici, et on n'en reparle plus : le sas d'attente garde son
+  // chronometre, la partie partira a l'heure avec ou sans reponse. Sans compte ou sans
+  // `ACCOUNT.api`, rien n'est demande du tout et rien ne change.
+  Match.sas(selMode,stake,selBrawler);
   document.body.classList.toggle('res',!!mode.cashout);
   $('wTable').textContent=`${tier.label} table · ${money(stake)} buy-in · ${mode.cashout?'RESURGENCE':'MAXWIN'}`;
   $('wBrawler').textContent=profile.name+' · '+B[selBrawler].name;
@@ -4581,8 +4703,13 @@ function podLoop(){
 function startMatch(stake){
   // the stake was already taken when you entered the waiting room
   const tier=C.tierFor(stake);
-  const seed=(Date.now()^(Math.random()*1e9))>>>0;
   const mode=C.MODES[selMode];
+  // La graine de secours reste celle que le jeu a toujours tiree. Elle sert telle quelle sans
+  // compte, sans serveur, sans reseau, sur une reponse illisible, et des que le billet en main
+  // decrit une autre table : c'est `seedFor` qui tranche, et c'est la promesse du fichier unique.
+  const graineLocale=(Date.now()^(Math.random()*1e9))>>>0;
+  const billet=Match.coupDenvoi(selMode,C.toCents(stake));
+  const seed=C.seedFor(billet,graineLocale);
   G={ running:true,paused:true,stake,tier,seed,time:0,hudT:0,aimDist:5,modeCfg:mode,ents:[],boxes:[],pickups:[],projs:[],fx:[],zones:[],turrets:[],smokes:[],nades:[],camT:new THREE.Vector3(),
        dmgDealt:0,looted:0,survivedT:0,lostPouch:0 };
   document.body.classList.toggle('res',!!mode.cashout);
@@ -4758,8 +4885,13 @@ function endMatch(won,info){
   const state = won ? (cash?'banked':'victory') : 'defeat';
   const L=END_LOOK[state];
   let title,ribbon,rank,moneyLabel,moneyValue,rakeLine,pouchCap,pouchVal;
+  // Ce que le joueur CROIT avoir gagne, garde a part pour le rapport. Le serveur ne le paie pas et
+  // ne le croit pas : il en mesure l'ecart avec son propre calcul. Le jeter perdrait les mesures
+  // sur lesquelles un seuil se fixera plus tard.
+  let netGagne=0;
   if(won){
     const take=C.cashoutPayout(p.pouch);
+    netGagne=take.net;
     wallet+=take.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
     title = cash ? 'BANKED!' : 'VICTORY!';
     ribbon = cash
@@ -4806,6 +4938,27 @@ function endMatch(won,info){
   $('endRake').textContent=rakeLine;
   $('again').disabled=wallet<G.stake;
   $('again').textContent=wallet<G.stake?'NOT ENOUGH CREDITS':`REPLAY · ${money(G.stake)}`;
+  // Le rapport part une fois l'ecran de fin entierement compose, et rien de ce qui precede n'a
+  // attendu le reseau : l'ecran s'affiche que le serveur reponde ou non. `reportFrom` decide seul
+  // de ce qui traverse — neuf faits, deux montants, et aucun des autres montants que cette
+  // fonction a sous la main. Les deux montants passent par `toCents`, le seul point de conversion :
+  // un dollar flottant n'entre pas en base.
+  //
+  // Le portefeuille de demonstration ne bouge pas d'un centime dans cette phase : `wallet` reste
+  // une variable du navigateur, aucun solde ne part au serveur et aucun n'en revient.
+  Match.fin({
+    seconds:G.survivedT||G.time,
+    kills:p.kills,
+    // Le jeu ne compte pas les morts : il decompte les vies. Un abandon les met toutes a zero
+    // d'un coup, d'ou le plancher.
+    deaths:Math.max(0,C.livesFor(mode)-p.lives),
+    rank:won?1:info.rank,
+    cubes:p.cubes,
+    damage:G.dmgDealt,
+    cashedOut:!!(cash&&info&&info.cashedOut),
+    purseCents:C.toCents(p.pouch),
+    declaredNetCents:C.toCents(netGagne),
+  });
   setTimeout(()=>{
     $('game').style.display='none'; $('end').classList.add('on');
     // the cascade only starts once the screen is actually on, otherwise it plays out of sight

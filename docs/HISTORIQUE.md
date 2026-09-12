@@ -63,6 +63,69 @@ C'est un problème de performance, qui se répare ; une case fausse ne se répar
 
 ---
 
+## Trois choses consignées avant le premier euro
+
+Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
+arrivent **avant** que le premier euro n'entre. Elles sont écrites ici parce qu'écrites ailleurs
+elles seraient oubliées exactement le jour où elles compteraient.
+
+### La maison est la contrepartie de chaque pot
+
+Tant que les dix-neuf adversaires sont des bots, **leurs mises ne sont payées par personne.** Le jeu
+affiche « $0,50 × 20 sièges = $10 dans le pot », prélève 20 % et verse $8 au survivant — mais un seul
+joueur a misé $0,50. Les $9,50 restants sont une écriture, pas de l'argent. Le jour où les mises
+seront réelles, chaque partie gagnée coûtera donc à la maison la différence entre le pot promis et ce
+qui a réellement été misé, commission comprise.
+
+Trois issues, toutes légitimes, aucune choisie : payer un pot calculé sur les seuls joueurs réels
+(ce qui change l'affichage, donc la promesse) ; garder le pot affiché et le traiter comme un coût
+d'acquisition, borné et budgété ; ou n'ouvrir les tables en argent réel qu'une fois vingt joueurs
+réunis, ce qui suppose une population que la phase 01 simule encore entièrement.
+
+Ce n'est ni un bug ni une dette technique : c'est une décision d'exploitation. Elle doit être prise
+**avant** la phase 04, pas découverte au premier relevé. Elle ne figure nulle part dans les sept
+phases parce que les sept phases décrivent la mécanique de l'argent, jamais son économie.
+
+### Le rejeu ne sera opposable que sur le même runtime
+
+La phase 02b promettra un rejeu : mêmes graines, mêmes entrées, même partie. Cette promesse a une
+limite qu'il faut écrire **avant** que quelqu'un ne parle de « preuve de partie » devant un joueur
+mécontent. `Math.sin`, `Math.cos` et `Math.exp` ne sont pas spécifiées à l'ulp près par ECMAScript :
+la norme les laisse « implementation-approximated ». Deux moteurs, deux versions du même moteur, ou
+deux architectures peuvent rendre des résultats qui diffèrent du dernier bit — et une trajectoire
+intégrée image par image amplifie cet écart jusqu'à changer qui touche qui.
+
+Conséquence pratique : un rejeu ne prouve quelque chose que s'il tourne sur **le même runtime** que
+la partie d'origine. Un rejeu serveur qui contredit un client n'est donc pas une preuve que le client
+a triché ; il peut n'être qu'une preuve que les deux n'ont pas la même bibliothèque mathématique. Si
+un jour un rejeu doit être opposable, il faudra soit figer le runtime des deux côtés, soit remplacer
+ces trois fonctions par des implémentations déterministes écrites à la main — ce qui est un chantier
+en soi, à chiffrer avant de le promettre.
+
+### Le verdict de la phase 02a n'arrête presque rien, et c'est assumé
+
+`matchVerdict` porte le nom de ce qu'elle est : une **enveloppe de plausibilité**. Elle refuse
+l'impossible — plus de kills que adversaires × vies, une partie plus longue que tout le plan de zone,
+une sacoche au-delà de la table — et rien d'autre. Les tolérances d'horloge valent deux minutes,
+parce qu'un onglet en arrière-plan, un téléphone endormi et une horloge locale fausse sont beaucoup
+plus fréquents qu'un tricheur.
+
+Le choix est écrit pour qu'on ne le prenne pas pour un oubli : **tant qu'aucun argent n'est en jeu,
+accepter une partie douteuse coûte une ligne de statistique qui ne vaut rien, et refuser une partie
+honnête coûte un joueur.** À l'intérieur de l'enveloppe, un client modifié ment sur tout — durée,
+kills, cubes, dégâts, rang — sans être inquiété. Il ne peut pas choisir son montant en MAXWIN, que le
+serveur recalcule ; il peut annoncer en Resurgence n'importe quelle sacoche entre zéro et cinquante
+mises.
+
+Le branchement du jeu a d'ailleurs montré qu'un contrôle « évident » de plus était trop serré : le
+rang rendu est celui du joueur, pas celui de son équipe, et un joueur de Duo éliminé pendant que son
+coéquipier se bat encore annonce le nombre d'équipes **plus un**. La borne a été élargie plutôt que
+le joueur refusé. C'est le troisième contrôle qui s'avère faux à l'usage, après les deux que la
+spécification avait déjà écartés — la leçon se répète : une règle de plausibilité se vérifie contre
+le code du jeu, jamais contre l'intuition.
+
+---
+
 ## Pistes essayées puis abandonnées
 
 - **Lobby mobile refait de zéro, façon Brawl Stars** (personnage au centre, onglets latéraux) :
