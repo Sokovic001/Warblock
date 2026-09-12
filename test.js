@@ -1609,4 +1609,185 @@ test('le contrat du client ne touche ni à l\'horloge, ni au hasard, ni au navig
       `${interdit} n'a rien à faire dans le contrat du client`);
 });
 
+console.log('Le plan de zone, tiré de la seule graine');
+const MODES_LENTS = [C.MODES.solo, C.MODES.duo, C.MODES.trio];
+const MODES_RAPIDES = [C.MODES.resurgence, C.MODES.resurgenceDuo];
+const TOUS_MODES = MODES_LENTS.concat(MODES_RAPIDES);
+test('même graine, même plan : deux fois de suite, et dans deux processus distincts', () => {
+  for (const mode of TOUS_MODES)
+    for (const graine of [0, 1, 7, 12345, 0xdeadbeef, 4294967295])
+      assert.deepStrictEqual(C.zonePlan(graine, mode), C.zonePlan(graine, mode), `graine ${graine} en ${mode.id}`);
+  // Deux processus, parce qu'un plan qui dépendrait d'un état accumulé dans le module passerait
+  // les égalités ci-dessus sans broncher. C'est le seul moyen de le voir sans relire le code.
+  const dehors = require('child_process').execFileSync(process.execPath, ['-e', `
+    const fs = require('fs');
+    const html = fs.readFileSync(process.env.WB_FICHIER, 'utf8');
+    const bloc = html.slice(html.indexOf('/*CORE-' + 'START*/'), html.indexOf('/*CORE-' + 'END*/'));
+    const m = { exports: {} }; new Function('module', 'exports', bloc)(m, m.exports);
+    process.stdout.write(JSON.stringify(m.exports.zonePlan(12345, m.exports.MODES.solo)));
+  `], { encoding: 'utf8', env: Object.assign({}, process.env, { WB_FICHIER: path.join(__dirname, GAME) }) });
+  assert.strictEqual(dehors, JSON.stringify(C.zonePlan(12345, C.MODES.solo)),
+    'le même plan doit sortir d\'un processus neuf');
+});
+test('zonePlan tourne avec Math.random remplacé par une fonction qui lance', () => {
+  // La preuve mécanique qu'aucun hasard non semé ne subsiste dans le plan. Un test qui compare
+  // deux appels peut passer par chance ; celui-ci ne le peut pas.
+  const vrai = Math.random;
+  Math.random = () => { throw new Error('le plan de zone a tiré sur Math.random'); };
+  try {
+    for (const mode of TOUS_MODES)
+      for (let graine = 0; graine < 40; graine++) {
+        const plan = C.zonePlan(graine, mode);
+        C.zoneTotalS(plan);
+        for (let t = 0; t <= 200; t += 7) C.zoneAt(plan, t);
+      }
+  } finally { Math.random = vrai; }
+  // Déterministe n'est pas constant : deux graines doivent donner deux gaz.
+  assert.notDeepStrictEqual(C.zonePlan(1, C.MODES.solo).phases, C.zonePlan(2, C.MODES.solo).phases);
+});
+test('chaque cercle reste dans la carte, et les rayons décroissent strictement', () => {
+  assert.strictEqual(C.MAP, 152);
+  for (const mode of TOUS_MODES)
+    for (let graine = 0; graine < 300; graine++) {
+      const plan = C.zonePlan(graine, mode);
+      let precedent = plan.startR;
+      for (const p of plan.phases) {
+        assert.ok(p.r < precedent, `graine ${graine} ${mode.id} phase ${p.index} : rayon ${p.r} ≥ ${precedent}`);
+        precedent = p.r;
+        assert.ok(p.cx - p.r >= 0 && p.cx + p.r <= C.MAP, `graine ${graine} ${mode.id} phase ${p.index} déborde en x`);
+        assert.ok(p.cz - p.r >= 0 && p.cz + p.r <= C.MAP, `graine ${graine} ${mode.id} phase ${p.index} déborde en z`);
+      }
+    }
+});
+test('chaque cercle est entièrement contenu dans le précédent', () => {
+  // Sans ça, le gaz enferme un joueur hors du cercle suivant sans qu'il ait jamais eu l'occasion
+  // de le rejoindre : il meurt d'une décision prise avant qu'il ne bouge.
+  for (const mode of TOUS_MODES)
+    for (let graine = 0; graine < 300; graine++) {
+      const plan = C.zonePlan(graine, mode);
+      let cx = plan.startCx, cz = plan.startCz, r = plan.startR;
+      for (const p of plan.phases) {
+        // Le plan doit aussi se raconter correctement : `from` est bien le cercle en place.
+        assert.strictEqual(p.fromCx, cx); assert.strictEqual(p.fromCz, cz); assert.strictEqual(p.fromR, r);
+        const d = Math.hypot(p.cx - cx, p.cz - cz);
+        assert.ok(d + p.r <= r,
+          `graine ${graine} ${mode.id} phase ${p.index} : ${d.toFixed(3)} + ${p.r} dépasse ${r}`);
+        cx = p.cx; cz = p.cz; r = p.r;
+      }
+    }
+});
+test('le gaz normal met toujours 154 s à se refermer, la variante rapide moins', () => {
+  // 154 s est la durée mesurée qui a fait passer le jeu à trois vies (docs/HISTORIQUE.md) : avec
+  // une seule vie le dernier survivant était désigné vers 54 s, bien avant la fin du gaz.
+  assert.strictEqual(25 + 34 + 18 + 26 + 12 + 18 + 8 + 13, 154);
+  for (let graine = 0; graine < 60; graine++) {
+    for (const mode of MODES_LENTS) {
+      const plan = C.zonePlan(graine, mode);
+      assert.strictEqual(C.zoneTotalS(plan), 154, `graine ${graine} en ${mode.id}`);
+      assert.strictEqual(plan.phases.reduce((s, p) => s + p.waitS + p.shrinkS, 0), 154);
+      assert.strictEqual(plan.phases[plan.phases.length - 1].endS, 154);
+      assert.strictEqual(plan.phases[0].startS, 0);
+    }
+    for (const mode of MODES_RAPIDES) {
+      const plan = C.zonePlan(graine, mode);
+      assert.strictEqual(C.zoneTotalS(plan), 12 + 20 + 8 + 16 + 6 + 12 + 4 + 9);
+      assert.ok(C.zoneTotalS(plan) < 154, `${mode.id} devrait être plus court que 154 s`);
+    }
+  }
+});
+test('zoneAt rend le cercle de départ à t=0 et le cercle final au-delà du total', () => {
+  for (const mode of [C.MODES.solo, C.MODES.resurgence]) {
+    const plan = C.zonePlan(2026, mode);
+    const debut = C.zoneAt(plan, 0);
+    assert.strictEqual(debut.r, C.ZONE_START_R);
+    assert.strictEqual(debut.cx, C.MAP / 2); assert.strictEqual(debut.cz, C.MAP / 2);
+    assert.strictEqual(debut.shrinking, false);
+    assert.strictEqual(debut.timer, plan.phases[0].waitS);
+    const dernier = plan.phases[plan.phases.length - 1];
+    for (const t of [plan.totalS, plan.totalS + 1, 10000]) {
+      const z = C.zoneAt(plan, t);
+      assert.strictEqual(z.phase, plan.phases.length, `à t=${t} la partie est finie de se resserrer`);
+      assert.strictEqual(z.shrinking, false);
+      assert.strictEqual(z.r, dernier.r); assert.strictEqual(z.cx, dernier.cx); assert.strictEqual(z.cz, dernier.cz);
+      assert.strictEqual(z.timer, Infinity);
+    }
+    // Le gaz ne recule jamais, et il arrive pile sur le cercle que le plan annonce.
+    let precedent = Infinity;
+    for (let t = 0; t <= plan.totalS; t += 0.25) {
+      const z = C.zoneAt(plan, t);
+      assert.ok(z.r <= precedent + 1e-9, `le gaz recule à t=${t} en ${mode.id}`);
+      precedent = z.r;
+    }
+    for (const p of plan.phases) {
+      assert.strictEqual(C.zoneAt(plan, p.startS).r, p.fromR, `phase ${p.index} devrait démarrer sur le cercle en place`);
+      const arrive = C.zoneAt(plan, p.endS - 1e-6);
+      assert.ok(Math.abs(arrive.r - p.r) < 1e-4, `phase ${p.index} n'arrive pas sur son rayon`);
+      assert.ok(Math.abs(arrive.cx - p.cx) < 1e-4 && Math.abs(arrive.cz - p.cz) < 1e-4,
+        `phase ${p.index} n'arrive pas sur son centre`);
+    }
+  }
+});
+test('les dégâts du gaz montent à chaque phase', () => {
+  for (const mode of TOUS_MODES) {
+    const plan = C.zonePlan(5, mode);
+    for (let i = 1; i < plan.phases.length; i++)
+      assert.ok(plan.phases[i].dps > plan.phases[i - 1].dps,
+        `${mode.id} : la phase ${i} ne fait pas plus mal que la précédente`);
+    // zoneAt sert le dps de la phase en cours pendant l'attente comme pendant le resserrement,
+    // et celui de la dernière une fois le cercle final en place — c'est la règle du jeu.
+    for (const p of plan.phases) {
+      assert.strictEqual(C.zoneAt(plan, p.startS).dps, p.dps);
+      assert.strictEqual(C.zoneAt(plan, p.shrinkStartS).dps, p.dps);
+    }
+    assert.strictEqual(C.zoneAt(plan, plan.totalS + 60).dps, plan.phases[plan.phases.length - 1].dps);
+  }
+});
+test('le cercle final n\'atterrit pas toujours au même endroit', () => {
+  // Un gaz déterministe qui poserait le dernier cercle au même endroit à chaque partie serait
+  // reproductible ET ennuyeux. Aucun test ne regarde le jeu tourner : celui-ci est le seul
+  // garde-fou automatique contre une dérive du tirage vers un point fixe.
+  const vus = new Set();
+  for (let graine = 0; graine < 200; graine++) {
+    const p = C.zonePlan(graine, C.MODES.solo).phases[3];
+    vus.add(Math.round(p.cx / 4) + ':' + Math.round(p.cz / 4));
+  }
+  assert.ok(vus.size >= 60, `seulement ${vus.size} emplacements finals distincts sur 200 graines`);
+});
+test('bac à sable : CORE se charge sans document, window, THREE, Math.random, Date.now ni performance', () => {
+  // Garde permanente. Le mode de défaillance que docs/HISTORIQUE.md documente cinq fois est une
+  // édition automatisée qui réintroduit dans le bloc testé quelque chose qui dépend de
+  // l'environnement. Ici le bloc s'exécute sans aucun de ces noms : une réintroduction d'entropie
+  // ou d'horloge au chargement tombe tout de suite, avant d'atteindre le navigateur.
+  const sansRandom = new Proxy(Math, { get: (t, p) => p === 'random' ? undefined : Reflect.get(t, p) });
+  const sansNow = new Proxy(Date, { get: (t, p) => p === 'now' ? undefined : Reflect.get(t, p) });
+  const bac = new Function('module', 'exports', 'document', 'window', 'THREE', 'performance',
+                           'localStorage', 'fetch', 'Math', 'Date', core);
+  const m = { exports: {} };
+  bac(m, m.exports, undefined, undefined, undefined, undefined, undefined, undefined, sansRandom, sansNow);
+  const S = m.exports;
+  assert.strictEqual(typeof S.zonePlan, 'function', 'le bloc ne s\'est pas chargé dans le bac à sable');
+  // Et les fonctions pures tournent bel et bien là-dedans, pas seulement le chargement.
+  const plan = S.zonePlan(4242, S.MODES.solo);
+  assert.strictEqual(S.zoneTotalS(plan), 154);
+  assert.strictEqual(S.zoneAt(plan, 0).r, S.ZONE_START_R);
+  assert.deepStrictEqual(plan, C.zonePlan(4242, C.MODES.solo), 'le plan ne doit pas dépendre de l\'environnement');
+  assert.strictEqual(S.payoutCents(50, S.MODES.solo).feeCents, C.payoutCents(50, C.MODES.solo).feeCents);
+  assert.deepStrictEqual(S.checkReport(S.reportFrom({})).erreurs, C.checkReport(C.reportFrom({})).erreurs);
+  assert.strictEqual(S.seedFor(null, 7), 7);
+  assert.deepStrictEqual(Array.from(S.generateMap(3)), Array.from(C.generateMap(3)));
+});
+test('le plan de zone ne connaît ni horloge, ni hasard non semé, ni navigateur', () => {
+  const bloc = core.slice(core.indexOf('// ---- Le plan de zone'), core.indexOf('// ---- Le contrat du client'));
+  assert.ok(bloc.length > 1000, 'le bloc du plan de zone n\'a pas été retrouvé dans CORE');
+  for (const interdit of ['Date.now', 'Math.random', 'document', 'window', 'THREE', 'performance', 'fetch', 'localStorage'])
+    assert.ok(!bloc.split('\n').some(l => l.includes(interdit) && !l.trim().startsWith('//')),
+      `${interdit} n'a rien à faire dans le plan de zone`);
+  // Et le bloc Game ne redéclare plus les tables : deux sources de vérité, c'est une qui ment.
+  const jeu = html.slice(html.indexOf('/*CORE-END*/'));
+  for (const nom of ['const ZONE_PHASES', 'const ZONE_PHASES_FAST', 'const ZONE_START_R'])
+    assert.ok(!jeu.includes(nom), `${nom} est redéclaré hors de WBCore`);
+  assert.ok(!/Math\.random\(\)\*Math\.PI\*2, d=Math\.random\(\)/.test(jeu),
+    'zoneUpdate retire de nouveau le centre du cercle suivant sur Math.random');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

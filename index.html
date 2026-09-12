@@ -1702,6 +1702,102 @@ const WBCore = (function(){
   // sacoche naît à la mise, se transfère entière au tueur, tombe au sol quand il n'y en a pas, et
   // l'encaissement la met à zéro. Personne ne peut donc porter plus que tout l'argent de la table.
   function purseBound(stakeCents, seats){ return { minCents: 0, maxCents: stakeCents * seats }; }
+  // ---- Le plan de zone : le gaz devient une fonction de la seule graine.
+  //
+  // Ces trois tables vivaient APRÈS le marqueur de fin de CORE, dans le bloc `Game` : des règles
+  // qui décident de la fin d'une partie — la durée totale d'un match, c'est elles — et que rien
+  // ne testait. Elles montent ici telles quelles, valeurs et commentaires d'origine compris.
+  // (Le marqueur de fin ne peut pas être cité en toutes lettres dans CORE : test.js et
+  // api/core.js découpent le bloc sur sa première occurrence, et l'écrire ici amputerait CORE de
+  // tout ce qui suit.)
+  //
+  // Le resserrement tirait par ailleurs le centre du cercle suivant sur `Math.random()`. Deux
+  // parties lancées sur la même graine ne voyaient donc pas le même gaz, et personne ne pouvait
+  // recalculer après coup ce qu'une durée de survie voulait dire. Les centres se tirent désormais
+  // de `makeRng(graine ^ ZONE_SALT)`, et de rien d'autre.
+  //
+  // CE QUE CE BLOC NE FAIT PAS, et qu'il faut lire avant de croire le contraire : il ne rend PAS
+  // la partie reproductible. Il reste une trentaine d'appels à `Math.random()` dans le bloc
+  // `Game` — points de réapparition, décision d'encaissement des bots, identifiants d'entités.
+  // Seul le GAZ devient déterministe. Le rejeu intégral appartient à la phase 02b.
+  const ZONE_PHASES=[ {wait:25,shrink:34,radius:56,dps:0.04},{wait:18,shrink:26,radius:32,dps:0.07},{wait:12,shrink:18,radius:15,dps:0.11},{wait:8,shrink:13,radius:5,dps:0.16} ]; // dps as fraction of max hp
+  // Resurgence is the sprint version: the gas never stops moving.
+  const ZONE_PHASES_FAST=[ {wait:12,shrink:20,radius:52,dps:0.06},{wait:8,shrink:16,radius:28,dps:0.10},{wait:6,shrink:12,radius:12,dps:0.14},{wait:4,shrink:9,radius:4,dps:0.20} ];
+  const ZONE_START_R=118;
+  // Un décalage de graine arbitraire mais FIXE. Il sépare la suite du gaz de celle de la carte,
+  // qui consomme la graine nue : sans lui, le même générateur déciderait du relief puis du gaz, et
+  // le premier cercle suivrait toujours le même accident de terrain.
+  const ZONE_SALT = 0x7a1eb0c5;
+  // Combien de cases séparent au minimum un cercle du bord de la carte.
+  const ZONE_EDGE = 2;
+  // Le centre ne dérive que de 70 % de la marge disponible. C'est la valeur du code d'origine, et
+  // c'est elle qui garantit qu'un cercle est ENTIÈREMENT contenu dans le précédent : sinon le gaz
+  // enferme un joueur hors du cercle suivant sans qu'il ait jamais eu l'occasion de le rejoindre.
+  const ZONE_DRIFT = 0.7;
+  // Toute la suite des cercles, d'un coup, à partir de la seule graine. Fonction pure : ni
+  // horloge, ni hasard non semé, ni DOM.
+  //
+  // Chaque entrée décrit un resserrement : d'où il part (`fromCx`, `fromCz`, `fromR` — le cercle
+  // en place), où il arrive (`cx`, `cz`, `r`), et quand. `startS` est l'instant où la phase
+  // commence à attendre, `shrinkStartS` celui où le gaz se met en marche, `endS` celui où le
+  // nouveau cercle est en place. Les instants sont en secondes depuis le coup d'envoi.
+  function zonePlan(seed, mode){
+    const fast = !!(mode && mode.fast);
+    const table = fast ? ZONE_PHASES_FAST : ZONE_PHASES;
+    const rng = makeRng(((seed >>> 0) ^ ZONE_SALT) >>> 0);
+    const borne = (v, a, b) => Math.max(a, Math.min(b, v));
+    const phases = [];
+    let cx = MAP / 2, cz = MAP / 2, r = ZONE_START_R, t = 0;
+    for (let i = 0; i < table.length; i++){
+      const ph = table[i];
+      // Deux tirages par phase, l'angle puis la distance, dans l'ordre du code d'origine : le gaz
+      // garde exactement l'allure qu'il avait, seule sa source change.
+      const a = rng() * Math.PI * 2;
+      const d = rng() * Math.max(0, r - ph.radius) * ZONE_DRIFT;
+      // Le cercle est rabattu dans la carte. Ce rabotage ne peut pas casser la containment : la
+      // fenêtre autorisée s'élargit à chaque phase puisque le rayon diminue, elle contient donc
+      // déjà le centre précédent, et rabattre dedans ne fait que s'en rapprocher.
+      const m = ph.radius + ZONE_EDGE;
+      const ncx = borne(cx + Math.cos(a) * d, m, MAP - m);
+      const ncz = borne(cz + Math.sin(a) * d, m, MAP - m);
+      phases.push({ index: i, fromCx: cx, fromCz: cz, fromR: r,
+                    cx: ncx, cz: ncz, r: ph.radius, dps: ph.dps,
+                    waitS: ph.wait, shrinkS: ph.shrink,
+                    startS: t, shrinkStartS: t + ph.wait, endS: t + ph.wait + ph.shrink });
+      cx = ncx; cz = ncz; r = ph.radius; t += ph.wait + ph.shrink;
+    }
+    return { fast, startCx: MAP / 2, startCz: MAP / 2, startR: ZONE_START_R, phases, totalS: t };
+  }
+  // Le cercle en vigueur à l'instant t. `phase` vaut le nombre de phases une fois le dernier
+  // resserrement fini : c'est le cercle final, il ne bouge plus et `timer` est infini, comme dans
+  // la boucle du jeu. `timer` compte toujours ce qui reste de l'étape en cours, attente ou
+  // resserrement, parce que c'est ce que le HUD affiche.
+  function zoneAt(plan, t){
+    const n = plan.phases.length;
+    if (n === 0) return { phase: 0, shrinking: false, timer: Infinity, dps: 0,
+                          cx: plan.startCx, cz: plan.startCz, r: plan.startR, to: null };
+    const time = (typeof t === 'number' && Number.isFinite(t)) ? Math.max(0, t) : 0;
+    for (let i = 0; i < n; i++){
+      const p = plan.phases[i];
+      const to = { cx: p.cx, cz: p.cz, r: p.r };
+      if (time < p.shrinkStartS)
+        return { phase: i, shrinking: false, timer: p.shrinkStartS - time, dps: p.dps,
+                 cx: p.fromCx, cz: p.fromCz, r: p.fromR, to };
+      if (time < p.endS){
+        const k = p.shrinkS > 0 ? (time - p.shrinkStartS) / p.shrinkS : 1;
+        return { phase: i, shrinking: true, timer: p.endS - time, dps: p.dps,
+                 cx: p.fromCx + (p.cx - p.fromCx) * k,
+                 cz: p.fromCz + (p.cz - p.fromCz) * k,
+                 r: p.fromR + (p.r - p.fromR) * k, to };
+      }
+    }
+    const last = plan.phases[n - 1];
+    return { phase: n, shrinking: false, timer: Infinity, dps: last.dps,
+             cx: last.cx, cz: last.cz, r: last.r, to: null };
+  }
+  // La durée d'une partie que personne ne gagne avant la fin du gaz. 154 s en mode normal — le
+  // chiffre mesuré qui a fait passer le jeu à trois vies, consigné dans docs/HISTORIQUE.md.
+  function zoneTotalS(plan){ return plan.totalS; }
   // ---- Le contrat du client : billet, enchaînement, rapport.
   //
   // La phase 02a fait émettre par le serveur un billet de partie, puis lui fait juger un rapport
@@ -1867,7 +1963,8 @@ const WBCore = (function(){
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport };
+           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport,
+           ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
 /*CORE-END*/
@@ -1888,11 +1985,10 @@ const money=n=>{ const v=Math.round(n*100)/100;
 const isTouch = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
   || (navigator.maxTouchPoints > 1 && !window.matchMedia('(pointer: fine)').matches);
 const BOT_NAMES=['Ace','Blitz','Cinder','Dusk','Echo','Fang','Ghost','Jinx','Kilo','Lynx','Mako','Nova','Onyx','Pyre','Quill','Rook','Slate','Talon','Umbra','Viper','Wraith','Zero'];
-const ZONE_PHASES=[ {wait:25,shrink:34,radius:56,dps:0.04},{wait:18,shrink:26,radius:32,dps:0.07},{wait:12,shrink:18,radius:15,dps:0.11},{wait:8,shrink:13,radius:5,dps:0.16} ]; // dps as fraction of max hp
-// Resurgence is the sprint version: the gas never stops moving.
-const ZONE_PHASES_FAST=[ {wait:12,shrink:20,radius:52,dps:0.06},{wait:8,shrink:16,radius:28,dps:0.10},{wait:6,shrink:12,radius:12,dps:0.14},{wait:4,shrink:9,radius:4,dps:0.20} ];
-const phases=()=>G.modeCfg.fast?ZONE_PHASES_FAST:ZONE_PHASES;
-const ZONE_START_R=118;
+// Les tables du gaz et le rayon de depart ont migre dans WBCore : ce sont des regles qui decident
+// de la fin d'une partie, et ici, hors du bloc teste, rien ne les couvrait. Elles ne sont plus
+// redeclarees, elles se lisent sur C.
+const phases=()=>G.modeCfg.fast?C.ZONE_PHASES_FAST:C.ZONE_PHASES;
 
 // the profile follows you into the arena: above your head, in the kill feed and in chat
 const profile={ name:'', avatar:'', stats:{matches:0,wins:0,kills:0,best:0} };
@@ -3624,11 +3720,15 @@ function botUpdate(b,dt){
 
 // ---------- zone ----------
 function zoneUpdate(dt){
-  const z=G.zone, ph=phases(); z.timer-=dt;
+  // Le plan est tire une fois pour toutes au coup d'envoi, a partir de la seule graine. Ce bloc
+  // ne decide donc plus rien : il LIT le cercle suivant au lieu de le tirer sur Math.random().
+  // Attention a ce que ca ne veut pas dire : seul le GAZ est reproductible, le reste de la partie
+  // (reapparitions, bots, identifiants) tire toujours sur Math.random().
+  const z=G.zone, ph=G.zonePlan.phases; z.timer-=dt;
   // three seconds of warning before it starts moving, then a rolling rumble while it does
   if(!z.shrinking && z.phase<ph.length && !z.warned && z.timer<=3){ z.warned=true; zoneAlarm(); }
-  if(!z.shrinking){ if(z.phase<ph.length&&z.timer<=0){ z.shrinking=true; z.warned=false; rumble(true); z.from={cx:z.cx,cz:z.cz,r:z.r}; const nr=ph[z.phase].radius; const a=Math.random()*Math.PI*2, d=Math.random()*Math.max(0,z.r-nr)*0.7; z.to={cx:clamp(z.cx+Math.cos(a)*d,nr+2,N-nr-2),cz:clamp(z.cz+Math.sin(a)*d,nr+2,N-nr-2),r:nr}; z.timer=ph[z.phase].shrink; feed('Poison gas is closing in'); } }
-  else { const k=1-clamp(z.timer/ph[z.phase].shrink,0,1); z.cx=z.from.cx+(z.to.cx-z.from.cx)*k; z.cz=z.from.cz+(z.to.cz-z.from.cz)*k; z.r=z.from.r+(z.to.r-z.from.r)*k; if(z.timer<=0){ z.shrinking=false; rumble(false); z.phase++; z.timer=z.phase<ph.length?ph[z.phase].wait:Infinity; } }
+  if(!z.shrinking){ if(z.phase<ph.length&&z.timer<=0){ z.shrinking=true; z.warned=false; rumble(true); z.from={cx:z.cx,cz:z.cz,r:z.r}; const p=ph[z.phase]; z.to={cx:p.cx,cz:p.cz,r:p.r}; z.timer=p.shrinkS; feed('Poison gas is closing in'); } }
+  else { const k=1-clamp(z.timer/ph[z.phase].shrinkS,0,1); z.cx=z.from.cx+(z.to.cx-z.from.cx)*k; z.cz=z.from.cz+(z.to.cz-z.from.cz)*k; z.r=z.from.r+(z.to.r-z.from.r)*k; if(z.timer<=0){ z.shrinking=false; rumble(false); z.phase++; z.timer=z.phase<ph.length?ph[z.phase].waitS:Infinity; } }
   z.dps=ph[Math.min(z.phase,ph.length-1)].dps;
   G.zoneMesh.position.x=z.cx; G.zoneMesh.position.z=z.cz; G.zoneMesh.scale.set(z.r,1,z.r); G.gasFloor.position.x=z.cx; G.gasFloor.position.z=z.cz; G.gasFloor.scale.set(z.r,z.r,1);
   for(let i=0;i<G.gasParts.length;i++){ const gp=G.gasParts[i]; if(!gp.mesh.visible) continue; gp.a+=gp.sp*dt; const R=z.r+gp.off; gp.mesh.position.set(z.cx+Math.cos(gp.a)*R, 0.8+Math.sin(G.time*1.6+gp.ph)*0.5, z.cz+Math.sin(gp.a)*R); gp.mesh.rotation.y+=dt*0.6; }
@@ -4134,7 +4234,9 @@ function hud(){
     else if(cv.hidden){ st.style.display='block'; st.className='blind'; st.textContent='HIDDEN · BLIND'; }
     else st.style.display='none';
   }
-  const z=G.zone, zt=$('zoneTxt'), ph=phases();
+  // Le bandeau du gaz lit le plan, pas la table : les durees affichees sont celles que zoneUpdate
+  // suit, il ne peut plus y avoir deux sources qui disent deux choses.
+  const z=G.zone, zt=$('zoneTxt'), ph=G.zonePlan.phases;
   let chaud=false;
   if(G.time<C.GRACE){ zt.textContent='SPAWN PROTECTION '+Math.ceil(C.GRACE-G.time)+'s'; }
   else if(z.phase>=ph.length){ zt.textContent='FINAL CIRCLE'; chaud=true; }
@@ -4144,7 +4246,7 @@ function hud(){
   $('match').classList.toggle('hot',chaud);
   // La barre se vide sur la phase en cours : pleine juste apres un resserrement, vide quand le
   // suivant part. C'est la meme donnee que le texte, mais lisible sans lire.
-  const total=z.phase<ph.length ? (z.shrinking?ph[z.phase].shrink:ph[z.phase].wait) : 0;
+  const total=z.phase<ph.length ? (z.shrinking?ph[z.phase].shrinkS:ph[z.phase].waitS) : 0;
   $('gasFill').style.setProperty('--gw',(total>0?Math.max(0,Math.min(1,z.timer/total))*100:0)+'%');
   // #gasArrow existait en HTML et en CSS mais n'etait jamais montre par le code : le panneau de
   // regles promettait un repere que personne n'avait jamais vu. Il sert enfin d'alerte centrale.
@@ -4300,7 +4402,10 @@ function startMatch(stake){
   $('cashout').className=mode.cashout?'on':'';
   Object.assign(G,buildWorld(seed));
   G.gasParts.forEach((gp,i)=>gp.mesh.visible=i<Q.gas);
-  G.zone={cx:N/2,cz:N/2,r:ZONE_START_R,phase:0,timer:phases()[0].wait,shrinking:false,warned:false,dps:0};
+  // Le gaz sort de la graine, comme la carte : tout le plan est calcule une fois ici, et
+  // zoneUpdate n'a plus qu'a le suivre. Rien d'autre dans la partie ne devient reproductible.
+  G.zonePlan=C.zonePlan(seed,mode);
+  G.zone={cx:G.zonePlan.startCx,cz:G.zonePlan.startCz,r:G.zonePlan.startR,phase:0,timer:G.zonePlan.phases[0].waitS,shrinking:false,warned:false,dps:0};
   for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(G.rng()*(N-6))+0.5; z=3+Math.floor(G.rng()*(N-6))+0.5; t++; }while((cellAt(x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
     const mesh=makeCrate(); mesh.position.set(x,0,z);  world.add(mesh); G.boxes.push({x,z,hp:C.BOX_HP,mesh,ph:G.rng()*6.283}); }
   const pts=spawnPoints(G.rng,mode.teams,mode.teamSize), names=BOT_NAMES.slice().sort(()=>G.rng()-0.5), bids=Object.keys(B);
