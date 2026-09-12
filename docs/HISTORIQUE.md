@@ -191,6 +191,22 @@ et la porte qui reste ouverte est nommée : renvoyer une trace perdue puis son r
 `match_id`. La variante involontaire du même défaut est réparée du même coup : deux tentatives ne se
 cousent plus, un `seq` déjà posé dont les données diffèrent sort en 409 nommé au lieu d'être avalé.
 
+### Le compte des tests vit à quatre endroits, et le quatrième a décroché — phase 02b, recette
+
+La recette de fin de phase n'a trouvé qu'un seul écart entre ce que le dépôt dit et ce qu'il est, et
+il est instructif par sa banalité : `README.md` annonçait « 365 tests sur le jeu + 128 sur l'API »
+alors que les suites en comptaient 369 et 134. `CLAUDE.md`, `api/README.md` et la section « État
+après la phase 02b » de ce journal, eux, étaient justes. Le chiffre est écrit à **quatre** endroits,
+les sept modules en ont rafraîchi trois, et celui qui reste est précisément la première page que
+lit quelqu'un qui arrive.
+
+Aucune correction structurelle à en tirer : centraliser le compte demanderait de le générer, donc
+un script de plus pour un nombre qui ne décide de rien. Ce qui se retient est la règle de relecture,
+et elle est déjà dans la procédure de recette : après une phase, on relit les **quatre** endroits,
+pas les trois qu'on a touchés. Le même journal a d'ailleurs sous-compté les colonnes ajoutées par la
+phase — cinq écrites, sept posées, parce que `sim_version` et `first_result_at` sont arrivées après
+la rédaction de la phrase. Corrigé ici.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -483,7 +499,7 @@ passe contre la doublure prouve la doublure.
   une variable du navigateur jusqu'à la phase 03.
 - **Aucune base n'a jamais tourné, et c'est devenu un PRÉREQUIS de la phase 03.** Les contraintes qui
   arbitrent l'unicité et l'écriture unique d'un règlement n'ont été éprouvées que contre une
-  doublure, et la phase 02b a ajouté cinq colonnes et une table dont un **paiement** dépend. Un test
+  doublure, et la phase 02b a ajouté sept colonnes et une table dont un **paiement** dépend. Un test
   qui passe contre la doublure prouve la doublure. Faire tourner une vraie Postgres une fois, ne
   serait-ce qu'à la main, se fait **avant** le grand livre, pas après.
 - **`match_traces` n'a aucune politique de conservation.** Combien de temps garde-t-on la pièce qui
