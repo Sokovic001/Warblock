@@ -1377,4 +1377,236 @@ test('statistics coming back negative or absurd are clamped, not trusted', () =>
   assert.deepStrictEqual(p.stats, { matches: 0, wins: 0, kills: 2, best: 0 });
 });
 
+console.log('Le contrat du client : billet, partie, rapport');
+// Les quatre cas hors ligne d'abord, un par un et nommés. Ils ne testent pas une exception : ils
+// testent le cas normal du fichier unique, celui où il n'y a ni serveur ni compte. Sans eux,
+// l'invariant le plus important de la phase ne serait vérifié par rien.
+//
+// `sas` est ce que l'appelant écrira : choisir l'événement d'entrée selon ce qu'on a sous la
+// main, encaisser ce que le réseau rend, et s'arrêter là. Le billet vaut null dans les quatre.
+const GRAINE_LOCALE = 3735928559;                 // celle que le navigateur tire aujourd'hui
+function sas({ api, session, reponse }){
+  let etat = C.matchFlow('hors-ligne', (api && session) ? 'sas-en-ligne' : 'sas-hors-ligne');
+  let billet = null;
+  if (etat === 'demande') {
+    if (reponse === 'muet') etat = C.matchFlow(etat, 'delai');
+    else if (typeof reponse !== 'object' || reponse === null) etat = C.matchFlow(etat, 'illisible');
+    else { billet = reponse; etat = C.matchFlow(etat, 'billet'); }
+  }
+  return { etat, billet };
+}
+function coupDenvoi(etat){
+  // Le coup d'envoi se réapplique jusqu'à ce que l'état ne bouge plus : depuis `demande` il lâche
+  // d'abord la demande, puis il lance la partie.
+  const apres = C.matchFlow(etat, 'coup-denvoi');
+  return apres === etat ? apres : coupDenvoi(apres);
+}
+test('hors ligne 1/4 — ACCOUNT.api vide : graine locale, aucun billet demandé', () => {
+  const { etat, billet } = sas({ api: '', session: 'jeton-valide', reponse: 'muet' });
+  assert.strictEqual(etat, 'hors-ligne', 'sans adresse de serveur, on ne demande rien');
+  assert.strictEqual(billet, null);
+  assert.strictEqual(C.seedFor(billet, GRAINE_LOCALE), GRAINE_LOCALE);
+  assert.strictEqual(coupDenvoi(etat), 'partie', 'la partie part quand même');
+});
+test('hors ligne 2/4 — pas de session : graine locale, aucun billet demandé', () => {
+  const { etat, billet } = sas({ api: 'https://api.warblock', session: null, reponse: 'muet' });
+  assert.strictEqual(etat, 'hors-ligne', 'un serveur sans compte connecté n\'émet pas de billet');
+  assert.strictEqual(C.seedFor(billet, GRAINE_LOCALE), GRAINE_LOCALE);
+  assert.strictEqual(coupDenvoi(etat), 'partie');
+});
+test('hors ligne 3/4 — serveur muet : graine locale, on n\'attend personne', () => {
+  const { etat, billet } = sas({ api: 'https://api.warblock', session: 'jeton-valide', reponse: 'muet' });
+  assert.strictEqual(etat, 'hors-ligne');
+  assert.strictEqual(C.seedFor(billet, GRAINE_LOCALE), GRAINE_LOCALE);
+  assert.strictEqual(coupDenvoi(etat), 'partie');
+});
+test('hors ligne 4/4 — réponse illisible : graine locale, la partie part pareil', () => {
+  // Une page d'erreur du répartiteur de charge, du HTML là où on attendait du JSON.
+  const { etat, billet } = sas({ api: 'https://api.warblock', session: 'jeton-valide', reponse: '<html>502</html>' });
+  assert.strictEqual(etat, 'hors-ligne');
+  assert.strictEqual(C.seedFor(billet, GRAINE_LOCALE), GRAINE_LOCALE);
+  assert.strictEqual(coupDenvoi(etat), 'partie');
+});
+test('un billet qui tarde ou qui échoue ne bloque jamais le coup d\'envoi', () => {
+  // Cas normal, pas cas limite : le chronomètre du sas ne s'arrête pas pour attendre le réseau.
+  const enAttente = sas({ api: 'https://api.warblock', session: 'jeton', reponse: { seed: 7 } });
+  assert.strictEqual(enAttente.etat, 'billet');
+  // La demande est encore en vol quand le compte à rebours tombe à zéro.
+  assert.strictEqual(coupDenvoi('demande'), 'partie', 'la demande est lâchée, la partie part');
+  assert.strictEqual(C.matchFlow('demande', 'coup-denvoi'), 'hors-ligne', 'le premier temps lâche la demande');
+  assert.strictEqual(C.seedFor(null, GRAINE_LOCALE), GRAINE_LOCALE, 'et sans billet, la graine est locale');
+  // Un refus du serveur mène au même endroit qu'un silence : la partie se joue.
+  for (const raté of ['echec', 'delai', 'illisible'])
+    assert.strictEqual(coupDenvoi(C.matchFlow('demande', raté)), 'partie', raté);
+});
+test('un billet utilisable donne SA graine, et elle seule', () => {
+  assert.strictEqual(C.seedFor({ seed: 0 }, GRAINE_LOCALE), 0, 'zéro est une graine, pas une absence');
+  assert.strictEqual(C.seedFor({ seed: 4294967295 }, GRAINE_LOCALE), 4294967295);
+  assert.strictEqual(C.seedFor({ seed: 12345, id: 'm_1', stakeCents: 50 }, GRAINE_LOCALE), 12345);
+});
+test('seedFor ne lance sur aucune entrée, et retombe sur la graine locale', () => {
+  // Le serveur peut rendre n'importe quoi : une exception ici serait une partie qui ne démarre
+  // pas, ce qui coûte plus cher que n'importe quelle graine.
+  const dégénérées = [null, undefined, {}, [], 0, '', 'billet', true, NaN,
+                      { seed: undefined }, { seed: null }, { seed: 1.5 }, { seed: -1 },
+                      { seed: '12345' }, { seed: NaN }, { seed: Infinity },
+                      { seed: 4294967296 }, { seed: {} }, Object.create(null)];
+  for (const mauvais of dégénérées) {
+    let vu;
+    assert.doesNotThrow(() => { vu = C.seedFor(mauvais, GRAINE_LOCALE); }, `seedFor a lancé sur ${JSON.stringify(mauvais)}`);
+    assert.strictEqual(vu, GRAINE_LOCALE, `${JSON.stringify(mauvais)} aurait dû rendre la graine locale`);
+  }
+});
+test('matchFlow suit sa table, transition par transition', () => {
+  const table = [
+    ['hors-ligne', 'sas-en-ligne', 'demande'],
+    ['fini', 'sas-en-ligne', 'demande'],
+    ['hors-ligne', 'sas-hors-ligne', 'hors-ligne'],
+    ['fini', 'sas-hors-ligne', 'hors-ligne'],
+    ['demande', 'billet', 'billet'],
+    ['demande', 'echec', 'hors-ligne'],
+    ['demande', 'delai', 'hors-ligne'],
+    ['demande', 'illisible', 'hors-ligne'],
+    ['demande', 'coup-denvoi', 'hors-ligne'],
+    ['hors-ligne', 'coup-denvoi', 'partie'],
+    ['billet', 'coup-denvoi', 'partie'],
+    ['partie', 'fin-en-ligne', 'rapport'],
+    ['partie', 'fin-hors-ligne', 'fini'],
+    ['rapport', 'reglement', 'fini'],
+    ['rapport', 'echec', 'fini'],
+  ];
+  for (const [de, ev, vers] of table) assert.strictEqual(C.matchFlow(de, ev), vers, `${de} + ${ev}`);
+  for (const [, , vers] of table) assert.ok(C.MATCH_STEPS.includes(vers), `${vers} n'est pas un état`);
+});
+test('tout événement inconnu laisse l\'état où il est, et un double clic ne renvoie personne au début', () => {
+  for (const etat of C.MATCH_STEPS)
+    for (const ev of ['', undefined, null, 'ok', 'sent', 'coupDenvoi', 'FIN', 42, {}])
+      assert.strictEqual(C.matchFlow(etat, ev), etat, `${etat} + ${String(ev)}`);
+  // Deux clics sur JOUER pendant que la demande est en vol : ni seconde demande, ni retour au début.
+  assert.strictEqual(C.matchFlow('demande', 'sas-en-ligne'), 'demande');
+  assert.strictEqual(C.matchFlow('billet', 'sas-en-ligne'), 'billet', 'un billet reçu ne se jette pas sur un clic');
+  assert.strictEqual(C.matchFlow('partie', 'sas-en-ligne'), 'partie');
+  assert.strictEqual(C.matchFlow('rapport', 'fin-en-ligne'), 'rapport', 'une fin envoyée deux fois ne rend pas deux rapports');
+  assert.strictEqual(C.matchFlow('fini', 'reglement'), 'fini');
+  // Un état inventé — sauvegarde d'une version précédente, console du navigateur — repart de zéro.
+  for (const faux of ['nimporte', '', undefined, null, 42]) assert.strictEqual(C.matchFlow(faux, 'coup-denvoi'), 'partie', String(faux));
+});
+test('une partie entière, du sas au règlement, puis la suivante', () => {
+  let e = C.matchFlow('hors-ligne', 'sas-en-ligne');   assert.strictEqual(e, 'demande');
+  e = C.matchFlow(e, 'billet');                        assert.strictEqual(e, 'billet');
+  e = C.matchFlow(e, 'coup-denvoi');                   assert.strictEqual(e, 'partie');
+  e = C.matchFlow(e, 'fin-en-ligne');                  assert.strictEqual(e, 'rapport');
+  e = C.matchFlow(e, 'reglement');                     assert.strictEqual(e, 'fini');
+  e = C.matchFlow(e, 'sas-en-ligne');                  assert.strictEqual(e, 'demande', 'la partie suivante repart d\'ici');
+  // Et la même partie jouée hors ligne ne passe jamais par le rapport.
+  let h = coupDenvoi(C.matchFlow('hors-ligne', 'sas-hors-ligne'));
+  assert.strictEqual(h, 'partie');
+  assert.strictEqual(C.matchFlow(h, 'fin-hors-ligne'), 'fini', 'sans billet, personne n\'attend de rapport');
+});
+test('reportFrom ne retient que des faits : aucun montant ne passe hors des deux nommés', () => {
+  // L'état de fin de partie du jeu porte la mise, le pot, le portefeuille, le gain recalculé…
+  // Aucun n'a de raison de traverser le réseau : le serveur les refait depuis le billet.
+  const etat = { seconds: 214, kills: 3, deaths: 1, rank: 2, cubes: 4, damage: 5120, cashedOut: false,
+                 purseCents: 200, declaredNetCents: 160,
+                 stakeCents: 50, potCents: 1000, winnerCents: 800, walletCents: 12345,
+                 payoutCents: 800, feeCents: 200, amount: 8, wallet: 123.45, best: 4, seed: 9 };
+  const r = C.reportFrom(etat);
+  assert.deepStrictEqual(Object.keys(r).sort(), Object.keys(C.REPORT_FIELDS).sort());
+  const montants = Object.keys(r).filter(k => /Cents$/.test(k));
+  assert.deepStrictEqual(montants.sort(), ['declaredNetCents', 'purseCents'], 'un montant de plus est passé');
+  for (const interdit of ['stakeCents', 'potCents', 'winnerCents', 'walletCents', 'payoutCents', 'feeCents', 'amount', 'wallet', 'best', 'seed'])
+    assert.ok(!(interdit in r), `${interdit} n'a rien à faire dans un rapport`);
+  assert.strictEqual(r.purseCents, 200);
+  assert.strictEqual(r.declaredNetCents, 160);
+});
+test('reportFrom rend des faits propres, et un montant absent ne devient pas zéro', () => {
+  const r = C.reportFrom({ seconds: 214.7, kills: '3', deaths: -2, rank: 0, cubes: 4.4, damage: 5120.6,
+                           cashedOut: 1, purseCents: 200.9, declaredNetCents: 0 });
+  assert.deepStrictEqual(r, { seconds: 215, kills: 3, deaths: 0, rank: 1, cubes: 4, damage: 5121,
+                              cashedOut: true, purseCents: 200, declaredNetCents: 0 });
+  // Un compte absent vaut zéro : le fait n'a pas eu lieu. Un montant absent vaut null, comme
+  // `toCents` rend null — un zéro silencieux se paie, une valeur absente se repère.
+  for (const vide of [undefined, null, {}, 'rapport', 42, []]) {
+    const v = C.reportFrom(vide);
+    assert.strictEqual(v.kills, 0, String(vide));
+    assert.strictEqual(v.rank, 1, String(vide));
+    assert.strictEqual(v.cashedOut, false, String(vide));
+    assert.strictEqual(v.purseCents, null, `${String(vide)} : une sacoche absente n'est pas une sacoche vide`);
+    assert.strictEqual(v.declaredNetCents, null, String(vide));
+  }
+  assert.strictEqual(C.reportFrom({ purseCents: '200' }).purseCents, null, 'une chaîne n\'est pas un montant');
+  assert.strictEqual(C.reportFrom({ purseCents: -5 }).purseCents, 0);
+});
+test('checkReport refuse un champ inconnu, avec un code, au lieu de l\'ignorer', () => {
+  const bon = C.reportFrom({ seconds: 90, kills: 2, deaths: 0, rank: 1, cubes: 3, damage: 900,
+                             cashedOut: true, purseCents: 300, declaredNetCents: 240 });
+  const { rapport, erreurs } = C.checkReport({ ...bon, payoutCents: 999999 });
+  assert.strictEqual(rapport, null, 'un rapport douteux ne ressort pas propre');
+  assert.strictEqual(erreurs.length, 1);
+  assert.strictEqual(erreurs[0].code, 'inconnu');
+  assert.strictEqual(erreurs[0].field, 'payoutCents');
+  assert.ok(erreurs[0].message.includes('payoutCents'), erreurs[0].message);
+  // Le contraste avec PATCH /api/me est la décision : là-bas on ignore, ici on refuse.
+  assert.strictEqual(C.checkReport({ ...bon, id: 1, status: 'settled' }).erreurs.length, 2);
+});
+test('checkReport vérifie les types, les bornes et les absences, et dit quoi corriger', () => {
+  const bon = C.reportFrom({ seconds: 90, kills: 2, deaths: 0, rank: 1, cubes: 3, damage: 900,
+                             cashedOut: true, purseCents: 300, declaredNetCents: 240 });
+  const cas = [
+    [{ kills: 1.5 }, 'kills', 'type'],
+    [{ kills: '2' }, 'kills', 'type'],
+    [{ purseCents: 12.5 }, 'purseCents', 'type'],
+    [{ purseCents: Number.MAX_SAFE_INTEGER + 2 }, 'purseCents', 'type'],
+    [{ declaredNetCents: -1 }, 'declaredNetCents', 'borne'],
+    [{ rank: 0 }, 'rank', 'borne'],
+    [{ cashedOut: 'oui' }, 'cashedOut', 'type'],
+    [{ cubes: undefined }, 'cubes', 'manquant'],
+    [{ purseCents: null }, 'purseCents', 'manquant'],
+  ];
+  for (const [patch, champ, code] of cas) {
+    const { rapport, erreurs } = C.checkReport({ ...bon, ...patch });
+    assert.strictEqual(rapport, null, JSON.stringify(patch));
+    assert.strictEqual(erreurs.length, 1, JSON.stringify(patch) + ' : ' + JSON.stringify(erreurs));
+    assert.strictEqual(erreurs[0].field, champ, JSON.stringify(patch));
+    assert.strictEqual(erreurs[0].code, code, JSON.stringify(patch));
+    assert.ok(erreurs[0].message.includes(champ) && /[.]$/.test(erreurs[0].message), erreurs[0].message);
+  }
+  // Un corps qui n'est pas un objet ne rend pas neuf erreurs, il en rend une, claire.
+  for (const pas of [null, undefined, 'rapport', 42, []]) {
+    const { rapport, erreurs } = C.checkReport(pas);
+    assert.strictEqual(rapport, null, String(pas));
+    assert.strictEqual(erreurs.length, 1, String(pas));
+    assert.strictEqual(erreurs[0].code, 'corps', String(pas));
+  }
+  // Rien de rempli du tout : chaque champ manquant est signalé, pas seulement le premier.
+  assert.strictEqual(C.checkReport({}).erreurs.length, Object.keys(C.REPORT_FIELDS).length);
+});
+test('aller-retour : ce que reportFrom produit, checkReport l\'accepte sans une erreur', () => {
+  const fins = [
+    { seconds: 0, kills: 0, deaths: 0, rank: 20, cubes: 0, damage: 0, cashedOut: false, purseCents: 0, declaredNetCents: 0 },
+    { seconds: 312.4, kills: 7, deaths: 2, rank: 1, cubes: 10, damage: 9876.5, cashedOut: true,
+      purseCents: C.toCents(12.5), declaredNetCents: C.cashoutCents(C.toCents(12.5)).netCents },
+    // Une victoire MAXWIN sur la plus petite table : le rapport ne porte que la sacoche, et le
+    // serveur recalculera le reste depuis le billet.
+    { seconds: 240, kills: 19, deaths: 0, rank: 1, cubes: 6, damage: 15000, cashedOut: false,
+      purseCents: C.purseBound(C.toCents(0.5), C.seatsOf(C.MODES.solo)).maxCents, declaredNetCents: 800 },
+  ];
+  for (const fin of fins) {
+    const { rapport, erreurs } = C.checkReport(C.reportFrom(fin));
+    assert.deepStrictEqual(erreurs, [], JSON.stringify(fin));
+    assert.deepStrictEqual(rapport, C.reportFrom(fin), 'le rapport propre doit être celui qu\'on a rendu');
+    for (const v of [rapport.purseCents, rapport.declaredNetCents])
+      assert.ok(Number.isSafeInteger(v) && v >= 0, `${v} n'est pas un montant en centimes entiers`);
+  }
+});
+test('le contrat du client ne touche ni à l\'horloge, ni au hasard, ni au navigateur', () => {
+  // WBCore doit rester pur : l'heure et la graine de secours sont des arguments, jamais des
+  // appels. Une seule de ces fonctions qui lirait Date.now() rendrait un rapport intestable.
+  const bloc = core.slice(core.indexOf('// ---- Le contrat du client'), core.indexOf('  return { MAP, PLAYERS,'));
+  assert.ok(bloc.length > 1000, 'le bloc du contrat n\'a pas été retrouvé dans CORE');
+  for (const interdit of ['Date.now', 'Math.random', 'document', 'window', 'THREE', 'performance', 'fetch', 'localStorage'])
+    assert.ok(!bloc.split('\n').some(l => l.includes(interdit) && !l.trim().startsWith('//')),
+      `${interdit} n'a rien à faire dans le contrat du client`);
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

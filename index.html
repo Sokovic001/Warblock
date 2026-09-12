@@ -1702,13 +1702,172 @@ const WBCore = (function(){
   // sacoche naît à la mise, se transfère entière au tueur, tombe au sol quand il n'y en a pas, et
   // l'encaissement la met à zéro. Personne ne peut donc porter plus que tout l'argent de la table.
   function purseBound(stakeCents, seats){ return { minCents: 0, maxCents: stakeCents * seats }; }
+  // ---- Le contrat du client : billet, enchaînement, rapport.
+  //
+  // La phase 02a fait émettre par le serveur un billet de partie, puis lui fait juger un rapport
+  // de fin de partie. Ces deux formes se gèlent ICI, avant qu'une seule route n'existe : sinon
+  // trois modules de serveur serviraient un contrat que personne n'a écrit. Rien de ce qui suit
+  // ne touche au DOM, au réseau, à l'horloge ni au hasard — l'heure et la graine de secours sont
+  // des arguments.
+
+  // La graine d'une partie : celle du billet si elle est utilisable, celle du navigateur sinon.
+  // C'est cette fonction qui tient la promesse du fichier unique. `ACCOUNT.api` vide, pas de
+  // session, serveur muet, réponse illisible : dans les quatre cas le billet est absent ou
+  // inexploitable, on rend la graine locale, et la partie part comme aujourd'hui. Elle ne lance
+  // donc jamais, quoi qu'on lui donne — une exception ici serait une partie qui ne démarre pas.
+  //
+  // Le domaine accepté est celui des entiers 32 bits non signés, parce que c'est celui de
+  // `makeRng`. Une graine flottante ou négative n'est pas « presque bonne » : elle donnerait une
+  // autre carte, et deux joueurs de la même partie ne verraient pas le même monde.
+  function seedFor(ticket, fallbackSeed){
+    const seed = (ticket && typeof ticket === 'object') ? ticket.seed : undefined;
+    if (typeof seed !== 'number' || !Number.isInteger(seed) || seed < 0 || seed > 0xFFFFFFFF) return fallbackSeed;
+    return seed;
+  }
+  // L'enchaînement d'une partie, bâti comme `authNext` : une table de transitions, et tout
+  // événement inconnu laisse l'état où il est. Le tableau ci-dessous EST le contrat ; le code qui
+  // l'appelle n'en est que l'usage.
+  //
+  //   état         événement        vers         pourquoi
+  //   hors-ligne   sas-en-ligne     demande      compte ET API : on peut demander un billet
+  //   fini         sas-en-ligne     demande      la partie suivante repart du même endroit
+  //   hors-ligne   sas-hors-ligne   hors-ligne   il manque l'un des deux : on ne demande rien
+  //   fini         sas-hors-ligne   hors-ligne   idem, après une partie
+  //   demande      billet           billet       le serveur a répondu, et sa réponse se lit
+  //   demande      echec            hors-ligne   refus, panne, réseau coupé
+  //   demande      delai            hors-ligne   serveur muet : on ne l'attend pas
+  //   demande      illisible        hors-ligne   une réponse qu'on ne sait pas lire n'en est pas une
+  //   demande      coup-denvoi      hors-ligne   le chronomètre du sas a gagné : on lâche la demande
+  //   hors-ligne   coup-denvoi      partie       sans billet, la partie part quand même
+  //   billet       coup-denvoi      partie       avec billet
+  //   partie       fin-en-ligne     rapport      il y a un billet, donc un rapport à rendre
+  //   partie       fin-hors-ligne   fini         sans billet, personne n'attend de rapport
+  //   rapport      reglement        fini         le serveur a jugé
+  //   rapport      echec            fini         il n'a pas jugé, et la partie est finie quand même
+  //
+  // Trois points de ce tableau sont le contrat, pas des détails d'écriture :
+  // — l'entrée dans le sas ne part que de `hors-ligne` et de `fini`. Depuis `demande` ou
+  //   `billet`, un second clic ne relance pas la demande et ne jette pas le billet déjà reçu.
+  // — le coup d'envoi qui arrive pendant une demande fait DEUX choses : il lâche la demande, puis
+  //   il lance la partie. L'enchaînement les sépare, `demande` → `hors-ligne` → `partie`, et
+  //   l'appelant réapplique donc l'événement jusqu'à ce que l'état ne bouge plus. C'est sans
+  //   danger : `partie` ne réagit pas au coup d'envoi.
+  // — le fait d'avoir un billet vit dans l'événement, pas dans l'état (`sas-en-ligne` contre
+  //   `sas-hors-ligne`, `fin-en-ligne` contre `fin-hors-ligne`). Un second axe dans l'état
+  //   doublerait la table pour une information que l'appelant a déjà sous la main.
+  const MATCH_STEPS = ['hors-ligne', 'demande', 'billet', 'partie', 'rapport', 'fini'];
+  function matchFlow(step, event){
+    const from = MATCH_STEPS.includes(step) ? step : 'hors-ligne';
+    switch (from + ':' + event) {
+      case 'hors-ligne:sas-en-ligne':   return 'demande';
+      case 'fini:sas-en-ligne':         return 'demande';
+      case 'fini:sas-hors-ligne':       return 'hors-ligne';
+      case 'demande:billet':            return 'billet';
+      case 'demande:echec':             return 'hors-ligne';
+      case 'demande:delai':             return 'hors-ligne';
+      case 'demande:illisible':         return 'hors-ligne';
+      case 'demande:coup-denvoi':       return 'hors-ligne';
+      case 'hors-ligne:coup-denvoi':    return 'partie';
+      case 'billet:coup-denvoi':        return 'partie';
+      case 'partie:fin-en-ligne':       return 'rapport';
+      case 'partie:fin-hors-ligne':     return 'fini';
+      case 'rapport:reglement':         return 'fini';
+      case 'rapport:echec':             return 'fini';
+      default:                          return from;
+    }
+  }
+  // Ce qu'un rapport de fin de partie a le droit de contenir. La liste sert deux fois : elle dit
+  // à `reportFrom` quoi recopier, et à `checkReport` quoi refuser.
+  //
+  // Deux montants seulement, et ils ne jouent pas le même rôle :
+  // — `purseCents`, la sacoche portée. Le serveur ne sait pas la refaire ; il la bornera par
+  //   `purseBound`, et c'est tout ce qu'il peut faire honnêtement tant que rien n'est simulé.
+  // — `declaredNetCents`, ce que le client CROIT avoir gagné. Il est conservé pour MESURER
+  //   l'écart avec le calcul du serveur, jamais pour payer. Le jeter perdrait les mesures sur
+  //   lesquelles un seuil se fixera plus tard.
+  // Tout le reste est un fait : une durée, des comptes, un rang, un booléen.
+  const REPORT_FIELDS = {
+    seconds:          { kind: 'entier', min: 0 },
+    kills:            { kind: 'entier', min: 0 },
+    deaths:           { kind: 'entier', min: 0 },
+    rank:             { kind: 'entier', min: 1 },
+    cubes:            { kind: 'entier', min: 0 },
+    damage:           { kind: 'entier', min: 0 },
+    cashedOut:        { kind: 'booleen' },
+    purseCents:       { kind: 'entier', min: 0 },
+    declaredNetCents: { kind: 'entier', min: 0 },
+  };
+  // Construit le rapport à partir de l'état de fin de partie. La liste blanche est la seule
+  // porte : un état de jeu porte la mise, le pot, le portefeuille et bien d'autres montants, et
+  // aucun d'eux n'a de raison de traverser le réseau — le serveur les recalcule depuis le billet.
+  //
+  // Les comptes absents valent zéro, parce qu'un fait qui n'a pas eu lieu vaut zéro. Les montants
+  // absents valent `null`, pour la raison déjà écrite au-dessus de `toCents` : un zéro silencieux
+  // se paie, une valeur absente se repère — et `checkReport` la refusera bruyamment.
+  function reportFrom(state){
+    const s = (state && typeof state === 'object') ? state : {};
+    const compte = v => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0; };
+    const centimes = v => (typeof v === 'number' && Number.isFinite(v)) ? Math.max(0, Math.trunc(v)) : null;
+    return {
+      seconds: compte(s.seconds),
+      kills: compte(s.kills),
+      deaths: compte(s.deaths),
+      // Un encaissement anticipé n'a pas de rang à l'écran, et le serveur en veut un entier :
+      // partir de 1 est la lecture honnête, on est sorti avec l'argent.
+      rank: Math.max(1, compte(s.rank)),
+      cubes: compte(s.cubes),
+      damage: compte(s.damage),
+      cashedOut: !!s.cashedOut,
+      purseCents: centimes(s.purseCents),
+      declaredNetCents: centimes(s.declaredNetCents),
+    };
+  }
+  // L'analyseur strict, celui que le serveur opposera au rapport rendu. Il REFUSE tout champ
+  // inconnu au lieu de l'ignorer : `PATCH /api/me` ignore les champs en trop et c'est bien pour
+  // un profil, mais sur un rapport qui décidera d'un montant le silence est la mauvaise valeur
+  // par défaut. Un champ qu'on ne comprend pas est soit une version qu'on ne sert pas, soit
+  // quelqu'un qui essaie quelque chose ; dans les deux cas on veut le savoir.
+  //
+  // Rend `{ rapport, erreurs }` : le rapport propre si tout va bien, `null` sinon, et des
+  // messages qui disent quoi corriger plutôt que ce qui ne va pas.
+  function checkReport(report){
+    const erreurs = [];
+    const noms = Object.keys(REPORT_FIELDS);
+    if (!report || typeof report !== 'object' || Array.isArray(report)) {
+      erreurs.push({ field: '', code: 'corps', message: 'Le rapport doit être un objet portant ' + noms.join(', ') + '.' });
+      return { rapport: null, erreurs };
+    }
+    for (const nom of Object.keys(report))
+      if (!Object.prototype.hasOwnProperty.call(REPORT_FIELDS, nom))
+        erreurs.push({ field: nom, code: 'inconnu', message: 'Champ inconnu « ' + nom + ' » : retire-le. Le rapport n\'accepte que ' + noms.join(', ') + '.' });
+    const propre = {};
+    for (const nom of noms) {
+      const regle = REPORT_FIELDS[nom], v = report[nom];
+      if (v === undefined || v === null) {
+        erreurs.push({ field: nom, code: 'manquant', message: 'Champ absent « ' + nom + ' » : le rapport doit le porter, même à ' + (regle.kind === 'booleen' ? 'false' : String(regle.min)) + '.' });
+      } else if (regle.kind === 'booleen') {
+        if (typeof v !== 'boolean') erreurs.push({ field: nom, code: 'type', message: '« ' + nom + ' » doit être true ou false, pas ' + typeof v + '.' });
+        else propre[nom] = v;
+      } else if (typeof v !== 'number' || !Number.isSafeInteger(v)) {
+        // Entier sûr et pas seulement entier : au-delà, deux montants différents deviennent le
+        // même nombre, et une comparaison de centimes cesse de vouloir dire quelque chose.
+        erreurs.push({ field: nom, code: 'type', message: '« ' + nom +' » doit être un entier exact, reçu ' + JSON.stringify(v) + '.' });
+      } else if (v < regle.min) {
+        erreurs.push({ field: nom, code: 'borne', message: '« ' + nom + ' » doit valoir au moins ' + regle.min + ', reçu ' + v + '.' });
+      } else {
+        propre[nom] = v;
+      }
+    }
+    return { rapport: erreurs.length ? null : propre, erreurs };
+  }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
            authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
-           toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound };
+           toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
+           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;
 /*CORE-END*/
