@@ -356,6 +356,42 @@ la seule chose qui compte pour la suite : la collision ne dépend plus du pas, d
 embarque, et ils reconstruisent l'ancien test ponctuel pour vérifier qu'il manquait bien le cas
 choisi — sans quoi un test qui touche ne prouverait rien.
 
+### Ce que la première partie entière a appris — module 5
+
+**Le harnais a trouvé un vrai bug avant même d'avoir servi à autre chose.** `respawn` tire quarante
+points au hasard dans le cercle, ne retient que ceux où un corps tient, et retombe sur le **centre du
+cercle** quand les quarante échouent — sans jamais vérifier qu'un corps y tient. Or les quarante
+échouent quand le cercle final s'est refermé sur une poche de murs, c'est-à-dire à la toute fin d'une
+partie que personne n'avait jamais simulée. Le brawler réapparaissait alors **dans un mur** :
+`tryMove` refuse les deux axes, il ne bouge plus, et il ne peut même pas être tué puisque les balles
+meurent sur le mur qu'il chevauche. C'est mot pour mot le bug de `spawnPoints` réparé au module 3, au
+même endroit du même problème. Le repli balaie désormais en anneaux jusqu'à trouver du sol libre, et
+il ne consomme **aucun tirage** : rien ne se décale dans le flux `apparition`.
+
+**La position des caisses change sur toutes les graines, et c'est la purge du module 2 qui se
+termine.** `startMatch` plaçait ses caisses avec `Math.hypot`, que ECMAScript laisse
+« implementation-approximated ». Cette géométrie-là ne prend pourtant ses valeurs **que de la
+graine** : elle appartenait à la liste du module 2, qui l'avait manquée parce qu'elle vivait dans
+`startMatch` et non dans une des cinq fonctions nommées. En descendant dans `newMatch`, elle passe à
+`C.dist`. Aucune base n'a jamais tourné, donc ça coûte encore zéro migration ; et la garde textuelle
+des transcendantes couvre désormais `newMatch`.
+
+**Deux noms d'événements de plus, et ils portent le compte à quatorze** : `zone` — le gaz avance, il
+se pose, il prévient trois secondes avant — et `soin`, le cumul de régénération du joueur, qui posait
+un nombre à l'écran depuis le milieu d'une règle. Les dégâts du gaz, eux, réutilisent `degat` avec
+`sur:'gaz'` : le rendu leur garde une branche à part, parce qu'une brûlure continue ne fait pas
+clignoter l'écran en rouge comme un coup encaissé.
+
+**L'entrée du joueur est un objet, et c'est la forme que la trace du module 6 aura.** La souris, les
+deux sticks et les touches deviennent `{mx, mz, ax, az, aimDist, feu}`, lus par `lireEntrees()` dans
+le bloc `Game` et appliqués par `joueurUpdate` dans SIM. `HOLD_REPEAT` descend dans `WBCore` : le
+temps de maintien de la détente décide du nombre de projectiles qu'une entrée produit, donc c'est une
+règle. Ce qui **ne passe pas encore** par cet objet est nommé plus bas, dans les risques.
+
+**Ce que le harnais ne couvre pas : l'écran.** Il prouve que la partie se JOUE, pas qu'elle se VOIT.
+Deux des bugs marquants de `docs/HISTORIQUE.md` n'ont été trouvés que par un navigateur, et ce
+harnais ne les aurait pas attrapés.
+
 ### `CRIT_TEST` meurt
 
 `const CRIT_TEST = false` existe ligne 3957, consommé dans le chemin critique, avec un commentaire
@@ -491,9 +527,11 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
 | Le code a bougé sans changer | corpus **gelé avant le déplacement** : les requêtes de grille et `moveEntity` rendent exactement les mêmes positions qu'avant, sur une trace capturée et figée dans `corpus-grille.json`, lue par `test.js`. *Livré au module 3 : huit graines, cent pas de `moveEntity` sur douze entités synthétiques, le glissement le long des murs, la ligne de vue de près comme de loin, et `spawnPoints` sur les cinq modes — comparés **exactement**, sans tolérance. Un second test vérifie que le corpus contient les deux réponses de chaque règle, sans quoi il passerait sur n'importe quel code* |
 | Une seule copie de chaque règle | `critShot`, `hexDamage`, `dmgMult`, `boxDrop`, `bucketAfterKill`, `cashoutPayout`, `segmentHitsDisc` restent **appelées** depuis `WBCore` ; garde textuelle contre une seconde règle de critique et contre le retour de `CRIT_TEST` ; `api/sim.js` charge le bloc depuis `index.html`, garde bruyante au démarrage |
 | Un seul écrivain de mesh dans `Game` | garde textuelle : un seul `syncMeshes()` pour les corps de brawlers, un seul `syncMonde()` pour tout le reste, un seul `hudFast()` pour les étiquettes du DOM — trois tables annexes, trois lecteurs uniques, tous appelés depuis la boucle d'image et de nulle part ailleurs |
-| Le jeu tourne | sur dix graines et les cinq modes, une partie complète atteint une fin en moins de `zoneTotalS + GRACE`, personne ne termine coincé contre un mur, et le chien de garde `stuckT` est exercé pour de vrai |
+| Le jeu tourne | sur dix graines et les cinq modes, une partie complète atteint une fin en moins de `zoneTotalS + GRACE`, personne ne termine coincé contre un mur, et le chien de garde `stuckT` est exercé pour de vrai. *Livré au module 5 : cinquante parties complètes jouées dans `node test.js`, chacune arrêtée sur un état terminal — une seule équipe en jeu, ou la fin du plan — jamais sur un compteur d'essais. Le chien de garde est compté, pas seulement supposé : plus de deux cents interventions sur les cinquante parties. Et il a trouvé un vrai bug, décrit ci-dessous* |
+| L'empreinte est un entier, prise à intervalle fixe de pas | `EMPREINTE_PAS = 60`, un condensé par seconde simulée, accumulé ; `empreinte(G)` referme l'accumulation sur le nombre de pas et sur `SIM_VERSION`. Elle voit la position **et la vitesse** : sans la vitesse, un brawler poussé contre un mur rendait le même condensé quelles que soient ses commandes |
 | Les tirs ne traversent plus les corps ni les murs | collision **balayée** par `WBCore.segmentHitsDisc` sur le segment d'un pas, corps comme murs. *Livré au module 4 : éprouvée jusqu'à 300 blocs par seconde, avec l'ancien test ponctuel reconstruit dans `test.js` pour prouver qu'il manquait bien le cas choisi, et la mort de la balle **au** mur vérifiée à un quart de case près* |
 | Les points d'apparition placent un corps entier | `spawnPoints` place chaque brawler là où son corps de 0,42 tient, sur deux cents graines et les cinq modes. **Le bug est déjà corrigé dans le code** ; ce qui manque est le test de non-régression, et le module le livre comme tel. *Fait au module 3 : `spawnPoints` étant descendue dans SIM, le test l'appelle telle quelle au lieu d'en extraire la source, et vérifie le placement avec un `free()` réécrit exprès — une seconde opinion, pas la même* |
+| Le contrat public de SIM tient dans quatre noms | `newMatch(graine, mode, miseCents, brawler)`, `step(G, entrees)`, `empreinte(G)`, `SIM_VERSION` — plus `drainer` et `condenseEtat`. Le bloc `Game` n'appelle plus une seule fonction de simulation depuis sa boucle : il LIT les commandes, fait tiquer son HUD et TRADUIT les événements. Garde textuelle sur les deux côtés à la fois : ce que `step` doit contenir, ce que `loop` n'a pas le droit de contenir |
 | La conservation de l'argent est vraie à chaque pas de la **vraie** simulation | à chaque pas, sacoches + sacoches au sol + encaissé = mise × sièges, sur les quatre tables et les cinq modes ; et **assertée une fois de plus au moment du règlement**, sur la partie réellement rejouée. *Livré au module 4 sur un banc qui appelle les vraies fonctions de SIM — vingt combinaisons, mille cinq cents pas chacune, moitié au coup d'envoi et moitié dans un gaz déjà refermé. Ce n'est pas encore une partie entière : les bots descendent au module 5* |
 | Les trois chemins de la sacoche tiennent | un kill la transfère entière, une mort par gaz la lâche au sol, un encaissement la met à zéro |
 | Aucun montant ne vient du client | `net_cents` sort de la partie rejouée ; un corps dont les kills, la sacoche et la durée sont gonflés écrit une ligne **strictement identique** à celle d'un corps sincère — patron de la 02a étendu des paramètres aux faits |
@@ -539,7 +577,22 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
   fait toucher des tirs qui passaient à côté, surtout de près et surtout avec les armes rapides, et
   les bots en profitent autant que le joueur. La session due a maintenant **trois** changements à
   juger — pas fixe, personnalité des bots, portée réelle des tirs — et elle est due **avant le
-  module 5**, comme cette section l'exige depuis le début.*
+  module 5**, comme cette section l'exige depuis le début.* *Le module 5 n'ajoute pas de quatrième
+  changement de ressenti : les bots, le joueur et le gaz ont été déplacés, pas réécrits. Il déplace en
+  revanche le MONDE — les caisses de toutes les graines changent de place, pour la raison du module 2
+  et au même coût, zéro. La session de jeu réelle n'a toujours pas eu lieu.*
+- **Toutes les commandes du joueur ne passent pas encore par `entrees`, et le module 6 doit le
+  savoir.** Le super (barre d'espace, clic droit, stick), le fumigène, la visée automatique (`Q`, tap
+  tactile) et le tir d'une pression brève partent d'un **événement d'entrée**, entre deux pas, pas du
+  pas lui-même — c'est ce que le jeu a toujours fait et le module 5 ne l'a pas changé pour ne pas
+  déplacer la latence ressentie. La trace devra donc porter ces actions ponctuelles **horodatées en
+  pas** en plus des six nombres continus, sans quoi une partie rejouée n'aura ni super ni fumigène.
+  Le harnais de `test.js` les joue déjà exactement comme le jeu les joue — entre deux `step` — et les
+  enregistre dans sa trace : la forme est éprouvée, il reste à la transporter.
+- **`respawn` ne remet pas `knockx`/`knockz` à zéro.** Un brawler qui réapparaît à l'autre bout de la
+  carte garde la poussée de l'explosion qui l'a tué. Trouvé en lisant l'état d'une entité coincée,
+  laissé tel quel : c'est un changement de ressenti que rien ne peut juger, et cette phase en a déjà
+  trois.
 - **La trace est une surface d'attaque nouvelle** : corps volumineux, trace adversariale qui maximise
   le coût du rejeu, joueur qui rejoue en boucle. D'où une borne dure sur le nombre de pas, un budget
   de temps de calcul, une route séparée de celle qui règle l'argent, et la limitation de débit
@@ -579,8 +632,13 @@ Aujourd'hui ce corps passe. Après le dernier module, il vaut zéro.
    `collect`, `respawn`, `botCashOut`, `hurtTurret`, `checkTeams`, `doCashOut` — plus le fumigène
    entier. La conservation de l'argent se vérifie désormais **à chaque pas du vrai code**, sur les
    quatre tables et les cinq modes, et plus sur un modèle. La collision est balayée.
-5. **Les bots, et une partie entière sans navigateur.** Le trou le plus ancien du dossier se referme
-   **avant** que le serveur n'ait besoin de quoi que ce soit.
+5. **Les bots, et une partie entière sans navigateur. Fait.** `findCover`, `findTarget`, `pickGoal`,
+   `botUpdate`, le joueur (`joueurUpdate`), `commonUpdate` et `zoneUpdate` sont descendus dans SIM,
+   qui expose désormais son **contrat public** : `newMatch(graine, mode, miseCents, brawler)`,
+   `step(G, entrees)` qui rend la liste d'événements du pas, `empreinte(G)`, et `SIM_VERSION`.
+   `node test.js` joue **cinquante parties complètes** — dix graines × cinq modes — du coup d'envoi
+   à la dernière phase du gaz. Le trou le plus ancien du dossier se referme **avant** que le serveur
+   n'ait besoin de quoi que ce soit.
 6. **La trace : `api/sim.js`, `sim_version`, enregistrement et route d'insertion seule.** Aucune
    décision d'argent ne change encore.
 7. **Le rejeu décide.** La route recalcule les faits, l'état terminal devient obligatoire, la

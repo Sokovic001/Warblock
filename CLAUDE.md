@@ -25,17 +25,20 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
 3. `<script>` **`WBSim`** — l'**état** d'une partie et ce qui le fait avancer, entre
    `/*SIM-START*/` et `/*SIM-END*/`. Même discipline que `WBCore` : ni DOM, ni Three.js, ni
    horloge, ni `Math.random`. L'état d'une partie n'y est jamais une fermeture lexicale, c'est
-   toujours un **paramètre explicite**, le premier, nommé `G`. Depuis la phase 02b y vivent la
-   grille, le mouvement, la ligne de vue, les points de départ, l'état d'une entité, puis tout ce
-   qui décide d'un chiffre : les tirs, les dégâts, la mort, le butin, l'encaissement et le
-   fumigène. Il ne sonne pas et n'écrit pas à l'écran : il rend une **liste d'événements**
-   horodatés en pas, que `Game` traduit.
-4. `<script>` **Game** — rendu Three.js, entrées clavier/tactile, IA des bots, audio, HUD. Il
-   reprend les noms de `WBSim` en une seule ligne de déstructuration, garde tout ce qu'il dessine
-   dans **trois tables annexes** — `MESHES` (corps des brawlers, par `eid`), `VIS` (projectiles,
-   caisses, butin, zones, tourelles, grenades, nuages) et `LABELS` (étiquettes du DOM) — chacune
-   avec un **unique** lecteur : `syncMeshes()`, `syncMonde()` et `hudFast()`, tous appelés une fois
-   par image.
+   toujours un **paramètre explicite**, le premier, nommé `G`. Depuis la phase 02b y vit **toute la
+   simulation** : la grille, le mouvement, la ligne de vue, les points de départ, l'état d'une
+   entité, les tirs, les dégâts, la mort, le butin, l'encaissement, le fumigène, les bots, le
+   joueur et le gaz. Il ne sonne pas et n'écrit pas à l'écran : il rend une **liste d'événements**
+   horodatés en pas, que `Game` traduit. Son contrat public tient en quatre noms —
+   `newMatch(graine, mode, miseCents, brawler)`, `step(G, entrees)`, `empreinte(G)` et
+   `SIM_VERSION` — et c'est par eux que `node test.js` joue des parties entières sans navigateur.
+4. `<script>` **Game** — rendu Three.js, entrées clavier/tactile, audio, HUD. Il reprend les noms de
+   `WBSim` en une seule ligne de déstructuration, garde tout ce qu'il dessine dans **trois tables
+   annexes** — `MESHES` (corps des brawlers, par `eid`), `VIS` (projectiles, caisses, butin, zones,
+   tourelles, grenades, nuages) et `LABELS` (étiquettes du DOM) — chacune avec un **unique**
+   lecteur : `syncMeshes()`, `syncMonde()` et `hudFast()`, tous appelés une fois par image. Son pas
+   de simulation ne fait plus que trois choses : **lire** les commandes (`lireEntrees()`), appeler
+   `WBSim.step`, et **traduire** les événements rendus.
 
 Les blocs 2 et 3 sont les deux parties testées. Plus la logique y descend, mieux le projet se
 porte : le reste a besoin d'un navigateur pour tourner.
@@ -45,8 +48,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 333 tests sur le jeu (`node test.js`) et
-  104 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 345 tests sur le jeu (`node test.js`) et
+  113 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -125,10 +128,21 @@ porte : le reste a besoin d'un navigateur pour tourner.
   `.mesh`, `.lbl`, `world.` ni `discard(` — c'est le patron du `respawn()` défini deux fois,
   transposé.
 - **La simulation raconte, le rendu traduit.** `step()` rend une liste d'**événements** horodatés
-  en pas — douze noms fermés, de `tir` à `fin` — et c'est le bloc `Game`, et lui seul, qui en fait
-  des sons, des nombres flottants et des lignes de kill feed. Deux tests l'encadrent : aucun type
-  inconnu n'est produit, et le lecteur les traduit tous. La garde textuelle du bloc SIM interdit
+  en pas — quatorze noms fermés, de `tir` à `soin` — et c'est le bloc `Game`, et lui seul, qui en
+  fait des sons, des nombres flottants et des lignes de kill feed. Deux tests l'encadrent : aucun
+  type inconnu n'est produit, et le lecteur les traduit tous. La garde textuelle du bloc SIM interdit
   `snd(`, `floatText(`, `feed(`, `endMatch(`, `botSay(`, `sendEmote(`, `deathSting(` et `critFx(`.
+- **Une partie entière se joue sans navigateur.** `node test.js` en joue **cinquante** — dix graines
+  × cinq modes — du coup d'envoi à la dernière phase du gaz, en une vingtaine de secondes. Chacune
+  s'arrête sur un état **terminal**, une seule équipe en jeu ou la fin du plan de zone, jamais sur un
+  compteur d'essais épuisé ; personne n'y finit coincé contre un mur ; le chien de garde `stuckT` des
+  bots est **compté**, pas supposé. Même graine et même trace d'entrées rendent le même état final et
+  la même **empreinte** — deux fois dans le processus, une fois dans un processus fils — et changer
+  un seul pas de la trace change l'empreinte. Un **plancher de performance** garde le tout : une
+  partie solo complète, 9 240 pas à vingt brawlers, doit tenir sous trois secondes.
+- **L'enveloppe de `matchVerdict` est confrontée au code du jeu**, et plus à l'intuition : les
+  chiffres des cinquante parties jouées par la machine — kills, durée, rang, cubes, sacoche — passent
+  tous le verdict. Le rang y frôle sa borne, et c'est exactement celle que la 02a avait dû élargir.
 - **L'argent se conserve à chaque pas de la vraie simulation** : sacoches + sacoches tombées au sol
   + encaissé = mise × sièges, sur les quatre tables et les cinq modes, sur un banc qui appelle les
   fonctions de `WBSim` telles quelles. C'est cette conservation qui fonde `purseBound`, donc le
@@ -172,14 +186,14 @@ tout solde y est modifiable depuis la console.
   - Phase 02b — le serveur **rejoue** la partie : pas de temps fixe, hasard tiré de la graine,
     simulation sortie du rendu dans un bloc `/*SIM-START*/` … `/*SIM-END*/`, et un serveur qui
     refait la partie depuis la graine publique et la trace des entrées du joueur. **EN COURS** :
-    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 à 4 sont livrés — pas fixe,
+    la spécification est écrite (`docs/PHASE-02B.md`), les modules 1 à 5 sont livrés — pas fixe,
     arrêt sur image sorti des règles, hasard de la simulation semé par flux nommés, géométrie de
-    la graine sans transcendantes, le bloc SIM qui existe désormais, et les tirs, les dégâts, la
-    mort et le butin qui y sont descendus avec leur flux d'événements — et les trois autres
-    restent à faire. Les **bots** vivent toujours dans le script `Game`, aucune **partie entière**
-    ne se joue encore sans navigateur, et `net_cents` vient toujours d'une sacoche déclarée par le
-    client. Ce
-    n'est pas une autorité temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à
+    la graine sans transcendantes, le bloc SIM qui existe désormais, les tirs, les dégâts, la mort
+    et le butin qui y sont descendus avec leur flux d'événements, et enfin les bots, le joueur et
+    le gaz, si bien qu'une **partie entière se joue désormais sans navigateur** dans `node test.js`.
+    Restent les deux modules qui touchent à l'argent : `api/sim.js` et l'enregistrement de la trace,
+    puis le rejeu qui décide. `net_cents` vient donc toujours d'une sacoche déclarée par le client.
+    Ce n'est pas une autorité temps réel : les dix-neuf adversaires sont des bots, il n'y a rien à
     arbitrer en direct.
   Tant que 02b n'est pas faite, **la phase 02 n'est pas faite et aucun euro n'entre** : le verdict de
   02a est une enveloppe de plausibilité, pas de l'anti-triche, et il n'arrête presque rien en

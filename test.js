@@ -2543,8 +2543,12 @@ test('le gaz est lu par zoneAt, jamais recalculé à côté', () => {
   // refaisait le décompte et l'interpolation à la main. La copie testée était la morte, et une
   // mutation qui doublait la durée d'un resserrement laissait toute la suite verte. C'est le patron
   // « respawn() définie deux fois » de docs/HISTORIQUE.md, à l'envers.
-  const zu = JEU.slice(JEU.indexOf('function zoneUpdate('), JEU.indexOf('// ---------- input ----------'));
+  // `zoneUpdate` est descendue dans le bloc SIM au module 5 : elle décide de vrais faits — les
+  // dégâts du gaz et la mort qui s'ensuit — et elle ne pouvait pas rester du côté que rien
+  // n'exécute. Ce qu'elle a laissé derrière elle est le cercle à l'écran, dans `syncMonde`.
+  const zu = sim.slice(sim.indexOf('\nfunction zoneUpdate('), sim.indexOf('// ---------- le contrat public'));
   assert.ok(zu.length > 500, 'zoneUpdate n\'a pas été retrouvée');
+  assert.ok(!JEU.includes('function zoneUpdate('), 'zoneUpdate est restée dans le bloc Game');
   assert.match(zu, /C\.zoneAt\(G\.zonePlan,G\.time\)/, 'zoneUpdate doit LIRE le plan par zoneAt');
   // Et la seconde implémentation ne doit pas repousser : ni compteur local, ni interpolation.
   for (const interdit of ['z.timer-=dt', 'z.from', 'shrinkS', 'waitS', 'z.phase++'])
@@ -2729,14 +2733,24 @@ const codeDe = t => t.split('\n').filter(l => !l.trim().startsWith('//')).join('
 test('aucune fonction de simulation n\'est appelée depuis la boucle d\'image', () => {
   assert.ok(PAS_FIXE.length > 400, 'simPas n\'a pas été retrouvée');
   assert.ok(IMAGE.length > 800, 'loop n\'a pas été retrouvée');
-  const simulation = ['playerUpdate(', 'botUpdate(', 'commonUpdate(', 'projUpdate(', 'zonesUpdate(',
+  // Le pas entier est descendu dans `WBSim.step` au module 5 : c'est LUI qui doit appeler la
+  // simulation, et la boucle d'image qui ne doit jamais le faire. La garde compte donc désormais
+  // deux côtés — ce que `step` contient, et ce que `loop` n'a pas le droit de contenir.
+  const ETAPE = sim.slice(sim.indexOf('\nfunction step(G, entrees){'), sim.indexOf('// ---------- l\'empreinte'));
+  assert.ok(ETAPE.length > 400, 'WBSim.step n\'a pas été retrouvée');
+  const simulation = ['joueurUpdate(', 'botUpdate(', 'commonUpdate(', 'projUpdate(', 'zonesUpdate(',
                       'nadesUpdate(', 'smokesUpdate(', 'zoneUpdate(', 'respawn(', 'G.time+='];
   for (const nom of simulation) {
-    assert.ok(PAS_FIXE.includes(nom), `${nom} doit être appelé depuis le pas fixe`);
+    assert.ok(ETAPE.includes(nom), `${nom} doit être appelé depuis le pas de simulation`);
     assert.ok(!codeDe(IMAGE).includes(nom), `${nom} est appelé depuis la boucle d'image, donc avec un dt d'image`);
+    assert.ok(!codeDe(PAS_FIXE).includes(nom), `${nom} doit être appelé par WBSim.step, pas par le bloc Game`);
   }
+  // Et ce que `simPas` garde n'est plus qu'un aiguillage : lire les commandes, faire tiquer le HUD,
+  // traduire ce que le pas a raconté.
+  assert.match(codeDe(PAS_FIXE), /WBSim\.step\(G,lireEntrees\(\)\)/, 'simPas doit passer par WBSim.step');
   // Et le pas fixe ne connaît qu'un seul `dt` : celui de WBCore. Aucune horloge, aucun `now`.
   assert.match(PAS_FIXE, /const dt=C\.SIM\.stepS;/, 'le pas doit venir de WBCore, jamais d\'une constante recopiée');
+  assert.match(ETAPE, /const dt=C\.SIM\.stepS;/, 'le pas de WBSim.step doit venir de WBCore lui aussi');
   for (const interdit of ['now', 'performance', 'Date.now', 'requestAnimationFrame', 'simReste'])
     assert.ok(!codeDe(PAS_FIXE).includes(interdit), `${interdit} n'a rien à faire dans un pas de simulation`);
   // La boucle, elle, accumule le temps réel et n'exécute que des pas entiers.
@@ -2884,9 +2898,9 @@ const sansCommentaires = t => t.split('\n').filter(l => !l.trim().startsWith('//
 const compte = (t, motif) => (t.match(motif) || []).length;
 // Le chemin de simulation : tout ce qui décide d'un fait de la partie.
 const HASARD_INTERDIT = ['makeEntity', 'spawnPoints', 'fireSpec', 'hurtBox', 'spawnPickup', 'collect',
-                         'respawn', 'pickGoal', 'botUpdate', 'findTarget', 'projUpdate', 'playerUpdate',
+                         'respawn', 'pickGoal', 'botUpdate', 'findTarget', 'projUpdate', 'joueurUpdate',
                          'commonUpdate', 'damage', 'useSuper', 'dashUpdate', 'zoneUpdate', 'zonesUpdate',
-                         'nadesUpdate', 'buildWorld', 'simPas'];
+                         'nadesUpdate', 'buildWorld', 'simPas', 'newMatch', 'step', 'condenseEtat'];
 // Le cosmétique, et la seule exception qui n'en est pas une : la graine de secours.
 const HASARD_ATTENDU = {
   randomName:  'le pseudo d\'un bot au sas d\'attente, qui ne joue aucune partie',
@@ -2908,7 +2922,7 @@ test('aucun Math.random dans les fonctions du chemin de simulation', () => {
   // jouaient pas la même partie.
   assert.ok(!sansCommentaires(JEU).includes('G.rng'),
     'G.rng est de retour : la simulation retire dans le flux du décor');
-  assert.match(JEU, /alea:C\.makeFlux\(seed\)/, 'les flux de la partie doivent naître de la graine');
+  assert.match(sim, /alea:C\.makeFlux\(seed\)/, 'les flux de la partie doivent naître de la graine');
 });
 test('chaque usage tire dans le flux qui porte son nom', () => {
   // Sans cette table, « plus aucun Math.random » se satisferait d'un flux unique rebaptisé, et
@@ -2921,7 +2935,7 @@ test('chaque usage tire dans le flux qui porte son nom', () => {
     respawn:     ['apparition'],
     pickGoal:    ['bots/objectif'],
     botUpdate:   ['bots/encaissement', 'bots/visee', 'bots/objectif'],
-    startMatch:  ['butin/position', 'bots/identite', 'apparition'],
+    newMatch:    ['butin/position', 'bots/identite', 'apparition'],
   };
   for (const [nom, flux] of Object.entries(attendus)) {
     const corps = sansCommentaires(corpsDe(nom));
@@ -2929,7 +2943,7 @@ test('chaque usage tire dans le flux qui porte son nom', () => {
       assert.ok(corps.includes(`'${f}'`), `${nom} ne tire plus dans le flux ${f}`);
   }
   // `spawnPoints` reçoit son flux de l'appelant : c'est celui des apparitions, et pas un autre.
-  assert.match(sansCommentaires(corpsDe('startMatch')), /spawnPoints\(G,\s*G\.alea\('apparition'\)/);
+  assert.match(sansCommentaires(corpsDe('newMatch')), /spawnPoints\(G,\s*G\.alea\('apparition'\)/);
   // Et AUCUN site d'appel du jeu ne demande un nom qui n'existe pas. `makeFlux` lance sur un nom
   // inconnu, mais seulement quand la ligne s'exécute : une faute de frappe dans une branche rare —
   // le fumigène d'un bot acculé — n'apparaîtrait qu'en pleine partie, chez un joueur. Ici elle
@@ -3213,7 +3227,7 @@ test('un seul écrivain de corps d\'entité dans le bloc Game : syncMeshes, et r
     'la recopie se fait une fois par image, pas une fois par pas de simulation');
   // Et aucune fonction de simulation n'écrit plus dans un corps.
   for (const nom of ['moveEntity', 'respawn', 'kill', 'botCashOut', 'dashUpdate', 'commonUpdate',
-                     'botUpdate', 'playerUpdate', 'makeEntity', 'simPas'])
+                     'botUpdate', 'joueurUpdate', 'makeEntity', 'newMatch', 'step', 'zoneUpdate'])
     assert.ok(!sansCommentaires(corpsDe(nom)).includes('.mesh'),
       `${nom} touche de nouveau à un corps : l'unique écrivain est syncMeshes`);
 });
@@ -3880,6 +3894,408 @@ test('bac à sable : le combat, la mort et le butin tournent avec document, wind
     assert.ok(!(champ in e), `une entité porte de nouveau « ${champ} »`);
   for (const p of G.projs) assert.ok(!('mesh' in p), 'un projectile porte un objet de la scène');
   for (const pk of G.pickups) assert.ok(!('mesh' in pk) && !('shadow' in pk), 'un butin porte un objet de la scène');
+});
+
+console.log('Les bots, et une partie ENTIÈRE sans navigateur');
+// CE QUE CETTE SECTION FERME, et c'est le trou le plus ancien du dossier : « aucun test ne regarde
+// le jeu tourner ». Tout ce qui décide d'un fait de partie vit désormais dans `WBSim` — la grille,
+// le combat, le butin, les bots, le joueur, le gaz — et `WBSim.step` avance d'un pas. On peut donc
+// jouer une partie complète dans Node, du coup d'envoi à la dernière phase du gaz, sans navigateur,
+// sans réseau et sans base.
+//
+// CE QU'ELLE NE COUVRE PAS, et il faut le dire ici plutôt que dans un commit qu'on ne relira pas :
+// L'ÉCRAN. Que le HUD affiche le bon nombre, que la caméra suive, qu'un buisson se fonde, qu'un
+// bouton réponde au doigt — rien de tout cela n'est ici et rien ne peut l'être. Deux des bugs
+// marquants de docs/HISTORIQUE.md n'ont été trouvés que par un navigateur, et ce harnais ne les
+// aurait pas attrapés. Il prouve que la partie se JOUE, pas qu'elle se VOIT.
+
+// LE HARNAIS, ÉCRIT EN TEXTE, et c'est délibéré : il tourne à DEUX endroits — dans ce processus, et
+// dans un processus fils qui ne partage rien avec lui. Une seconde copie recopiée à la main serait
+// exactement ce que le dépôt interdit partout ailleurs ; ici la source est unique et les deux côtés
+// l'évaluent.
+//
+// Le « pilote » est la conduite du JOUEUR, et rien d'autre : il ne décide d'aucune règle, il produit
+// les six nombres et les deux booléens que le bloc `Game` lit sur la souris et les sticks. C'est
+// exactement la forme que la trace du module 6 enregistrera.
+const HARNAIS = `
+function pilote(C, S, G){
+  const p = G.player, portee = p.brawler.attack.range;
+  if (!p.alive) return { mx:0, mz:0, ax:p.ax, az:p.az, aimDist:portee, feu:false, sup:false };
+  let cible = null, bd = 1e9;
+  for (const e of G.ents){
+    if (e === p || !e.alive || e.team === p.team) continue;
+    const d = C.dist(e.x - p.x, e.z - p.z);
+    if (d < bd && S.canSee(G, p, e)){ bd = d; cible = e; }
+  }
+  let ax = p.ax, az = p.az, mx = 0, mz = 0, feu = false, sup = false, aimDist = portee;
+  if (cible){
+    ax = (cible.x - p.x) / bd; az = (cible.z - p.z) / bd;
+    aimDist = Math.min(bd, portee);
+    feu = bd < portee;
+    sup = p.super >= p.brawler.super.cost;
+    if (bd > portee * 0.6){ mx = ax; mz = az; } else { mx = -az; mz = ax; }
+  } else {
+    const dx = G.zone.cx - p.x, dz = G.zone.cz - p.z, d = C.dist(dx, dz) || 1;
+    if (d > 2){ mx = dx / d; mz = dz / d; ax = mx; az = mz; }
+  }
+  if (!S.inZone(G, p.x, p.z, 1.5)){
+    const dx = G.zone.cx - p.x, dz = G.zone.cz - p.z, d = C.dist(dx, dz) || 1;
+    mx = dx / d; mz = dz / d;
+  }
+  // Contourner un mur, comme un joueur le ferait. Sans cette ligne le pilote pousse la pierre
+  // jusqu'à la fin du gaz, et le harnais ne prouve plus que le jeu tourne : il prouve qu'une statue
+  // se fait gazer.
+  if ((mx || mz) && !S.free(G, p.x + mx * 0.9, p.z + mz * 0.9)){
+    const s = (p.eid % 2) ? 1 : -1;
+    if (S.free(G, p.x - mz * s * 0.9, p.z + mx * s * 0.9)){ const t = mx; mx = -mz * s; mz = t * s; }
+    else { const t = mx; mx = mz * s; mz = -t * s; }
+  }
+  return { mx, mz, ax, az, aimDist, feu, sup };
+}
+// UNE PARTIE ENTIÈRE. Elle s'arrête sur un état TERMINAL — une seule équipe encore en jeu, ou la
+// fin du plan de zone — et jamais sur un compteur d'essais. La borne de pas est un chien de garde :
+// si elle se déclenche, c'est que ni l'une ni l'autre des deux fins n'est jamais arrivée, et c'est
+// un défaut, pas une fin.
+function jouerPartie(C, S, graine, cleMode, miseCents, cleBrawler, trace){
+  const mode = C.MODES[cleMode];
+  const G = S.newMatch(graine, mode, miseCents, C.BRAWLERS[cleBrawler]);
+  const planS = C.zoneTotalS(G.zonePlan);
+  const borne = Math.ceil((planS + C.GRACE) / C.SIM.stepS);
+  const attendu = miseCents * C.seatsOf(mode);
+  const sortie = [];
+  let pas = 0, fin = null, issue = 'borne', argentKO = 0, echappes = 0, degatsGaz = 0;
+  while (pas < borne){
+    const e = trace ? (trace[pas] || {}) : pilote(C, S, G);
+    if (!trace) sortie.push(e);
+    // Le super et le gadget partent encore d'un ÉVÉNEMENT d'entrée, hors du pas fixe, exactement
+    // comme la barre d'espace du jeu : ils sont donc joués ici, entre deux pas, et enregistrés dans
+    // la trace comme le reste. Le module 6 devra les y retrouver.
+    if (e.sup && G.player.alive) S.useSuper(G, G.player, e.aimDist);
+    for (const ev of S.step(G, e)){
+      if (ev.type === 'fin' && !fin) fin = ev;
+      if (ev.type === 'degat' && ev.sur === 'gaz') degatsGaz++;
+    }
+    pas++;
+    let somme = 0;
+    for (const en of G.ents) somme += en.pouch;
+    for (const pk of G.pickups) if (pk.kind === 'cash') somme += pk.amount;
+    if (C.toCents(somme + (G.encaisse || 0)) !== attendu) argentKO++;
+    for (const en of G.ents) if (en.escapeT > 0){ echappes++; break; }
+    if (S.aliveTeams(G).size <= 1){ issue = 'vainqueur'; break; }
+    if (G.time >= planS){ issue = 'plan'; break; }
+  }
+  const coinces = G.ents.filter(e => e.alive && !S.free(G, e.x, e.z));
+  const p = G.player;
+  return { G, trace: trace || sortie, pas, fin, issue, argentKO, echappes, degatsGaz,
+           coinces: coinces.map(e => e.name + '@' + e.x.toFixed(2) + ',' + e.z.toFixed(2)),
+           debloques: G.debloques | 0,
+           empreinte: S.empreinte(G),
+           // L'état final, sous une forme comparable telle quelle. Les positions ne sont PAS
+           // arrondies ici : ce que compare la reproductibilité, c'est l'égalité exacte de deux
+           // exécutions du même code sur le même moteur, pas la tolérance entre deux moteurs.
+           etat: G.ents.map(e => [e.eid, e.name, e.alive, e.cashedOut, e.hp, e.x, e.z, e.vx, e.vz,
+                                  e.pouch, e.cubes, e.kills, e.lives, e.ammo]),
+           // Le rapport de fin, construit exactement comme « endMatch » le construit.
+           rapport: C.reportFrom({
+             seconds: G.survivedT || G.time,
+             kills: p.kills,
+             deaths: Math.max(0, C.livesFor(mode) - p.lives),
+             rank: (fin && fin.gagne) ? 1 : (fin ? fin.rang : Math.max(1, S.aliveTeams(G).size)),
+             cubes: p.cubes,
+             damage: G.dmgDealt,
+             cashedOut: !!(mode.cashout && fin && fin.cashedOut),
+             purseCents: C.toCents(p.pouch),
+             declaredNetCents: (fin && fin.gagne) ? C.toCents(C.cashoutPayout(p.pouch).net) : 0,
+           }) };
+}
+return { pilote, jouerPartie };
+`;
+const H = new Function(HARNAIS)();
+const jouer = (graine, mode, miseCents, brawler, trace) =>
+  H.jouerPartie(C, SIMU, graine, mode, miseCents, brawler, trace);
+
+// Dix graines, les cinq modes, les quatre tables et dix brawlers : cinquante parties complètes,
+// jouées pour de bon. Elles servent à plusieurs tests d'affilée, donc elles se jouent UNE fois.
+const GRAINES = [4101, 4102, 4103, 4104, 4105, 4106, 4107, 4108, 4109, 4110];
+let PARTIES = [];
+
+test('LE JEU TOURNE : dix graines, cinq modes, une partie complète atteint une fin à chaque fois', () => {
+  const modes = Object.keys(C.MODES), brawlers = C.BRAWLER_IDS;
+  for (let mi = 0; mi < modes.length; mi++){
+    for (let gi = 0; gi < GRAINES.length; gi++){
+      const cleMode = modes[mi], mode = C.MODES[cleMode];
+      const mise = C.toCents(C.TIERS[gi % C.TIERS.length].stake);
+      const r = jouer(GRAINES[gi], cleMode, mise, brawlers[(mi * 3 + gi) % brawlers.length]);
+      const ou = `${cleMode} · graine ${GRAINES[gi]}`;
+      // La fin est un état TERMINAL, jamais un compteur d'essais épuisé.
+      assert.notStrictEqual(r.issue, 'borne', `${ou} : ni vainqueur ni fin de plan en ${r.pas} pas`);
+      assert.ok(r.G.time <= C.zoneTotalS(r.G.zonePlan) + C.GRACE,
+        `${ou} : la partie a duré ${r.G.time.toFixed(1)} s pour un plan de ${C.zoneTotalS(r.G.zonePlan)} s`);
+      // PERSONNE NE FINIT COINCÉ CONTRE UN MUR. Un brawler dont le corps ne tient pas là où il est
+      // ne bouge plus de la partie — `tryMove` refuse les deux axes — et il ne peut même pas être
+      // tué, les balles mourant sur le mur qu'il chevauche.
+      assert.deepStrictEqual(r.coinces, [], `${ou} : des vivants sont coincés dans un mur`);
+      PARTIES.push(Object.assign({ cleMode, mode, graine: GRAINES[gi], miseCents: mise }, r));
+    }
+  }
+  assert.strictEqual(PARTIES.length, 50);
+  // Et il s'est passé quelque chose. Sans ces bornes, tout ce qui précède passerait sur une partie
+  // où vingt statues se font gazer en silence.
+  const morts = PARTIES.reduce((n, r) => n + r.G.ents.filter(e => !e.alive).length, 0);
+  const kills = PARTIES.reduce((n, r) => n + r.G.ents.reduce((k, e) => k + e.kills, 0), 0);
+  const caisses = PARTIES.reduce((n, r) => n + r.G.boxes.filter(b => b.hp <= 0).length, 0);
+  const gaz = PARTIES.reduce((n, r) => n + r.degatsGaz, 0);
+  assert.ok(kills > 500, `seulement ${kills} kills sur cinquante parties`);
+  assert.ok(morts > 200, `seulement ${morts} brawlers au tapis`);
+  assert.ok(caisses > 200, `seulement ${caisses} caisses détruites`);
+  assert.ok(gaz > 500, `le gaz n'a brûlé personne (${gaz} ticks)`);
+  const vainqueurs = PARTIES.filter(r => r.issue === 'vainqueur').length;
+  assert.ok(vainqueurs > 20, `seulement ${vainqueurs} parties sur 50 ont fait un vainqueur avant la fin du gaz`);
+});
+
+test('le chien de garde stuckT est exercé POUR DE VRAI, pour la première fois du dépôt', () => {
+  // Ce chien de garde existe depuis longtemps et rien ne l'avait jamais déclenché : les tests
+  // regardaient des bancs de quelques centaines de pas sur des arènes nues, où l'on ne se coince
+  // pas. Un test qui vérifie seulement que « personne ne finit coincé » passerait aussi bien sur un
+  // jeu où le chien de garde est mort — il faut donc compter ses interventions.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  const total = PARTIES.reduce((n, r) => n + r.debloques, 0);
+  const avec = PARTIES.filter(r => r.debloques > 0).length;
+  assert.ok(total > 200, `le chien de garde n'est intervenu que ${total} fois sur cinquante parties`);
+  assert.ok(avec >= 40, `seulement ${avec} parties sur 50 ont eu à débloquer quelqu'un`);
+  // Et l'échappée qu'il déclenche dure vraiment : `escapeT` a été vue armée pendant les parties.
+  assert.ok(PARTIES.reduce((n, r) => n + r.echappes, 0) > 200, 'aucune échappée n\'a jamais couru');
+});
+
+test('L\'ARGENT SE CONSERVE À CHAQUE PAS D\'UNE PARTIE ENTIÈRE, du coup d\'envoi à la fin du gaz', () => {
+  // Le module 4 prouvait cette conservation sur un banc de mille cinq cents pas conduit par une IA
+  // de quelques lignes écrite dans ce fichier. Elle se vérifie désormais sur la VRAIE partie, bots
+  // compris, sur quelque quatre cent mille pas. C'est elle qui fonde `purseBound`, donc le seul
+  // plafond de paiement que le serveur possède.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  for (const r of PARTIES)
+    assert.strictEqual(r.argentKO, 0,
+      `${r.cleMode} · graine ${r.graine} : de l'argent apparaît ou disparaît sur ${r.argentKO} pas`);
+  // Et l'argent a bel et bien circulé : sans ça, la conservation serait vraie parce que rien n'a
+  // bougé. Une sacoche a grossi au-delà de la mise, et de l'argent est sorti par un encaissement.
+  const grosse = Math.max(...PARTIES.map(r => Math.max(...r.G.ents.map(e => C.toCents(e.pouch)))));
+  const encaisse = PARTIES.reduce((n, r) => n + C.toCents(r.G.encaisse || 0), 0);
+  assert.ok(grosse > C.toCents(C.TIERS[0].stake) * 4, `la plus grosse sacoche vaut ${grosse} centimes`);
+  assert.ok(encaisse > 0, 'aucun bot n\'a jamais encaissé sur cinquante parties');
+});
+
+test('L\'ENVELOPPE DE matchVerdict EST CONFRONTÉE AU CODE DU JEU : cinquante parties sincères passent', () => {
+  // LA LEÇON QUE CE DOSSIER A DÉJÀ APPRISE TROIS FOIS : une règle de plausibilité se vérifie contre
+  // le code du jeu, jamais contre l'intuition. Trois contrôles « évidents » de la 02a étaient faux —
+  // « la sacoche vaut la mise sans kill », « pas plus de kills que d'adversaires », « le rang ne
+  // dépasse pas le nombre d'équipes » — et le troisième n'a été démenti qu'au branchement du jeu.
+  // Voici enfin de vraies parties à leur opposer.
+  assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
+  const issues = {};
+  for (const r of PARTIES){
+    const secondes = r.rapport.seconds;
+    // Un billet honnête : ouvert avant le sas, jugé juste après la fin de la partie.
+    const ouvert = 1780000000000;
+    const billet = { mode: r.cleMode, stakeCents: r.miseCents, seats: C.seatsOf(r.mode),
+                     teamSize: r.mode.teamSize, seed: r.graine,
+                     openedAt: ouvert, expiresAt: ouvert + 15 * 60000 };
+    const maintenant = ouvert + (C.LOBBY.wait + secondes + 4) * 1000;
+    const v = C.matchVerdict(billet, r.rapport, maintenant);
+    assert.ok(v.ok, `${r.cleMode} · graine ${r.graine} : l'enveloppe REFUSE une partie sincère — `
+      + `${v.controle} : ${v.motif} (rapport ${JSON.stringify(r.rapport)})`);
+    issues[v.issue] = (issues[v.issue] || 0) + 1;
+    // Et chaque chiffre est dans sa borne, contrôle par contrôle, pour que l'échec dise LEQUEL.
+    assert.ok(r.rapport.kills <= v.limites.killsMax, `kills ${r.rapport.kills} > ${v.limites.killsMax}`);
+    assert.ok(r.rapport.deaths <= v.limites.mortsMax, `morts ${r.rapport.deaths} > ${v.limites.mortsMax}`);
+    assert.ok(r.rapport.rank <= v.limites.rangMax, `rang ${r.rapport.rank} > ${v.limites.rangMax}`);
+    assert.ok(r.rapport.cubes <= C.CUBE.max, `cubes ${r.rapport.cubes} > ${C.CUBE.max}`);
+    assert.ok(r.rapport.purseCents <= v.limites.sacocheMaxCents,
+      `sacoche ${r.rapport.purseCents} > ${v.limites.sacocheMaxCents}`);
+    assert.ok(secondes <= v.limites.dureeMaxS, `durée ${secondes} > ${v.limites.dureeMaxS}`);
+  }
+  // Le harnais joue mal : il perd presque toujours. C'est écrit ici plutôt que caché, parce que
+  // c'est la limite de ce test — le chemin « victoire » de l'enveloppe n'est confronté à une vraie
+  // partie que quand une graine le veut bien, et il garde ses tests propres ailleurs dans ce
+  // fichier. Ce que ces cinquante parties prouvent est l'essentiel : l'enveloppe ne refuse pas un
+  // joueur honnête.
+  assert.ok((issues.defaite || 0) + (issues.victoire || 0) + (issues.encaissement || 0) === 50);
+  // Le rang le plus haut atteint FRÔLE la borne, et c'est exactement le contrôle que la 02a avait
+  // dû élargir : le rang annoncé est celui du JOUEUR, pas celui de son équipe.
+  const rangs = PARTIES.map(r => ({ rang: r.rapport.rank, max: Math.max(1, Math.round(C.seatsOf(r.mode) / r.mode.teamSize)) }));
+  assert.ok(rangs.some(x => x.rang > x.max),
+    'aucune partie n\'a atteint le rang « nombre d\'équipes + 1 » : le contrôle élargi en 02a n\'est plus éprouvé');
+});
+
+test('REPRODUCTIBILITÉ : même graine et même trace, même état final et même empreinte — deux fois', () => {
+  const un = jouer(9091, 'solo', 100, 'hex');
+  const deux = jouer(9091, 'solo', 100, 'hex', un.trace);
+  assert.strictEqual(deux.pas, un.pas, 'la partie rejouée ne dure pas le même nombre de pas');
+  assert.deepStrictEqual(deux.etat, un.etat, 'l\'état final diffère');
+  assert.strictEqual(deux.empreinte, un.empreinte, 'l\'empreinte diffère');
+  assert.deepStrictEqual(deux.rapport, un.rapport, 'le rapport de fin diffère');
+  // Une autre graine ne rend pas la même empreinte : sinon l'égalité ci-dessus ne prouverait rien.
+  assert.notStrictEqual(jouer(9092, 'solo', 100, 'hex').empreinte, un.empreinte);
+  // L'empreinte est un ENTIER 32 bits non signé, et pas un flottant déguisé.
+  assert.ok(Number.isInteger(un.empreinte) && un.empreinte >= 0 && un.empreinte <= 0xffffffff,
+    `l'empreinte vaut ${un.empreinte}`);
+  // Elle est prise à intervalle FIXE de pas, et le bloc le dit lui-même.
+  assert.strictEqual(SIMU.EMPREINTE_PAS, 60);
+  assert.ok(Number.isInteger(SIMU.SIM_VERSION) && SIMU.SIM_VERSION >= 1, 'SIM_VERSION doit être un entier');
+});
+
+test('REPRODUCTIBILITÉ : et dans un processus fils, qui ne partage rien avec celui-ci', () => {
+  // Le patron déjà employé pour le plan de zone et pour les points de départ. Deux appels d'affilée
+  // peuvent se ressembler par accident — un état accumulé dans le module passerait inaperçu ; un
+  // processus neuf ne le peut pas. Le fils charge le MÊME harnais, en texte, et le même index.html.
+  const ici = jouer(3141, 'duo', 50, 'shell');
+  const dehors = require('child_process').execFileSync(process.execPath, ['-e', `
+    const fs = require('fs');
+    const html = fs.readFileSync(process.env.WB_FICHIER, 'utf8');
+    const bloc = html.slice(html.indexOf('/*CORE-' + 'START*/'), html.indexOf('/*CORE-' + 'END*/'));
+    const sim = html.slice(html.indexOf('/*SIM-' + 'START*/'), html.indexOf('/*SIM-' + 'END*/'));
+    const m = { exports: {} }; new Function('module', 'exports', bloc)(m, m.exports);
+    const C = m.exports;
+    const s = { exports: {} }; new Function('module', 'exports', 'WBCore', sim)(s, s.exports, C);
+    const H = new Function(process.env.WB_HARNAIS)();
+    const r = H.jouerPartie(C, s.exports, 3141, 'duo', 50, 'shell');
+    process.stdout.write(JSON.stringify({ pas: r.pas, empreinte: r.empreinte, etat: r.etat, rapport: r.rapport }));
+  `], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+        env: Object.assign({}, process.env, { WB_FICHIER: path.join(__dirname, GAME), WB_HARNAIS: HARNAIS }) });
+  const recu = JSON.parse(dehors);
+  assert.strictEqual(recu.pas, ici.pas, 'un processus neuf ne joue pas le même nombre de pas');
+  assert.strictEqual(recu.empreinte, ici.empreinte, 'un processus neuf ne rend pas la même empreinte');
+  assert.deepStrictEqual(recu.etat, JSON.parse(JSON.stringify(ici.etat)), 'un processus neuf ne finit pas dans le même état');
+  assert.deepStrictEqual(recu.rapport, ici.rapport, 'un processus neuf ne rend pas le même rapport');
+});
+
+test('SENSIBILITÉ DE L\'EMPREINTE : changer UN SEUL pas de la trace la change', () => {
+  // Sans ce test, une empreinte constante passerait tous les tests de reproductibilité ci-dessus et
+  // ne prouverait rien du tout. Ce qu'on change est le MOUVEMENT d'un pas : l'empreinte voit la
+  // position ET la vitesse, donc un pas de commande inversé s'y inscrit tout de suite.
+  const base = jouer(5150, 'solo', 50, 'bolt');
+  let vus = 0;
+  for (const k of [90, 300, 900, 1800, 2700]){
+    const e = base.trace[k];
+    // Un pas où le joueur ne demande rien — mort, ou déjà au centre du cercle — n'a rien à changer,
+    // et l'exiger serait exiger de l'empreinte qu'elle voie ce que la simulation ne retient pas.
+    if (!e || (!e.mx && !e.mz)) continue;
+    const autre = base.trace.slice();
+    autre[k] = Object.assign({}, e, { mx: -e.mx, mz: -e.mz });
+    const r = jouer(5150, 'solo', 50, 'bolt', autre);
+    assert.notStrictEqual(r.empreinte, base.empreinte,
+      `un pas de commande inversé au pas ${k} laisse l'empreinte inchangée`);
+    vus++;
+  }
+  assert.ok(vus >= 3, `seulement ${vus} pas de la trace demandaient un mouvement : le test ne prouve presque rien`);
+  // Et l'empreinte n'est pas qu'une fonction du nombre de pas : deux parties de même longueur,
+  // jouées différemment, se distinguent.
+  const immobile = jouer(5150, 'solo', 50, 'bolt', base.trace.map(() => ({})));
+  assert.notStrictEqual(immobile.empreinte, base.empreinte);
+});
+
+test('PLANCHER DE PERFORMANCE : une partie solo entière tient largement sous la seconde', () => {
+  // POURQUOI CE PLANCHER EXISTE : sans lui, une régression d'un ordre de grandeur se découvre chez
+  // le premier joueur, et côté serveur elle mangerait le budget de rejeu du module 7.
+  //
+  // N ET X, ET LEUR JUSTIFICATION. N est une partie solo complète : 9 240 pas de 1/60 s, vingt
+  // brawlers, une vraie carte — soit exactement ce que le serveur aura à rejouer. X vaut 3 000 ms
+  // pour une partie qui en prend environ 250 sur la machine de développement : le facteur douze est
+  // là pour qu'une machine d'intégration continue lente, ou chargée, ne fasse pas rougir un test qui
+  // n'a rien à dire sur elle. Ce qu'il attrape reste ce qu'il doit attraper : un facteur dix.
+  const t0 = Date.now();
+  const r = jouer(2718, 'solo', 50, 'bolt');
+  const ms = Date.now() - t0;
+  assert.ok(r.pas > 8000, `la partie mesurée ne fait que ${r.pas} pas : le plancher ne mesurerait rien`);
+  assert.ok(ms < 3000, `${r.pas} pas de simulation en ${ms} ms, pour 3000 ms au plus`);
+});
+
+test('bac à sable : les bots et une partie entière tournent sans document, window, THREE, Math.random, Date.now ni performance', () => {
+  // La même garde qu'aux modules 3 et 4, étendue à ce que ce module a descendu — et cette fois le
+  // bloc ne joue pas une escarmouche, il joue une PARTIE, bots compris.
+  const sansRandom = new Proxy(Math, { get: (t, p) => p === 'random' ? undefined : Reflect.get(t, p) });
+  const sansNow = new Proxy(Date, { get: (t, p) => p === 'now' ? undefined : Reflect.get(t, p) });
+  const bac = new Function('module', 'exports', 'WBCore', 'document', 'window', 'THREE', 'performance',
+                           'localStorage', 'fetch', 'requestAnimationFrame', 'Math', 'Date', sim);
+  const m = { exports: {} };
+  bac(m, m.exports, C, undefined, undefined, undefined, undefined, undefined, undefined, undefined, sansRandom, sansNow);
+  const Z = m.exports;
+  const r = H.jouerPartie(C, Z, 8181, 'trio', 500, 'volt');
+  assert.notStrictEqual(r.issue, 'borne', 'la partie du bac à sable n\'a jamais fini');
+  assert.strictEqual(r.argentKO, 0, 'l\'argent ne se conserve pas dans le bac à sable');
+  assert.ok(r.G.ents.reduce((n, e) => n + e.kills, 0) > 5, 'personne ne s\'est battu dans le bac à sable');
+  assert.ok(r.debloques > 0, 'le chien de garde des bots n\'a jamais tourné dans le bac à sable');
+  // Et la même partie, jouée par le bloc chargé NORMALEMENT, rend la même empreinte : le bac à
+  // sable n'a pas fait jouer un autre jeu.
+  assert.strictEqual(r.empreinte, jouer(8181, 'trio', 500, 'volt').empreinte);
+  // Toujours aucun pointeur de rendu sur un fait de partie, bots compris.
+  for (const e of r.G.ents) for (const champ of ['mesh', 'lbl', 'lblMn'])
+    assert.ok(!(champ in e), `une entité porte de nouveau « ${champ} »`);
+});
+
+test('les bots sont descendus dans SIM, et le contrat public du bloc est en place', () => {
+  // `corpsDe` lance si une fonction est déclarée dans les deux blocs — le patron du `respawn()`
+  // défini deux fois, dont la copie vivante finit toujours du côté que rien n'exécute.
+  for (const nom of ['findCover', 'findTarget', 'pickGoal', 'botUpdate', 'joueurUpdate',
+                     'commonUpdate', 'zoneUpdate', 'aliveTeams', 'playersLeft',
+                     'newMatch', 'step', 'empreinte', 'condenseEtat'])
+    assert.ok(sim.includes('\nfunction ' + nom + '(') || sim.includes('\nconst ' + nom + ' ') ||
+              sim.includes('\nfunction ' + nom + '='), `${nom} n'est pas dans SIM`);
+  for (const nom of ['findCover', 'findTarget', 'pickGoal', 'botUpdate', 'joueurUpdate',
+                     'commonUpdate', 'zoneUpdate', 'newMatch', 'step'])
+    assert.ok(!JEU.includes('\nfunction ' + nom + '('), `${nom} est restée dans le bloc Game`);
+  // Le contrat public, celui sur lequel les modules 6 et 7 vont s'appuyer.
+  for (const nom of ['newMatch', 'step', 'empreinte', 'drainer', 'condenseEtat'])
+    assert.strictEqual(typeof SIMU[nom], 'function', `WBSim.${nom} n'est pas exposée`);
+  assert.strictEqual(typeof SIMU.SIM_VERSION, 'number', 'SIM_VERSION doit être une constante du bloc');
+  // `b.badGoals` est un Set, et il n'a le droit de servir qu'à l'appartenance : le parcourir ferait
+  // dépendre une décision de l'ordre d'insertion d'un ensemble. Même garde que `p.hit`.
+  const s = sansCommentaires(sim);
+  for (const m of s.match(/\.badGoals\.\w+/g) || [])
+    assert.ok(/\.(has|add)$/.test(m), `${m} : un Set ne doit servir qu'à \`has\` et \`add\``);
+  assert.strictEqual(compte(s, /of\s+\w+\.badGoals/g), 0, 'badGoals est parcouru pour décider d\'un ordre');
+  // La liste des noms de bots vit dans SIM, parce que `newMatch` en a besoin sans navigateur.
+  assert.ok(Array.isArray(SIMU.BOT_NAMES) && SIMU.BOT_NAMES.length >= 20);
+  assert.ok(!JEU.includes("const BOT_NAMES=["), 'une seconde liste de noms de bots vit dans le bloc Game');
+  // Et `newMatch` ne prend ses angles que de la graine : aucune transcendante, comme les cinq
+  // fonctions de géométrie du module 2. Elle leur avait échappé parce qu'elle vivait dans
+  // `startMatch` — c'est `C.dist` et non plus `Math.hypot` qui place les caisses.
+  for (const interdite of TRANSCENDANTES)
+    assert.ok(!sansCommentaires(corpsDe('newMatch')).includes(interdite),
+      `newMatch appelle ${interdite} : la position des caisses ne vient pourtant que de la graine`);
+});
+
+test('les quatorze noms d\'événements restent fermés, et le rendu les traduit tous', () => {
+  // Deux nouveaux noms au module 5, et ils sont nés du gaz et du soin hors combat : `zone` pour les
+  // trois transitions du plan — il avance, il se pose, il prévient — et `soin` pour le cumul de
+  // régénération, qui posait un nombre à l'écran depuis le milieu d'une règle.
+  const connus = new Set(['tir', 'degat', 'mort', 'ramassage', 'nuage', 'explosion', 'super',
+                          'gadget', 'detruit', 'encaissement', 'reapparition', 'fin', 'zone', 'soin']);
+  const vus = new Map();
+  const G = SIMU.newMatch(6060, C.MODES.solo, 50, C.BRAWLERS.medic);
+  for (let n = 0; n < 6000; n++)
+    for (const ev of SIMU.step(G, H.pilote(C, SIMU, G))){
+      assert.ok(connus.has(ev.type), `événement inconnu : ${ev.type}`);
+      assert.strictEqual(ev.pas, G.pas, `un événement ${ev.type} horodaté ${ev.pas} au pas ${G.pas}`);
+      vus.set(ev.type, (vus.get(ev.type) || 0) + 1);
+    }
+  for (const nom of ['tir', 'degat', 'mort', 'ramassage', 'zone'])
+    assert.ok(vus.get(nom) > 0, `aucun événement « ${nom} » en 6000 pas d'une vraie partie`);
+  const lecteur = sansCommentaires(corpsDe('rendreEvenements'));
+  for (const nom of connus) assert.ok(lecteur.includes(`case '${nom}'`), `le rendu ne lit pas « ${nom} »`);
+  // Les trois états de `zone` sont produits ET lus : un état émis que personne ne traduit serait
+  // une alarme de gaz qui ne sonne jamais.
+  for (const etat of ['avance', 'pose', 'alerte'])
+    assert.ok(lecteur.includes(`'${etat}'`), `le rendu ne traduit pas la transition de gaz « ${etat} »`);
+});
+
+test('BRAWLER_IDS est le roster, et il n\'en existe qu\'une seule copie', () => {
+  // SIM a besoin de l'ordre du roster pour tirer le brawler d'un bot, et il lui est interdit
+  // d'appeler `Object.keys` : l'ordre des clés d'un objet ne doit jamais décider d'un fait de
+  // partie. La liste est donc dérivée UNE fois dans WBCore, jamais recopiée à la main — un brawler
+  // ajouté demain manquerait dans l'une des deux copies, et personne ne le verrait.
+  assert.deepStrictEqual(C.BRAWLER_IDS, Object.keys(C.BRAWLERS));
+  for (const id of C.BRAWLER_IDS) assert.strictEqual(C.BRAWLERS[id].id, id);
+  assert.ok(!sansCommentaires(sim).includes('Object.keys'), 'SIM parcourt les clés d\'un objet');
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));
