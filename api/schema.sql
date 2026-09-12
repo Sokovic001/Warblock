@@ -73,15 +73,61 @@ create table if not exists matches (
   -- la clé d'idempotence tirée par le client. Sans elle, un POST dont la réponse se perd est
   -- indistinguable d'un POST jamais arrivé.
   client_key   text         not null check (char_length(client_key) between 1 and 64),
-  -- Trois états seulement. Un rapport refusé en demandera un quatrième : la contrainte est là
-  -- pour qu'on l'ajoute exprès, dans le module du verdict, plutôt que de l'écrire par accident.
-  status       text         not null default 'open' check (status in ('open', 'settled', 'expired')),
+  -- Quatre états. Le quatrième, 'rejected', est arrivé exprès avec le module du verdict, comme la
+  -- contrainte étroite le demandait : une partie dont le rapport est refusé est CLOSE, avec son
+  -- motif, et ne comptera dans aucune statistique.
+  status       text         not null default 'open'
+               check (status in ('open', 'settled', 'expired', 'rejected')),
   opened_at    timestamptz  not null default now(),
   -- L'expiration se livre AVEC le billet, calculée depuis LOBBY.wait, la durée du plan de zone et
   -- une marge. Sans elle, un onglet fermé enfermerait le joueur dans un billet mort.
   expires_at   timestamptz  not null,
 
-  constraint matches_expire_apres check (expires_at > opened_at)
+  -- ---- Le règlement. Toutes ces colonnes sont NULL tant que la partie est ouverte, et écrites
+  -- UNE SEULE FOIS, par l'update qui ferme la ligne (`where status = 'open' and net_cents is
+  -- null`). Aucune n'est jamais mise à jour ensuite : c'est la règle qui remplace la colonne solde
+  -- qu'on ne crée pas. Le jour où le grand livre existera, il écrira ses propres lignes ; celles-ci
+  -- ne lui serviront pas.
+  settled_at         timestamptz,
+  -- ce que le verdict a décidé : victoire, encaissement, defaite ou refus
+  issue              text     check (issue in ('victoire', 'encaissement', 'defaite', 'refus')),
+  -- le contrôle d'ENVELOPPE qui a refusé, et sa phrase. NULL sur une partie réglée.
+  controle           text,
+  motif              text,
+  -- Les trois montants du règlement, en CENTIMES entiers, tous produits par les fonctions de
+  -- paiement de WBCore : l'API ne recalcule jamais la commission elle-même.
+  gross_cents        integer  check (gross_cents >= 0),
+  fee_cents          integer  check (fee_cents   >= 0),
+  net_cents          integer  check (net_cents   >= 0),
+  -- La sacoche retenue : DÉCLARÉE par le client en Resurgence, et seulement bornée à
+  -- [0, stake_cents × seats]. En MAXWIN elle n'entre dans aucun calcul.
+  purse_cents        integer  check (purse_cents >= 0),
+  -- Ce que le client CROIT avoir gagné. Conservé pour être comparé, jamais pour être payé.
+  declared_net_cents integer  check (declared_net_cents >= 0),
+  -- L'écart mesuré, declared_net_cents − net_cents. LA SEULE COLONNE EN CENTIMES QUI PEUT ÊTRE
+  -- NÉGATIVE, et c'est voulu : le client peut annoncer moins que le serveur ne compte, et cette
+  -- mesure-là intéresse autant que l'autre. Ce n'est pas de l'argent dû, c'est une observation :
+  -- on mesure, on ne punit pas. Le seuil est une affaire de phase 06, sur des données réelles.
+  ecart_cents        integer,
+  -- Les faits DÉCLARÉS par le client, tels quels. Ils sont bornés par l'enveloppe de plausibilité,
+  -- ils ne sont pas vérifiés : borner n'est pas vérifier. Ils sont là pour que les statistiques de
+  -- la phase 02a soient une somme sur des lignes immuables plutôt qu'un compteur qu'on incrémente.
+  seconds            integer  check (seconds >= 0),
+  kills              integer  check (kills   >= 0),
+  deaths             integer  check (deaths  >= 0),
+  rank               integer  check (rank    >= 1),
+  cubes              integer  check (cubes   >= 0),
+  damage             integer  check (damage  >= 0),
+  cashed_out         boolean,
+
+  constraint matches_expire_apres check (expires_at > opened_at),
+  -- Un règlement est complet ou absent : une ligne close porte ses montants, une ligne ouverte
+  -- n'en porte aucun. Sans cette contrainte, un règlement interrompu à mi-chemin serait lisible
+  -- comme une partie gagnée à zéro.
+  constraint matches_reglement_complet check (
+    (status = 'open'  and settled_at is null and net_cents is null)
+    or (status <> 'open' and (settled_at is not null or net_cents is null))
+  )
 );
 
 -- L'idempotence est arbitrée par des CONTRAINTES, jamais par un select préalable : c'est la même

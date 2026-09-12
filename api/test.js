@@ -47,6 +47,34 @@ function fakeDb(seed = []) {
       matches.push(ligne);
       return { match: ligne, repris: false };
     },
+    async findMatch({ matchId, userId }) {
+      // `user_id` fait partie de la recherche, pas d'une vérification après coup : un identifiant
+      // deviné ne doit rien apprendre sur la partie de quelqu'un d'autre.
+      return matches.find(x => String(x.id) === String(matchId) && x.user_id === userId) || null;
+    },
+    async settleMatch(r) {
+      const m = matches.find(x => String(x.id) === String(r.matchId) && x.user_id === r.userId);
+      if (!m) return { match: null, deja: true };
+      // La doublure imite la clause `where` de db-pg.js, et rien d'autre : `status = 'open' and
+      // net_cents is null`. Un second règlement ne touche donc aucune ligne, et on rend celle qui
+      // a été écrite la première fois.
+      if (m.status !== 'open' || (m.net_cents !== undefined && m.net_cents !== null))
+        return { match: m, deja: true };
+      Object.assign(m, {
+        status: r.status, settled_at: r.settledAt, issue: r.issue, controle: r.controle, motif: r.motif,
+        gross_cents: r.grossCents, fee_cents: r.feeCents, net_cents: r.netCents, purse_cents: r.purseCents,
+        declared_net_cents: r.declaredNetCents, ecart_cents: r.ecartCents,
+        seconds: r.seconds, kills: r.kills, deaths: r.deaths, rank: r.rank,
+        cubes: r.cubes, damage: r.damage, cashed_out: r.cashedOut,
+      });
+      return { match: m, deja: false };
+    },
+    async expireMatches({ avant }) {
+      let closes = 0;
+      for (const m of matches)
+        if (m.status === 'open' && new Date(m.expires_at) <= avant) { m.status = 'expired'; closes++; }
+      return { closes };
+    },
     async findOrCreate({ authId, email, name, nameKey }) {
       let u = users.find(x => x.auth_id === authId);
       if (!u) {
@@ -535,7 +563,7 @@ await test('un corps illisible sur le billet ne fait pas tomber le serveur', asy
   assert.strictEqual(r.code, 400);
   assert.strictEqual(db.matches.length, 0);
 });
-test('aucune colonne solde, des montants entiers et positifs, aucun update de montant', () => {
+test('aucune colonne solde, et aucun montant déjà écrit n\'est mis à jour', () => {
   // Garde textuelle : la doublure de test ne peut pas prouver ce que fait Postgres, mais elle peut
   // prouver ce qu'on lui a écrit. Les commentaires sont retirés d'abord — ils parlent justement de
   // l'absence de colonne solde.
@@ -543,14 +571,290 @@ test('aucune colonne solde, des montants entiers et positifs, aucun update de mo
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8');
   assert.ok(!/\b(solde|balance|wallet)\b/i.test(sql), 'une colonne de solde est apparue dans le schéma');
+  // Chaque requête est UN littéral entre accents graves : on découpe là-dessus plutôt que de
+  // balayer le fichier au jugé. Une plage qui court d'une requête à la suivante avale les
+  // commentaires qui les séparent, et un commentaire citant la bonne clause suffit alors à faire
+  // passer une requête qui ne la porte plus. C'est exactement ce qui est arrivé en écrivant ce
+  // test : la garde disait vert sur une écriture de montant sans aucune protection.
+  const requetes = (pg.match(/`[^`]*`/g) || []).filter(q => /update\s+matches\s+set/i.test(q));
+  assert.ok(requetes.length >= 2, `seulement ${requetes.length} écritures retrouvées dans db-pg.js`);
+  for (const u of requetes) {
+    // Aucune écriture de cette table ne touche une ligne déjà close : `status = 'open'` figure
+    // dans toutes les clauses, y compris celles du veilleur, sans exception.
+    assert.match(u, /status\s*=\s*'open'/, 'une écriture peut toucher une ligne close : ' + u);
+    if (!/_cents/.test(u)) continue;
+    // Et un `update` qui écrit un MONTANT est autorisé à une condition de plus : qu'il ne puisse
+    // écrire que sur une ligne qui n'en porte aucun. C'est ce qui fait de `matches` une table en
+    // insertion puis règlement unique — un montant déjà écrit n'est jamais réécrit.
+    assert.match(u, /net_cents\s+is\s+null/, 'un montant est écrit sans exiger une ligne vierge : ' + u);
+  }
+});
+test('les colonnes en centimes sont entières et positives, sauf l\'écart qui est une mesure', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   const colonnes = sql.match(/^[ \t]*\w*_cents\b.*$/gm) || [];
-  assert.ok(colonnes.length >= 1, 'le schéma doit porter au moins une colonne en centimes');
+  assert.ok(colonnes.length >= 6, `le schéma ne porte que ${colonnes.length} colonnes en centimes`);
   for (const c of colonnes) {
     assert.match(c, /\binteger\b/, c);
+    // `ecart_cents` est la seule exception, et elle est nommée plutôt que tolérée par un motif
+    // large : ce n'est pas de l'argent dû, c'est la différence entre ce que le client annonce et
+    // ce que le serveur compte. Elle peut être négative, et cette mesure-là compte autant.
+    if (/^\s*ecart_cents\b/.test(c)) { assert.ok(!/check/.test(c), c); continue; }
     assert.match(c, /check\s*\(\s*\w+_cents\s*>=?\s*0\s*\)/, c);
   }
-  for (const u of pg.match(/update\s+matches\s+set[\s\S]*?where/gi) || [])
-    assert.ok(!/_cents/.test(u), 'un montant de matches est mis à jour : ' + u);
+});
+
+console.log('Le verdict rendu par la route');
+// Un rapport de fin de partie complet. `reportFrom` est la seule porte côté client : l'écrire à la
+// main ici ferait deux idées du contrat, et c'est toujours la deuxième qui ment.
+const RAPPORT = (extra = {}) => C.reportFrom({
+  seconds: 60, kills: 0, deaths: 1, rank: 5, cubes: 0, damage: 0,
+  cashedOut: false, purseCents: 0, declaredNetCents: 0, ...extra,
+});
+// L'instant auquel un rapport HONNÊTE arrive : le sas, la partie, et trois secondes de réseau.
+const ARRIVEE = r => T0 + (C.LOBBY.wait + r.seconds + 3) * 1000;
+const rendre = (app, id, rapport, opts = {}) =>
+  appel(app, { method: 'POST', path: `/api/match/${id}/result`, token: 'ok:u1:Loic', body: rapport, ...opts });
+const CLES_REGLEMENT = ['matchId', 'status', 'issue', 'controle', 'motif', 'grossCents', 'feeCents',
+                        'netCents', 'purseCents', 'declaredNetCents', 'ecartCents', 'settledAt'];
+
+await test('le résultat ferme la ligne et rend un net RECALCULÉ, jamais celui du client', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 154, rank: 1, kills: 19, declaredNetCents: 9_999_999 });
+  horloge.t = ARRIVEE(r);
+  const rep = await rendre(app, b.corps.id, r);
+  assert.strictEqual(rep.code, 200);
+  assert.strictEqual(rep.corps.status, 'settled');
+  assert.strictEqual(rep.corps.issue, 'victoire');
+  assert.strictEqual(rep.corps.netCents, C.payoutCents(50, C.MODES.solo).splitCents);
+  assert.ok(rep.corps.feeCents > 0, 'la commission ne tombe jamais à zéro');
+  assert.strictEqual(rep.corps.feeCents + rep.corps.netCents, rep.corps.grossCents);
+  assert.strictEqual(rep.corps.declaredNetCents, 9_999_999);
+  assert.strictEqual(rep.corps.ecartCents, 9_999_999 - rep.corps.netCents,
+    'l\'écart est mesuré et stocké, jamais payé');
+  assert.deepStrictEqual(Object.keys(rep.corps).sort(), CLES_REGLEMENT.slice().sort());
+  // La ligne est close, la mise et les graines n'ont pas bougé, et rien n'a été inséré à côté.
+  assert.strictEqual(db.matches.length, 1);
+  assert.strictEqual(db.matches[0].stake_cents, 50);
+  assert.strictEqual(db.matches[0].seed_public, GRAINES[0]);
+  assert.ok(!JSON.stringify(rep.corps).includes(String(GRAINES[1])), 'la graine secrète a fui');
+});
+await test('le même billet réglé deux fois rend le PREMIER verdict, sans rien modifier', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 154, rank: 1 });
+  horloge.t = ARRIVEE(r);
+  const un = await rendre(app, b.corps.id, r);
+  const apres = JSON.stringify(db.matches);
+  // Le second envoi ment sur tout : autre durée, autre rang, autre net annoncé. Il doit rendre
+  // exactement ce que le premier a écrit, et ne rien réécrire.
+  horloge.t += 60_000;
+  const deux = await rendre(app, b.corps.id, RAPPORT({ seconds: 3, rank: 7, declaredNetCents: 424242 }));
+  assert.deepStrictEqual(deux.corps, un.corps);
+  assert.strictEqual(JSON.stringify(db.matches), apres, 'la ligne a été réécrite');
+  assert.strictEqual(db.matches.length, 1);
+});
+await test('la base refuse elle-même un second règlement, sans compter sur la route', async () => {
+  // Deux gardes empêchent une ligne d'être réglée deux fois : la route court-circuite dès qu'elle
+  // voit une ligne close, et la clause `where status = 'open' and net_cents is null` de l'écriture
+  // tranche pour de bon. Chacune masque l'autre, donc aucune des deux n'est prouvée en passant par
+  // la route : celle-ci est donc appelée directement. C'est la seule qui compte en production,
+  // l'autre n'est qu'une économie de calcul. La doublure imite la clause, elle ne la subit pas :
+  // c'est la limite connue de tout ce dossier, écrite dans le README.
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 60, rank: 1 });
+  horloge.t = ARRIVEE(r);
+  await rendre(app, b.corps.id, r);
+  const regle = JSON.stringify(db.matches[0]);
+  const second = await db.settleMatch({
+    matchId: b.corps.id, userId: db.users[0].id, status: 'settled', settledAt: new Date(0),
+    issue: 'victoire', controle: null, motif: null,
+    grossCents: 999_999, feeCents: 0, netCents: 999_999, purseCents: 999_999,
+    declaredNetCents: 999_999, ecartCents: 0,
+    seconds: 1, kills: 1, deaths: 0, rank: 1, cubes: 0, damage: 0, cashedOut: false,
+  });
+  assert.strictEqual(second.deja, true, 'un second règlement doit être reconnu comme un rejeu');
+  assert.strictEqual(JSON.stringify(db.matches[0]), regle, 'un montant déjà écrit a été réécrit');
+});
+await test('un résultat qui arrive en retard, mais avant expiration, est accepté', async () => {
+  // Si couper le wifi effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 154, rank: 1 });
+  horloge.t = Date.parse(b.corps.expiresAt) - 1000;
+  const rep = await rendre(app, b.corps.id, r);
+  assert.strictEqual(rep.corps.status, 'settled', rep.corps.motif);
+  assert.ok(rep.corps.netCents > 0);
+  assert.strictEqual(db.matches[0].status, 'settled');
+});
+await test('après expiration, le résultat ne se règle plus et la ligne est close en expired', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  horloge.t = Date.parse(b.corps.expiresAt) + 1;
+  const rep = await rendre(app, b.corps.id, RAPPORT({ seconds: 154, rank: 1 }));
+  assert.strictEqual(rep.code, 200);
+  assert.strictEqual(rep.corps.status, 'expired');
+  assert.strictEqual(rep.corps.controle, 'expire');
+  assert.strictEqual(rep.corps.netCents, 0);
+  assert.strictEqual(db.matches[0].status, 'expired');
+  // Et rejouer ne ressuscite rien.
+  const encore = await rendre(app, b.corps.id, RAPPORT({ seconds: 154, rank: 1 }));
+  assert.deepStrictEqual(encore.corps, rep.corps);
+});
+await test('checkReport refuse un champ inconnu, avec un code, et rien n\'est écrit', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  horloge.t = T0 + 200_000;
+  const rep = await rendre(app, b.corps.id, { ...RAPPORT({ seconds: 60, rank: 1 }), netCents: 9999 });
+  assert.strictEqual(rep.code, 400);
+  assert.ok(rep.corps.erreurs.some(e => e.code === 'inconnu' && e.field === 'netCents'),
+    JSON.stringify(rep.corps.erreurs));
+  assert.strictEqual(db.matches[0].status, 'open', 'un rapport refusé à l\'analyse ne clôt rien');
+  // Un rapport incomplet est refusé de la même façon, avec le code qui dit quoi corriger.
+  const nu = await rendre(app, b.corps.id, { seconds: 10 });
+  assert.strictEqual(nu.code, 400);
+  assert.ok(nu.corps.erreurs.every(e => ['manquant', 'inconnu'].includes(e.code)));
+});
+await test('une partie refusée est close avec son motif, et ne compte dans aucune statistique', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 60, rank: 1, kills: 999, declaredNetCents: 1000 });
+  horloge.t = ARRIVEE(r);
+  const rep = await rendre(app, b.corps.id, r);
+  assert.strictEqual(rep.corps.status, 'rejected');
+  assert.strictEqual(rep.corps.issue, 'refus');
+  assert.strictEqual(rep.corps.controle, 'kills');
+  assert.ok(rep.corps.motif && rep.corps.motif.length > 10, 'un refus doit dire pourquoi');
+  assert.strictEqual(rep.corps.netCents, 0);
+  // La mesure survit au refus : c'est elle qui fixera un seuil en phase 06.
+  assert.strictEqual(rep.corps.ecartCents, 1000);
+  assert.strictEqual(db.matches[0].status, 'rejected');
+  // Et une partie refusée n'est ni réglée ni ouverte : aucune somme sur `status = 'settled'` ne la
+  // verra jamais.
+  assert.strictEqual(db.matches.filter(m => m.status === 'settled').length, 0);
+});
+await test('en Resurgence le montant est encadré, pas recalculé — et l\'énorme est refusé', async () => {
+  const { app, horloge } = bancDeBillet();
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const max = C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents;
+  const juste = RAPPORT({ seconds: 40, kills: 5, cashedOut: true, purseCents: max });
+  horloge.t = ARRIVEE(juste);
+  const ok = await rendre(app, b.corps.id, juste);
+  assert.strictEqual(ok.corps.issue, 'encaissement');
+  assert.strictEqual(ok.corps.netCents, C.cashoutCents(max).netCents);
+  assert.strictEqual(ok.corps.purseCents, max);
+  // Le même appel avec une sacoche impossible : refusé, et le montant retenu reste la borne.
+  const autre = bancDeBillet();
+  const b2 = await demander(autre.app, { ...DEMANDE, mode: 'resurgence' });
+  const trop = RAPPORT({ seconds: 40, kills: 5, cashedOut: true, purseCents: 99_999_999 });
+  autre.horloge.t = ARRIVEE(trop);
+  const ko = await rendre(autre.app, b2.corps.id, trop);
+  assert.strictEqual(ko.corps.controle, 'sacoche');
+  assert.strictEqual(ko.corps.netCents, 0);
+  assert.strictEqual(ko.corps.purseCents, C.purseBound(b2.corps.stakeCents, b2.corps.seats).maxCents,
+    'la sacoche retenue est ramenée à la borne, même sur un refus');
+});
+await test('le billet d\'un autre joueur est introuvable, et un billet inconnu aussi', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  horloge.t = T0 + 200_000;
+  const voisin = await appel(app, {
+    method: 'POST', path: `/api/match/${b.corps.id}/result`, token: 'ok:u2:Zoe',
+    body: RAPPORT({ seconds: 60, rank: 1 }),
+  });
+  assert.strictEqual(voisin.code, 404, 'un identifiant deviné ne doit rien apprendre');
+  assert.strictEqual(db.matches[0].status, 'open');
+  const fantome = await rendre(app, '999999', RAPPORT({ seconds: 60, rank: 1 }));
+  assert.strictEqual(fantome.code, 404);
+});
+await test('la route du résultat n\'accepte que POST, et son chemin n\'est pas un passe-partout', async () => {
+  const { app } = bancDeBillet();
+  for (const m of ['GET', 'PATCH', 'DELETE'])
+    assert.strictEqual((await appel(app, { method: m, path: '/api/match/1/result', token: 'ok:u1:Loic' })).code, 405, m);
+  for (const chemin of ['/api/match//result', '/api/match/abc/result', '/api/match/1/result/x', '/api/match/1'])
+    assert.strictEqual((await appel(app, { method: 'POST', path: chemin, token: 'ok:u1:Loic' })).code, 404, chemin);
+  // Sans jeton, rien ne passe : le refus vient avant la lecture du corps.
+  const nu = await appel(app, { method: 'POST', path: '/api/match/1/result' });
+  assert.strictEqual(nu.code, 401);
+});
+await test('le pré-vol annonce toujours les méthodes des deux routes de partie', async () => {
+  const { app } = bancDeBillet();
+  const r = await appel(app, { method: 'OPTIONS' });
+  const methodes = String(r.head['access-control-allow-methods']).split(',');
+  for (const m of ['GET', 'PATCH', 'POST', 'OPTIONS']) assert.ok(methodes.includes(m), m);
+});
+await test('le veilleur clôt les billets expirés, et seulement eux', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  // Trois billets pour trois joueurs : l'un sera réglé, l'un périmera, l'un sera encore valable.
+  const a = await demander(app);
+  const regle = await appel(app, { method: 'POST', path: '/api/match', token: 'ok:u2:Zoe',
+                                   body: { ...DEMANDE, clientKey: 'z-1' } });
+  const r = RAPPORT({ seconds: 60, rank: 3 });
+  horloge.t = ARRIVEE(r);
+  await appel(app, { method: 'POST', path: `/api/match/${regle.corps.id}/result`, token: 'ok:u2:Zoe', body: r });
+  assert.strictEqual(db.matches[1].status, 'settled');
+
+  // Personne ne clôt rien tant que rien n'a expiré : le veilleur passe à vide.
+  assert.deepStrictEqual(await app.veiller(), { closes: 0 });
+  assert.strictEqual(db.matches[0].status, 'open');
+
+  const tard = await appel(app, { method: 'POST', path: '/api/match', token: 'ok:u3:Max',
+                                  body: { ...DEMANDE, clientKey: 'm-1' } });
+  // On avance jusqu'après l'expiration du premier billet, mais pas de celui qu'on vient d'ouvrir.
+  horloge.t = Date.parse(a.corps.expiresAt) + 1;
+  assert.ok(horloge.t < Date.parse(tard.corps.expiresAt));
+  assert.deepStrictEqual(await app.veiller(), { closes: 1 });
+  assert.strictEqual(db.matches[0].status, 'expired', 'le billet que personne n\'a terminé');
+  assert.strictEqual(db.matches[1].status, 'settled', 'une partie réglée n\'est jamais rouverte ni reclose');
+  assert.strictEqual(db.matches[2].status, 'open', 'un billet encore valable n\'est pas balayé');
+  // Repassé deux fois, il ne clôt plus rien : il ferme une porte, il ne la claque pas en boucle.
+  assert.deepStrictEqual(await app.veiller(), { closes: 0 });
+});
+await test('le veilleur n\'écrit aucun montant : il ferme une porte, il ne règle rien', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app);
+  horloge.t = Date.parse(b.corps.expiresAt) + 1;
+  await app.veiller();
+  const ligne = db.matches[0];
+  for (const col of ['net_cents', 'fee_cents', 'gross_cents', 'purse_cents', 'ecart_cents'])
+    assert.strictEqual(ligne[col], undefined, `le veilleur a écrit ${col}`);
+  assert.strictEqual(ligne.settled_at, undefined);
+});
+await test('chaque requête rejouée deux fois : mêmes lignes, mêmes réponses', async () => {
+  // Le patron, appliqué à toutes les routes qui écrivent. Ce qui compte n'est pas qu'elles
+  // répondent 200 deux fois, c'est que la seconde réponse soit la première, au caractère près, et
+  // que la table n'ait pas bougé entre les deux.
+  const { db, app, horloge } = bancDeBillet();
+  const rejeux = [];
+  const deuxFois = async (nom, envoi) => {
+    const un = await envoi();
+    const lignes = JSON.stringify(db.matches);
+    const deux = await envoi();
+    assert.deepStrictEqual(deux.corps, un.corps, nom);
+    assert.strictEqual(JSON.stringify(db.matches), lignes, nom + ' : la table a bougé au rejeu');
+    rejeux.push(nom);
+  };
+  await deuxFois('POST /api/match', () => demander(app));
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 154, rank: 1 });
+  horloge.t = ARRIVEE(r);
+  await deuxFois('POST /api/match/:id/result', () => rendre(app, b.corps.id, r));
+  await deuxFois('POST /api/match/:id/result (refusé)', () => rendre(app, b.corps.id, r));
+  assert.strictEqual(rejeux.length, 3);
+  assert.strictEqual(db.matches.length, 1);
+});
+await test('la limitation de débit du résultat a son propre seau', async () => {
+  const { app, horloge } = bancDeBillet({ limiter: makeLimiter({ max: 2, windowMs: 60_000 }) });
+  const b = await demander(app);
+  const r = RAPPORT({ seconds: 60, rank: 3 });
+  horloge.t = ARRIVEE(r);
+  const codes = [];
+  for (let i = 0; i < 3; i++) codes.push((await rendre(app, b.corps.id, r)).code);
+  assert.deepStrictEqual(codes, [200, 200, 429], codes.join(','));
+  // Le seau du billet, lui, n'a servi qu'une fois : demander une partie reste possible.
+  assert.strictEqual((await demander(app, { ...DEMANDE, clientKey: 'cle-2' })).code, 200);
 });
 
 console.log('Le serveur partage les règles du jeu');

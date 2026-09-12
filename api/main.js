@@ -36,6 +36,17 @@ const app = createApp({ db, verifyToken, origins });
 // Les erreurs internes partent dans les journaux, jamais dans la réponse du joueur.
 app.onError = (e, route) => console.error(`[${new Date().toISOString()}] ${route} :`, e && e.stack || e);
 
+// Le veilleur : il clôt les billets que personne n'a terminés. Une minute d'intervalle, parce que
+// rien ne presse — un billet reste ouvert de deux à quatre minutes selon le mode, et le balayage
+// ne fait que libérer la place d'un joueur parti. Une erreur de base ne doit pas tuer le serveur :
+// elle se journalise, et le tour suivant réessaiera.
+const VEILLE_MS = 60_000;
+const veille = setInterval(() => {
+  app.veiller().catch(e => console.error(`[${new Date().toISOString()}] veilleur :`, e && e.stack || e));
+}, VEILLE_MS);
+// Sans `unref`, ce minuteur empêcherait le processus de s'arrêter tout seul.
+veille.unref();
+
 const server = http.createServer((req, res) => { app(req, res); });
 server.listen(port, () => {
   console.log(`API Warblock sur le port ${port}, origines : ${origins.join(', ')}`);
@@ -47,6 +58,7 @@ server.listen(port, () => {
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
+    clearInterval(veille);
     server.close(() => db.close().then(() => process.exit(0), () => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();
   });

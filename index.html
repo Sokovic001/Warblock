@@ -1956,6 +1956,194 @@ const WBCore = (function(){
     }
     return { rapport: erreurs.length ? null : propre, erreurs };
   }
+  // ---- Le verdict d'une partie : UNE ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE.
+  //
+  // Le serveur ne rejoue pas la partie. Il ne sait pas qui a tiré sur qui, et il ne le saura pas
+  // avant la phase 02b. Tout ce qu'il peut faire honnêtement, c'est refuser ce qui est IMPOSSIBLE
+  // et recalculer lui-même les montants qu'il sait recalculer. Un client modifié ment à
+  // l'intérieur de l'enveloppe sans être inquiété, et les tolérances d'horloge sont volontairement
+  // larges — un onglet en arrière-plan, un téléphone endormi et une horloge locale fausse sont
+  // beaucoup plus fréquents qu'un tricheur. Ce n'est donc PAS un premier étage d'anti-triche :
+  // c'est la répétition générale du grand livre de la phase 03, faite sur des chiffres qui ne
+  // valent rien, au dernier moment où le schéma peut encore changer sans migration.
+  //
+  // Le nom est écrit ici, dans le code, et pas seulement dans le README : écrit ailleurs, il
+  // serait oublié exactement le jour où il protégerait de l'argent.
+  //
+  // DEUX CONTRÔLES « ÉVIDENTS » SONT FAUX, ET NE SONT PAS ÉCRITS :
+  // — « la sacoche vaut exactement la mise quand on n'a tué personne ». Non : une mort par gaz
+  //   lâche la sacoche au sol, et n'importe qui la ramasse sans avoir tué qui que ce soit ;
+  //   inversement, mourir remet la sacoche à zéro. Zéro kill avec toute la table dans les poches
+  //   et zéro kill sans rien du tout sont l'un comme l'autre légitimes. Seule la BORNE subsiste.
+  // — « plus de kills que d'adversaires ». Non : chacun a plusieurs vies — trois, deux en
+  //   Resurgence. Le plafond est adversaires × vies.
+  //
+  // L'INVARIANT « AUCUN MONTANT NE VIENT DU CLIENT » NE VAUT PAS PARTOUT, ET LE DIRE ENTIER LE
+  // RENDRAIT FAUX :
+  // — MAXWIN : le net est RECALCULÉ. Le billet porte la mise et le mode, `payoutCents` fait le
+  //   reste, le client n'a aucune voix.
+  // — Resurgence : le net est ENCADRÉ, pas recalculé. La sacoche est précisément le nombre que le
+  //   serveur ne sait pas refaire ; il applique `cashoutCents` à un montant DÉCLARÉ par le client
+  //   et seulement borné à [0, mise × sièges] — un intervalle qui va de 0 à 50 mises. C'est
+  //   faible, c'est honnête, et c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+  //
+  // `declaredNetCents` n'est JAMAIS payé ni cru. Le verdict calcule l'ÉCART entre ce que le client
+  // annonce et ce que le serveur compte, et le rend pour qu'il soit stocké. On mesure, on ne punit
+  // pas : le seuil est une affaire de phase 06, et il se fixera sur des données réelles.
+  const ENVELOPPE = {
+    // Ce que cette enveloppe de plausibilité sait refuser, et rien d'autre. La liste est courte,
+    // et c'est le sujet : chaque ligne est une impossibilité démontrable depuis le billet et les
+    // règles, pas un soupçon. Un test vérifie que `matchVerdict` ne rend jamais un motif absent de
+    // cette table, et qu'aucune de ces lignes n'est un code mort.
+    controles: {
+      billet:       'un billet illisible : ni mode, ni mise, ni heure d\'ouverture',
+      rapport:      'un rapport que `checkReport` refuse',
+      expire:       'un billet expiré : ce n\'est plus la partie dont on parle',
+      kills:        'plus de kills que adversaires × vies',
+      duree:        'une partie plus longue que tout le plan de zone',
+      chronometre:  'une durée que l\'horloge du serveur n\'a pas eu le temps de contenir',
+      victoire:     'une victoire annoncée avant que l\'horloge du serveur ne l\'autorise',
+      encaissement: 'un encaissement Resurgence avant la fin du verrou de CASHOUT.lock',
+      cubes:        'plus de cubes que CUBE.max',
+      rang:         'un rang au-delà du nombre d\'équipes de la table',
+      sacoche:      'une sacoche au-delà de mise × sièges',
+    },
+    // LES TOLÉRANCES SONT LARGES, ET C'EST UNE DÉCISION, pas un oubli. Aucun argent n'est en jeu
+    // en phase 02a : accepter une partie douteuse coûte une ligne de statistique qui ne vaut rien,
+    // refuser une partie honnête coûte un joueur. Elles se resserreront quand elles protégeront de
+    // l'argent, sur les écarts réellement mesurés.
+    margeDureeS: 120,
+    margeHorlogeS: 120,
+    // Plus serrée que les deux autres, parce qu'une victoire est une revendication sur le pot.
+    // Mais strictement plus grande que `LOBBY.wait` : un billet demandé à la fin du sas donne un
+    // coup d'envoi plus tôt que `openedAt + LOBBY.wait`, et cet écart-là est honnête.
+    margeVictoireS: 30,
+  };
+  // Un instant en millisecondes, quelle que soit la façon dont il est écrit. Le pilote Postgres
+  // rend une `timestamptz` en objet Date, une réponse JSON la rend en chaîne ISO, et un test la
+  // donne en nombre : les trois doivent se comparer. `Date.parse` n'est pas une horloge — l'heure
+  // courante reste un ARGUMENT, jamais une lecture.
+  function instantMs(v){
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string') { const n = Date.parse(v); return Number.isFinite(n) ? n : null; }
+    if (v && typeof v.getTime === 'function') { const n = v.getTime(); return Number.isFinite(n) ? n : null; }
+    return null;
+  }
+  // Le verdict lui-même. Fonction PURE : le billet, le rapport et l'heure entrent, un refus motivé
+  // ou un règlement sort. Le billet attendu porte `mode`, `stakeCents`, `seats`, `seed`,
+  // `openedAt` et `expiresAt` ; `seats` vient de la ligne en base et non du mode, pour qu'un mode
+  // rééquilibré demain ne réécrive pas le passé d'une partie déjà jouée.
+  function matchVerdict(billet, rapport, maintenantMs){
+    const b = (billet && typeof billet === 'object') ? billet : {};
+    const cle = (typeof b.mode === 'string') ? b.mode : (b.mode && typeof b.mode === 'object' ? b.mode.id : '');
+    const mode = (typeof cle === 'string' && Object.prototype.hasOwnProperty.call(MODES, cle)) ? MODES[cle] : null;
+    const stakeCents = (Number.isSafeInteger(b.stakeCents) && b.stakeCents > 0) ? b.stakeCents : 0;
+    const seats = (Number.isSafeInteger(b.seats) && b.seats > 0) ? b.seats : (mode ? seatsOf(mode) : 0);
+    // Ces trois-là se remplissent au fur et à mesure, parce qu'un refus prononcé avant d'avoir lu
+    // le billet ne peut pas les connaître. Ils sortent quand même : une ligne refusée doit pouvoir
+    // dire contre quoi elle a été mesurée.
+    let sacocheCents = 0, declaredNetCents = 0;
+    let limites = { killsMax: 0, dureeMaxS: 0, rangMax: 0, sacocheMaxCents: 0 };
+    const rendre = (statut, issue, controle, motif, grossCents, feeCents, netCents, winnerCents) => ({
+      ok: statut === 'settled', statut, issue, controle: controle || null, motif: motif || null,
+      grossCents, feeCents, netCents, winnerCents,
+      sacocheCents, declaredNetCents,
+      // L'écart est mesuré même sur un refus, et il peut être négatif : le client peut annoncer
+      // moins que ce que le serveur compte. C'est une observation, jamais une sanction.
+      ecartCents: declaredNetCents - netCents,
+      limites,
+    });
+    const refus = (controle, motif, statut) => rendre(statut || 'rejected', 'refus', controle, motif, 0, 0, 0, 0);
+    const regle = (issue, grossCents, feeCents, netCents, winnerCents) =>
+      rendre('settled', issue, null, null, grossCents, feeCents, netCents, winnerCents);
+
+    if (!mode || !stakeCents || !seats)
+      return refus('billet', 'Billet illisible : il faut un mode connu, une mise en centimes et des sièges.');
+    const ouvertMs = instantMs(b.openedAt), tMs = instantMs(maintenantMs);
+    if (ouvertMs === null || tMs === null)
+      return refus('billet', 'Billet sans heure d\'ouverture, ou verdict rendu sans horloge.');
+
+    const vies = livesFor(mode);
+    limites = {
+      // Le plafond est adversaires × vies, et les adversaires sont tout le monde SAUF sa propre
+      // équipe : on ne tue pas ses coéquipiers.
+      killsMax: Math.max(0, seats - mode.teamSize) * vies,
+      // La borne haute d'une partie que personne ne gagne : tout le plan de zone, la protection au
+      // réapparition initiale, et la marge.
+      dureeMaxS: zoneTotalS(zonePlan(b.seed, mode)) + GRACE + ENVELOPPE.margeDureeS,
+      rangMax: Math.max(1, Math.round(seats / mode.teamSize)),
+      sacocheMaxCents: purseBound(stakeCents, seats).maxCents,
+    };
+
+    // Le rapport repasse par l'analyseur strict même si l'appelant l'a déjà fait : le verdict doit
+    // pouvoir être appelé seul sans qu'un champ manquant devienne un zéro payé.
+    const lu = checkReport(rapport);
+    if (!lu.rapport) return refus('rapport', lu.erreurs[0] ? lu.erreurs[0].message : 'Rapport illisible.');
+    const r = lu.rapport;
+    // La sacoche est BORNÉE tout de suite, avant même les refus. Aucun chemin de ce code ne doit
+    // pouvoir porter plus que tout l'argent de la table, même le jour où un contrôle sautera.
+    sacocheCents = Math.min(limites.sacocheMaxCents, Math.max(0, r.purseCents));
+    declaredNetCents = r.declaredNetCents;
+
+    const expireMs = instantMs(b.expiresAt);
+    if (expireMs !== null && tMs > expireMs)
+      return refus('expire', 'Ce billet a expiré : la partie qu\'il désigne ne se règle plus.', 'expired');
+
+    // Les faits, un par un. Les bornes basses — durée >= 0, rang >= 1 — sont déjà tenues par
+    // `checkReport` : les réécrire ici ferait deux sources de vérité pour la même règle.
+    if (r.kills > limites.killsMax)
+      return refus('kills', `${r.kills} kills pour ${limites.killsMax} possibles (${Math.max(0, seats - mode.teamSize)} adversaires × ${vies} vies).`);
+    if (r.cubes > CUBE.max)
+      return refus('cubes', `${r.cubes} cubes de puissance pour ${CUBE.max} au maximum.`);
+    if (r.rank > limites.rangMax)
+      return refus('rang', `Rang ${r.rank} sur une table qui compte ${limites.rangMax} équipes.`);
+    if (r.purseCents > limites.sacocheMaxCents)
+      return refus('sacoche', `Sacoche de ${r.purseCents} centimes pour ${limites.sacocheMaxCents} sur la table (mise × sièges).`);
+    if (r.seconds > limites.dureeMaxS)
+      return refus('duree', `Partie de ${r.seconds} s pour ${limites.dureeMaxS} s au plus, plan de zone compris.`);
+    // Le chronomètre du serveur. La durée annoncée doit tenir dans le temps réellement écoulé
+    // depuis l'ouverture du billet, sas d'attente compris. C'est une borne HAUTE et rien d'autre :
+    // un résultat qui arrive en retard n'est pas suspect, une déconnexion n'annule rien.
+    const ecouleS = (tMs - ouvertMs) / 1000;
+    if (r.seconds > ecouleS - LOBBY.wait + ENVELOPPE.margeHorlogeS)
+      return refus('chronometre', `Partie de ${r.seconds} s annoncée ${Math.round(ecouleS)} s après l'ouverture du billet.`);
+
+    const encaissement = !!mode.cashout && r.cashedOut === true;
+    const victoire = !encaissement && r.rank === 1;
+    if (victoire) {
+      // Personne ne gagne instantanément : pour que le dernier adversaire perde toutes ses vies,
+      // il lui faut au minimum (vies − 1) réapparitions, soit (vies − 1) × RESPAWN secondes. C'est
+      // un plancher démontrable depuis les règles, pas un chiffre choisi au jugé.
+      const planchierS = (vies - 1) * RESPAWN;
+      if (r.seconds < planchierS)
+        return refus('victoire', `Victoire annoncée au bout de ${r.seconds} s : il en faut au moins ${planchierS} pour épuiser les vies d'un adversaire.`);
+      // Et surtout : l'horloge du serveur doit avoir eu le temps de contenir le sas PUIS la
+      // partie. Annoncer une victoire de deux minutes trente secondes après avoir pris son billet
+      // est impossible, quelle que soit l'indulgence qu'on a pour les horloges locales.
+      if (tMs < ouvertMs + (LOBBY.wait + r.seconds - ENVELOPPE.margeVictoireS) * 1000)
+        return refus('victoire', `Victoire de ${r.seconds} s annoncée ${Math.round(ecouleS)} s après l'ouverture du billet : l'horloge du serveur ne l'autorise pas encore.`);
+    }
+    // Le verrou d'encaissement se referme à chaque coup reçu et à chaque kill mis en banque. Une
+    // sacoche plus grosse que la mise veut donc dire qu'il a été armé au moins une fois, et qu'il
+    // a fallu l'attendre. Une sacoche restée à la mise, elle, n'a jamais armé le verrou : le
+    // bouton est prêt dès le coup d'envoi, et encaisser tout de suite pour 80 % de sa propre mise
+    // est une bêtise, pas une impossibilité. Refuser ce joueur-là serait refuser à tort.
+    if (encaissement && sacocheCents > stakeCents && r.seconds < CASHOUT.lock)
+      return refus('encaissement', `Encaissement au bout de ${r.seconds} s alors que le verrou dure ${CASHOUT.lock} s après le dernier kill.`);
+
+    if (mode.cashout) {
+      // Resurgence : encaisser et survivre paient la même chose, la sacoche. Le montant est
+      // ENCADRÉ, pas recalculé — c'est le seul endroit où un nombre du client décide d'un net.
+      if (!encaissement && !victoire) return regle('defaite', 0, 0, 0, 0);
+      const p = cashoutCents(sacocheCents);
+      return regle(encaissement ? 'encaissement' : 'victoire', p.grossCents, p.feeCents, p.netCents, p.netCents);
+    }
+    // MAXWIN : le pot, recalculé depuis la seule mise du billet. `netCents` est la part de CE
+    // joueur, `winnerCents` ce que l'équipe emporte — ils ne diffèrent qu'en Duo et en Trio.
+    if (!victoire) return regle('defaite', 0, 0, 0, 0);
+    const p = payoutCents(stakeCents, mode);
+    return regle('victoire', p.potCents, p.feeCents, p.splitCents, p.winnerCents);
+  }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
            authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, BRAWLERS,
@@ -1963,7 +2151,7 @@ const WBCore = (function(){
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport,
+           seedFor, MATCH_STEPS, matchFlow, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            ZONE_PHASES, ZONE_PHASES_FAST, ZONE_START_R, ZONE_SALT, ZONE_EDGE, ZONE_DRIFT, zonePlan, zoneAt, zoneTotalS };
 })();
 if (typeof module!=='undefined') module.exports=WBCore;

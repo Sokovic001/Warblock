@@ -7,7 +7,11 @@ const COLS = 'id, auth_id, email, name, name_key, avatar, country, created_at';
 // La graine secrète est LUE ici — c'est la seule colonne de cette liste qui ne doit jamais
 // traverser le réseau. C'est `app.js` qui la retire, par sa liste blanche `billet()`.
 const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, brawler, seed_public, seed_secret, ' +
-                   'client_key, status, opened_at, expires_at';
+                   'client_key, status, opened_at, expires_at, ' +
+                   // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
+                   'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
+                   'purse_cents, declared_net_cents, ecart_cents, ' +
+                   'seconds, kills, deaths, rank, cubes, damage, cashed_out';
 
 // Le pilote Postgres rend les colonnes `bigint` sous forme de CHAÎNE — il ne peut pas garantir
 // qu'elles tiennent dans un nombre JavaScript. Les deux graines, elles, tiennent d'office : leur
@@ -150,6 +154,69 @@ function pgDb(connectionString) {
             [ouvert.rows[0].id]);
         }
         throw new Error('impossible d\'ouvrir un billet : la place ne se libère pas');
+      } finally {
+        client.release();
+      }
+    },
+
+    // Le billet d'un joueur, et de lui seul : `user_id` est dans la clause, pas vérifié après
+    // coup. Un identifiant deviné ne doit rien apprendre sur la partie de quelqu'un d'autre.
+    async findMatch({ matchId, userId }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [matchId, userId]);
+        return ligneMatch(r.rows[0]) || null;
+      } finally {
+        client.release();
+      }
+    },
+
+    // Le règlement, écrit UNE FOIS. L'idempotence est arbitrée par la clause `where`, jamais par
+    // un `select` préalable : `status = 'open' and net_cents is null` fait que le second appel ne
+    // touche aucune ligne, et on rend alors la ligne telle qu'elle a été close la première fois.
+    // C'est la troisième clé d'idempotence annoncée par la spécification, celle sur (match_id).
+    //
+    // C'est le seul endroit du dossier où un montant entre en base, et il n'est jamais mis à
+    // jour : les colonnes valent NULL avant, et cette phrase-là après.
+    async settleMatch(r) {
+      const client = await pool.connect();
+      try {
+        const maj = await client.query(
+          `update matches set
+             status = $3, settled_at = $4, issue = $5, controle = $6, motif = $7,
+             gross_cents = $8, fee_cents = $9, net_cents = $10, purse_cents = $11,
+             declared_net_cents = $12, ecart_cents = $13,
+             seconds = $14, kills = $15, deaths = $16, rank = $17, cubes = $18, damage = $19,
+             cashed_out = $20
+           where id = $1 and user_id = $2 and status = 'open' and net_cents is null
+           returning ${MATCH_COLS}`,
+          [r.matchId, r.userId, r.status, r.settledAt, r.issue, r.controle, r.motif,
+           r.grossCents, r.feeCents, r.netCents, r.purseCents, r.declaredNetCents, r.ecartCents,
+           r.seconds, r.kills, r.deaths, r.rank, r.cubes, r.damage, r.cashedOut]);
+        if (maj.rows[0]) return { match: ligneMatch(maj.rows[0]), deja: false };
+        const deja = await client.query(
+          `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [r.matchId, r.userId]);
+        return { match: ligneMatch(deja.rows[0]) || null, deja: true };
+      } finally {
+        client.release();
+      }
+    },
+
+    // Le veilleur. Il clôt les billets que personne n'a terminés, et EUX SEULS : la clause porte
+    // `status = 'open'` et l'expiration, aucun montant n'est écrit, aucune partie réglée n'est
+    // touchée. L'heure lui est passée, elle n'est pas lue ici — c'est ce qui permet de le tester
+    // sans attendre.
+    async expireMatches({ avant, max = 500 }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `update matches set status = 'expired'
+             where id in (select id from matches
+                           where status = 'open' and expires_at <= $1
+                           order by expires_at limit $2)
+           returning id`, [avant, max]);
+        return { closes: r.rows.length };
       } finally {
         client.release();
       }

@@ -16,7 +16,13 @@ const METHODES = new Map([
   ['/api/me', ['GET', 'PATCH']],
   ['/api/match', ['POST']],
 ]);
-const METHODES_CORS = [...new Set([].concat(...METHODES.values())), 'OPTIONS'].join(',');
+// La seule route qui porte un identifiant dans son chemin. Elle ne tient pas dans la table
+// ci-dessus, mais elle en suit la règle : une liste de méthodes, donc un 405 et un pré-vol qui ne
+// peuvent pas diverger. L'identifiant est laissé en CHAÎNE — `id` est un `bigserial`, et le
+// convertir en nombre perdrait des parties au-delà de 2^53.
+const RESULTAT = /^\/api\/match\/([0-9]{1,19})\/result$/;
+const RESULTAT_METHODES = ['POST'];
+const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES)), 'OPTIONS'].join(',');
 
 // Combien de temps un billet reste ouvert : l'attente du sas, toute la durée du plan de zone — la
 // borne haute d'une partie que personne ne gagne — et dix minutes de marge. La marge est le
@@ -150,6 +156,28 @@ const billet = m => ({
   expiresAt: m.expires_at,
 });
 
+// Le règlement, tel qu'il part au client. Même liste blanche, et une raison de plus : cette
+// réponse est RELUE depuis la ligne, jamais reconstruite depuis le verdict. C'est ce qui fait que
+// le même billet réglé deux fois rend exactement la même réponse — le second appel ne recalcule
+// rien, il relit ce que le premier a écrit.
+const ouNul = v => (v === undefined ? null : v);
+const reglement = m => ({
+  matchId: String(m.id),
+  status: m.status,
+  issue: ouNul(m.issue),
+  // Le motif d'un refus, et le contrôle d'ENVELOPPE qui l'a prononcé. On le dit au client : une
+  // partie refusée sans explication est un bug qu'on ne saura jamais reproduire.
+  controle: ouNul(m.controle),
+  motif: ouNul(m.motif),
+  grossCents: ouNul(m.gross_cents),
+  feeCents: ouNul(m.fee_cents),
+  netCents: ouNul(m.net_cents),
+  purseCents: ouNul(m.purse_cents),
+  declaredNetCents: ouNul(m.declared_net_cents),
+  ecartCents: ouNul(m.ecart_cents),
+  settledAt: ouNul(m.settled_at),
+});
+
 function createApp({
   db, verifyToken, origins = [], limiter = makeLimiter(),
   // La source de hasard est injectée comme la base et la vérification du jeton : c'est ce qui rend
@@ -261,7 +289,79 @@ function createApp({
     return envoyer(res, 200, billet(match), origin);
   }
 
-  return async function handler(req, res) {
+  // ---------- POST /api/match/:id/result ----------
+  // Le serveur juge le rapport rendu et clôt la ligne. Trois choses ne changent pas ici :
+  // — `checkReport` passe avant tout, et refuse tout champ inconnu avec un code ;
+  // — `matchVerdict` reçoit une horloge INJECTÉE, jamais `Date.now()` ;
+  // — aucun montant ne sort d'ailleurs que des fonctions de paiement de WBCore. L'API ne
+  //   recalcule jamais la commission elle-même, pas même « juste pour vérifier ».
+  async function rendreResultat(req, res, identite, origin, matchId) {
+    if (!limiter('result:' + identite.authId))
+      return envoyer(res, 429, { erreur: 'Trop de résultats envoyés d\'affilée. Réessaie dans une minute.' }, origin);
+
+    let corps;
+    try { corps = await lireCorps(req); }
+    catch { return envoyer(res, 400, { erreur: 'Requête illisible.' }, origin); }
+
+    // Le rapport est le corps, sans enveloppe : un champ de plus est un refus, pas un silence.
+    const { rapport, erreurs } = C.checkReport(corps);
+    if (erreurs.length)
+      return envoyer(res, 400, { erreur: erreurs[0].message, erreurs }, origin);
+
+    const { user } = await db.findOrCreate({
+      authId: identite.authId,
+      email: identite.email || '',
+      name: C.nameOr(identite.name, C.NAME.fallback),
+      nameKey: C.nameKey,
+    });
+
+    // `user_id` fait partie de la recherche, il n'est pas vérifié après coup : un identifiant
+    // deviné ne doit rien apprendre sur la partie de quelqu'un d'autre, pas même qu'elle existe.
+    const ligne = await db.findMatch({ matchId, userId: user.id });
+    if (!ligne) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
+    // Déjà close : on rend le PREMIER verdict, tel qu'il a été écrit, sans rien recalculer ni
+    // réécrire. C'est la clé d'idempotence sur (match_id).
+    if (ligne.status !== 'open') return envoyer(res, 200, reglement(ligne), origin);
+
+    const v = C.matchVerdict({
+      mode: ligne.mode,
+      stakeCents: ligne.stake_cents,
+      seats: ligne.seats,
+      seed: ligne.seed_public,
+      openedAt: ligne.opened_at,
+      expiresAt: ligne.expires_at,
+    }, rapport, now());
+
+    // Un refus clôt la ligne lui aussi, avec son motif : cette partie-là ne comptera dans aucune
+    // statistique, et on veut pouvoir dire pourquoi sans relancer le calcul six mois plus tard.
+    const { match } = await db.settleMatch({
+      matchId, userId: user.id,
+      status: v.statut, settledAt: new Date(now()),
+      issue: v.issue, controle: v.controle, motif: v.motif,
+      grossCents: v.grossCents, feeCents: v.feeCents, netCents: v.netCents,
+      purseCents: v.sacocheCents, declaredNetCents: v.declaredNetCents, ecartCents: v.ecartCents,
+      // Les faits déclarés, tels que le client les a rendus. Ils sont bornés, pas vérifiés.
+      seconds: rapport.seconds, kills: rapport.kills, deaths: rapport.deaths,
+      rank: rapport.rank, cubes: rapport.cubes, damage: rapport.damage,
+      cashedOut: rapport.cashedOut,
+    });
+    if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
+    return envoyer(res, 200, reglement(match), origin);
+  }
+
+  // ---------- le veilleur ----------
+  // Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — restent
+  // ouverts pour toujours, et un joueur n'a qu'un billet ouvert à la fois : sans ce balayage, une
+  // partie abandonnée enferme son joueur jusqu'à ce qu'il retente après l'expiration, et la table
+  // garde des lignes que rien ne clôt. C'est du code qui manipulera de l'argent et que personne ne
+  // regarde tourner : il prend son heure en argument, comme tout le reste, et se teste sans
+  // attendre. Il n'écrit AUCUN montant — il ne fait que fermer une porte.
+  async function veiller() {
+    const { closes } = await db.expireMatches({ avant: new Date(now()) });
+    return { closes };
+  }
+
+  const handler = async function handler(req, res) {
     const origin = req.headers.origin;
     const url = new URL(req.url, 'http://interne');
     const route = url.pathname;
@@ -281,7 +381,8 @@ function createApp({
 
     if (route === '/api/health') return envoyer(res, 200, { ok: true }, origin);
 
-    const methodes = METHODES.get(route);
+    const resultat = RESULTAT.exec(route);
+    const methodes = resultat ? RESULTAT_METHODES : METHODES.get(route);
     if (!methodes) return envoyer(res, 404, { erreur: 'Route inconnue.' }, origin);
     if (!methodes.includes(req.method))
       return envoyer(res, 405, { erreur: 'Méthode non autorisée.' }, origin);
@@ -302,8 +403,9 @@ function createApp({
     if (!identite || !identite.authId) return envoyer(res, 401, { erreur: 'Session invalide ou expirée.' }, origin);
 
     try {
-      // ---------- le billet d'une partie ----------
+      // ---------- le billet d'une partie, puis son verdict ----------
       if (route === '/api/match') return await ouvrirBillet(req, res, identite, origin);
+      if (resultat) return await rendreResultat(req, res, identite, origin, resultat[1]);
 
       // ---------- lecture ----------
       if (req.method === 'GET') {
@@ -342,6 +444,12 @@ function createApp({
       return envoyer(res, 500, { erreur: 'Erreur interne.' }, origin);
     }
   };
+
+  // Le veilleur voyage avec le routeur, comme `onError` : il partage son horloge et sa base, et
+  // celui qui écoute décide quand l'appeler. Le brancher ici plutôt que dans `main.js` évite qu'il
+  // existe deux idées de l'heure dans le même processus.
+  handler.veiller = veiller;
+  return handler;
 }
 
-module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY, MATCH_MARGE_S };
+module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY, MATCH_MARGE_S, RESULTAT };

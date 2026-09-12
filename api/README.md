@@ -17,6 +17,7 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `GET /api/me` | Rend le profil du joueur connecté. **La première connexion crée le compte.** |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
 | `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, expiration. |
+| `POST /api/match/:id/result` | Juge le rapport rendu, recalcule les montants et **clôt** la ligne. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
 
@@ -87,7 +88,86 @@ sont donc converties en nombre dans `db-pg.js`, et une seconde fois dans la list
 volontairement : on ne fait que les recopier.
 
 **Aucune colonne solde, ici comme ailleurs.** `stake_cents` est une mise engagée, pas de l'argent
-détenu. La ligne s'insère puis se règlera **une fois** ; en phase 02a rien ne la règle encore.
+détenu. La ligne s'insère puis se règle **une fois**, par la route ci-dessous.
+
+## `POST /api/match/:id/result` — le verdict
+
+```
+POST /api/match/12/result   le rapport, tel que WBCore.reportFrom() le produit
+→ 200                       { matchId, status, issue, controle, motif,
+                              grossCents, feeCents, netCents, purseCents,
+                              declaredNetCents, ecartCents, settledAt }
+```
+
+Le corps **est** le rapport, sans enveloppe : `seconds`, `kills`, `deaths`, `rank`, `cubes`,
+`damage`, `cashedOut`, `purseCents`, `declaredNetCents`. `WBCore.checkReport()` le lit et **refuse
+tout champ inconnu, avec un code** (`inconnu`, `manquant`, `type`, `borne`, `corps`) : `PATCH
+/api/me` ignore les champs en trop et c'est bien pour un profil, mais sur un rapport qui décide
+d'un montant le silence est la mauvaise valeur par défaut.
+
+### Le verdict est une **enveloppe de plausibilité**, pas de l'anti-triche
+
+`WBCore.matchVerdict()` est une fonction pure qui reçoit le billet, le rapport et **une horloge en
+argument**. Le serveur ne rejoue pas la partie — il ne le fera pas avant la phase 02b. Il refuse ce
+qui est **impossible**, et rien d'autre. La liste des contrôles vit dans la constante `ENVELOPPE`,
+à côté de la fonction : plus de kills que adversaires × vies, une partie plus longue que tout le
+plan de zone, une durée que son propre chronomètre n'a pas eu le temps de contenir, une victoire
+annoncée avant que son horloge ne l'autorise, un encaissement Resurgence avant la fin du verrou de
+`CASHOUT.lock`, plus de cubes que `CUBE.max`, un rang hors de la table, une sacoche au-delà de
+`mise × sièges`, un billet expiré.
+
+**Deux contrôles « évidents » sont faux et ne sont pas écrits.** « La sacoche vaut exactement la
+mise quand on n'a tué personne » : non, une mort par gaz lâche la sacoche au sol et n'importe qui
+la ramasse sans avoir tué qui que ce soit, tandis que mourir la remet à zéro — seule la borne
+subsiste. « Plus de kills que d'adversaires » : non, chacun a trois vies, deux en Resurgence.
+
+Les tolérances d'horloge sont **volontairement larges** : un onglet en arrière-plan, un téléphone
+endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheur. Aucun argent
+n'est en jeu en 02a, donc accepter une partie douteuse coûte une ligne de statistique qui ne vaut
+rien, tandis que refuser une partie honnête coûte un joueur.
+
+### L'invariant « aucun montant ne vient du client » se scinde en deux
+
+- **MAXWIN : le net est recalculé.** Le billet porte la mise et le mode, `payoutCents()` fait le
+  reste. Le client n'a aucune voix, et un rapport qui n'annonce aucun montant se règle quand même.
+- **Resurgence : le net est encadré, pas recalculé.** Le net d'un encaissement est
+  `cashoutCents(sacoche)`, et la sacoche est précisément le nombre que le serveur ne sait pas
+  refaire. Il applique donc une fonction à un montant **déclaré par le client**, borné à
+  `[0, mise × sièges]` — un intervalle de 0 à 50 mises. C'est faible, c'est honnête, et c'est une
+  raison de plus pour qu'aucun euro n'entre avant la phase 02b.
+
+Dans les deux cas, l'API **ne recalcule jamais la commission elle-même** : le net ne sort que des
+fonctions de paiement de `WBCore`.
+
+**`declaredNetCents` n'est jamais payé ni cru.** Le verdict calcule l'**écart** entre ce que le
+client annonce et ce qu'il compte, et le stocke dans `ecart_cents` — la seule colonne en centimes
+qui peut être négative, parce qu'un client peut aussi annoncer moins. On mesure, on ne punit pas :
+le seuil est une affaire de phase 06, et il se fixera sur des écarts réellement observés.
+
+### Ce que la route écrit, une fois
+
+Un verdict de refus **clôt la ligne lui aussi** (`status = 'rejected'`), avec son motif : cette
+partie-là ne comptera dans aucune statistique, et on veut pouvoir dire pourquoi sans relancer le
+calcul six mois plus tard. Une partie réglée passe en `settled`, un billet périmé en `expired`.
+
+L'idempotence est la troisième clé annoncée par la spécification, celle sur `(match_id)`, et elle
+est arbitrée par la clause `where status = 'open' and net_cents is null` : un second envoi ne
+touche aucune ligne, et la réponse est **relue depuis la ligne**, jamais reconstruite depuis le
+verdict. Le même billet réglé deux fois rend donc le premier verdict au caractère près, même si le
+second rapport ment sur tout. Une garde textuelle vérifie que toute écriture de `matches` porte
+`status = 'open'`, et toute écriture d'un montant `net_cents is null` en plus.
+
+**Un résultat en retard est accepté tant que le billet n'a pas expiré.** Si couper le wifi
+effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
+
+### Le veilleur
+
+Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — resteraient
+ouverts pour toujours, et un joueur n'a qu'un billet ouvert à la fois. `app.veiller()` les clôt, et
+**eux seuls** : sa clause porte `status = 'open'` et l'expiration, il n'écrit aucun montant, et il
+prend son heure du même endroit que le reste du routeur. `main.js` l'appelle chaque minute. C'est
+du code qui manipulera de l'argent et que personne ne regarde tourner : il se teste comme le
+reste, horloge injectée, sans attendre.
 
 ## Les fichiers
 
@@ -99,7 +179,7 @@ auth-crossmint.js   vérifie les jetons de session                  ← touche l
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
 schema.sql          le schéma : users, user_stats, matches. Aucune colonne « solde », volontairement.
-test.js             73 tests sans rien installer, 82 avec jose
+test.js             89 tests sans rien installer, 98 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -190,15 +270,17 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 73 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 82 : les 73, plus la chaîne complète de vérification
+node api/test.js          # 89 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 98 : les 89, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
 `createApp()`. Les tests les remplacent par des doublures, ce qui couvre sans rien installer
 l'authentification, la validation, l'unicité du pseudo, la limitation de débit, le CORS, la lecture
 des clés d'API, chaque refus de jeton, et tout le billet de partie — graines, idempotence,
-expiration comprises. Une horloge injectée fait vieillir un billet sans attendre.
+expiration comprises. Une horloge injectée fait vieillir un billet sans attendre, et c'est elle qui
+permet d'éprouver le verdict et le veilleur : un mensonge par test, chacun nommé d'après le
+mensonge qu'il arrête.
 
 Les neuf tests supplémentaires font tourner la vraie cryptographie : ils génèrent une paire de clés,
 servent un trousseau public en local, et éprouvent ce qu'on ne peut pas demander à un fournisseur —
@@ -265,6 +347,18 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
 
 ## Limites connues, à traiter avant la production
 
+- **Le verdict n'arrête presque rien, et ce n'est pas un premier étage d'anti-triche.** Une
+  enveloppe volontairement large, des tolérances d'horloge généreuses, et le parti pris de ne
+  jamais refuser à tort : un client modifié ment à l'intérieur de l'enveloppe sans être inquiété.
+  Il ne peut pas se faire payer un montant MAXWIN de son choix, il peut annoncer une sacoche
+  Resurgence quelconque entre zéro et cinquante mises, et il peut mentir sur tous les faits. C'est
+  précisément pour cela qu'**aucun euro n'entre avant que le serveur ne simule** (phase 02b). La
+  valeur réelle de ce module en phase 02a est la répétition générale du grand livre.
+- **La table `matches` se remplit de faits DÉCLARÉS par le client, et ces lignes-là ne seront
+  jamais lues par le grand livre de la phase 03.** Borner n'est pas vérifier. La phase 03 attend
+  des lignes produites par simulation serveur ; celles-ci ne valent que pour des statistiques
+  d'affichage et pour mesurer des écarts. Sans cette phrase écrite noir sur blanc, on paiera un
+  jour des chiffres que personne n'a contrôlés.
 - **La limitation de débit est en mémoire, et elle couvre désormais une route qui ÉCRIT en base.**
   Elle freine un joueur sur une instance ; dès qu'il y en aura deux, chaque instance aura son propre
   compteur et la limite vaudra le double, puis le triple. C'était déjà vrai en phase 01, où le pire
@@ -273,10 +367,12 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   production. Les seaux sont séparés par route : renommer son personnage ne consomme pas le droit de
   demander une partie, et l'inverse non plus.
 - **Aucune base n'a jamais tourné.** L'index unique partiel sur les billets ouverts, la contrainte
-  `name_key` et le comportement de `insert … on conflict do nothing` n'ont été éprouvés que contre
-  la doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
+  `name_key`, le comportement de `insert … on conflict do nothing` et la clause `where status =
+  'open' and net_cents is null` qui arbitre l'unicité du règlement n'ont été éprouvés que contre la
+  doublure de `api/test.js`, qui imite les contraintes au lieu de les subir. Si Postgres se
   comporte autrement, rien ne le signalera avant le premier déploiement. C'est la dette la plus
-  silencieuse du dossier.
+  silencieuse du dossier, et elle grandit : c'est maintenant un montant qu'une clause non éprouvée
+  protège.
 - **Pas encore de journal d'audit.** Chaque changement de pseudo devra être tracé avant que des
   comptes ne valent de l'argent.
 - **Pas de suppression de compte.** À ajouter, avec ce que la juridiction retenue impose de

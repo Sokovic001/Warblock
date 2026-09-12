@@ -1790,4 +1790,332 @@ test('le plan de zone ne connaît ni horloge, ni hasard non semé, ni navigateur
     'zoneUpdate retire de nouveau le centre du cercle suivant sur Math.random');
 });
 
+console.log('Le verdict : une enveloppe de plausibilité, pas de l\'anti-triche');
+// L'heure d'ouverture d'un billet, et l'heure à laquelle un rapport HONNÊTE arrive : le sas, la
+// partie, et trois secondes de réseau. Tout ce qui est plus tôt que ça est de la triche d'horloge,
+// tout ce qui est plus tard est une déconnexion — et une déconnexion n'annule rien.
+const V_T0 = Date.parse('2026-03-01T18:00:00Z');
+const V_BILLET = (extra = {}) => ({
+  mode: 'solo', stakeCents: 50, seats: C.seatsOf(C.MODES.solo), seed: 12345,
+  openedAt: V_T0, expiresAt: V_T0 + 3600_000, ...extra,
+});
+const V_RAPPORT = (extra = {}) => C.reportFrom({
+  seconds: 60, kills: 0, deaths: 1, rank: 5, cubes: 0, damage: 0,
+  cashedOut: false, purseCents: 0, declaredNetCents: 0, ...extra,
+});
+const V_RENDU = (rapport, billet, retardS = 3) =>
+  V_T0 + (C.LOBBY.wait + rapport.seconds + retardS) * 1000;
+// Chaque refus prononcé par les tests est retenu ici : à la fin, la liste doit coïncider avec
+// ENVELOPPE.controles, ni un motif de trop, ni une ligne morte.
+const V_MOTIFS = new Set();
+function verdict(billet, rapport, maintenantMs){
+  const v = C.matchVerdict(billet, rapport, maintenantMs);
+  if (!v.ok) V_MOTIFS.add(v.controle);
+  return v;
+}
+const V_MAXWIN = [C.MODES.solo, C.MODES.duo, C.MODES.trio];
+
+test('le règlement ne lit jamais un montant du rapport : une sacoche énorme est ramenée à la borne', () => {
+  // Le mensonge est refusé, ET le montant qui ressort du verdict est celui de la borne, pas celui
+  // du rapport. Les deux comptent : le refus est le contrôle, la borne est la ceinture qui tient
+  // encore le jour où quelqu'un desserre le contrôle.
+  const b = V_BILLET({ mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence) });
+  const max = C.purseBound(b.stakeCents, b.seats).maxCents;
+  const r = V_RAPPORT({ seconds: 40, cashedOut: true, purseCents: 99_999_999, declaredNetCents: 79_999_999 });
+  const v = verdict(b, r, V_RENDU(r));
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.controle, 'sacoche');
+  assert.strictEqual(v.sacocheCents, max, 'la sacoche doit être ramenée à mise × sièges');
+  assert.strictEqual(v.netCents, 0);
+  assert.ok(v.netCents <= C.cashoutCents(max).netCents, 'aucun chemin ne doit payer plus que la table');
+});
+test('un rapport sans aucun montant se règle quand même : le pot ne vient pas du client', () => {
+  // Sacoche à zéro, net annoncé à zéro : une victoire MAXWIN paie tout de même le pot entier,
+  // parce que le serveur le recalcule depuis la seule mise du billet.
+  const b = V_BILLET();
+  const r = V_RAPPORT({ seconds: 154, rank: 1, kills: 0, purseCents: 0, declaredNetCents: 0 });
+  const v = verdict(b, r, V_RENDU(r));
+  assert.strictEqual(v.ok, true);
+  assert.strictEqual(v.issue, 'victoire');
+  assert.strictEqual(v.netCents, C.payoutCents(50, C.MODES.solo).splitCents);
+  assert.ok(v.netCents > 0);
+});
+test('mensonge refusé : plus de kills que adversaires × vies', () => {
+  for (const mode of Object.values(C.MODES)) {
+    const seats = C.seatsOf(mode), max = (seats - mode.teamSize) * C.livesFor(mode);
+    const b = V_BILLET({ mode: mode.id, seats });
+    const juste = V_RAPPORT({ seconds: 60, kills: max, rank: 2 });
+    assert.strictEqual(verdict(b, juste, V_RENDU(juste)).ok, true,
+      `${mode.id} : ${max} kills sont atteignables avec ${C.livesFor(mode)} vies`);
+    const trop = V_RAPPORT({ seconds: 60, kills: max + 1, rank: 2 });
+    const v = verdict(b, trop, V_RENDU(trop));
+    assert.strictEqual(v.controle, 'kills', mode.id);
+    assert.strictEqual(v.netCents, 0);
+  }
+});
+test('mensonge refusé : une partie plus longue que le plan de zone', () => {
+  const b = V_BILLET();
+  const max = C.zoneTotalS(C.zonePlan(b.seed, C.MODES.solo)) + C.GRACE + C.ENVELOPPE.margeDureeS;
+  const bord = V_RAPPORT({ seconds: max, rank: 2 });
+  assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true, 'la borne elle-même est acceptée');
+  const trop = V_RAPPORT({ seconds: max + 1, rank: 2 });
+  const v = verdict(b, trop, V_RENDU(trop));
+  assert.strictEqual(v.controle, 'duree');
+  assert.strictEqual(v.limites.dureeMaxS, max);
+});
+test('mensonge refusé : une durée que l\'horloge du serveur n\'a pas eu le temps de contenir', () => {
+  // Une partie de deux minutes trente, annoncée cinq secondes après avoir pris son billet. La
+  // durée tient dans le plan de zone — c'est le chronomètre du serveur qui la refuse, sas compris.
+  const b = V_BILLET();
+  const r = V_RAPPORT({ seconds: 154, rank: 2 });
+  const v = verdict(b, r, V_T0 + 5000);
+  assert.strictEqual(v.controle, 'chronometre', JSON.stringify(v));
+  assert.strictEqual(v.netCents, 0);
+  // La même partie, rendue à l'heure, passe.
+  assert.strictEqual(verdict(b, r, V_RENDU(r)).ok, true);
+});
+test('mensonge refusé : une victoire annoncée avant que l\'horloge du serveur ne l\'autorise', () => {
+  // Le rapport passe le contrôle de chronomètre — la tolérance générale est large — et tombe
+  // quand même, parce qu'une victoire est une revendication sur le pot et se juge plus serré.
+  const b = V_BILLET();
+  const r = V_RAPPORT({ seconds: 100, rank: 1 });
+  const tot = V_T0 + 30_000;
+  const v = verdict(b, r, tot);
+  assert.strictEqual(v.controle, 'victoire', JSON.stringify(v));
+  assert.strictEqual(v.netCents, 0);
+  // La même partie, la même horloge, mais annoncée perdue : elle passe. C'est bien la victoire que
+  // le serveur refuse, pas la durée.
+  const perdue = V_RAPPORT({ seconds: 100, rank: 4 });
+  assert.strictEqual(verdict(b, perdue, tot).ok, true);
+  // Et une victoire instantanée est impossible même si l'horloge du serveur a tourné : il faut
+  // (vies − 1) réapparitions pour épuiser le dernier adversaire.
+  const eclair = V_RAPPORT({ seconds: 1, rank: 1 });
+  assert.strictEqual(verdict(b, eclair, V_T0 + 3600_000 - 1).controle, 'victoire');
+});
+test('mensonge refusé : un encaissement avant la fin du verrou CASHOUT.lock', () => {
+  const b = V_BILLET({ mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence) });
+  const r = V_RAPPORT({ seconds: C.CASHOUT.lock - 1, kills: 3, cashedOut: true, purseCents: 200 });
+  const v = verdict(b, r, V_RENDU(r));
+  assert.strictEqual(v.controle, 'encaissement');
+  const juste = V_RAPPORT({ seconds: C.CASHOUT.lock, kills: 3, cashedOut: true, purseCents: 200 });
+  assert.strictEqual(verdict(b, juste, V_RENDU(juste)).ok, true, 'le verrou expiré, l\'encaissement passe');
+  // Et le joueur qui encaisse sa PROPRE mise au coup d'envoi n'est pas un tricheur : le verrou
+  // n'est armé que par un coup reçu ou un kill mis en banque, donc il n'a jamais couru pour lui.
+  // Il perd 20 % pour rien, c'est une bêtise, pas une impossibilité.
+  const presse = V_RAPPORT({ seconds: 1, cashedOut: true, purseCents: b.stakeCents });
+  assert.strictEqual(verdict(b, presse, V_RENDU(presse)).ok, true);
+});
+test('mensonge refusé : plus de cubes que CUBE.max', () => {
+  const b = V_BILLET();
+  const bord = V_RAPPORT({ seconds: 60, rank: 2, cubes: C.CUBE.max });
+  assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true);
+  const trop = V_RAPPORT({ seconds: 60, rank: 2, cubes: C.CUBE.max + 1 });
+  assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'cubes');
+});
+test('mensonge refusé : une sacoche au-delà de mise × sièges', () => {
+  for (const mode of Object.values(C.MODES)) {
+    const seats = C.seatsOf(mode), b = V_BILLET({ mode: mode.id, seats, stakeCents: 1000 });
+    const max = C.purseBound(1000, seats).maxCents;
+    const bord = V_RAPPORT({ seconds: 60, rank: 2, purseCents: max });
+    assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true, `${mode.id} : toute la table dans la sacoche est possible`);
+    const trop = V_RAPPORT({ seconds: 60, rank: 2, purseCents: max + 1 });
+    assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'sacoche', mode.id);
+  }
+});
+test('mensonge refusé : un rang au-delà du nombre d\'équipes de la table', () => {
+  for (const mode of Object.values(C.MODES)) {
+    const seats = C.seatsOf(mode), b = V_BILLET({ mode: mode.id, seats });
+    const bord = V_RAPPORT({ seconds: 60, rank: mode.teams });
+    assert.strictEqual(verdict(b, bord, V_RENDU(bord)).ok, true, mode.id);
+    const trop = V_RAPPORT({ seconds: 60, rank: mode.teams + 1 });
+    assert.strictEqual(verdict(b, trop, V_RENDU(trop)).controle, 'rang', mode.id);
+  }
+});
+test('le net d\'un carton plein retombe au centime sur teamPayout(...).winner', () => {
+  // Le carton plein, c'est toute la table dans les poches d'un seul joueur : le pot en MAXWIN, la
+  // sacoche entière en Resurgence. Les deux chemins doivent retomber sur le même centime que la
+  // fonction de paiement en dollars que le jeu affiche depuis toujours.
+  for (const t of C.TIERS) {
+    const stakeCents = C.toCents(t.stake);
+    for (const mode of Object.values(C.MODES)) {
+      const seats = C.seatsOf(mode), tp = C.teamPayout(t.stake, mode, C.RAKE);
+      const b = V_BILLET({ mode: mode.id, seats, stakeCents });
+      const r = V_RAPPORT({
+        seconds: 80, rank: 1, kills: (seats - mode.teamSize) * C.livesFor(mode),
+        cashedOut: !!mode.cashout, purseCents: C.purseBound(stakeCents, seats).maxCents,
+      });
+      const v = verdict(b, r, V_RENDU(r));
+      assert.strictEqual(v.ok, true, `${mode.id} à ${t.stake} : ${v.motif}`);
+      if (mode.cashout) {
+        // Un seul joueur qui banque toute la table : pas de partage, il emporte le pot net.
+        assert.strictEqual(v.netCents, C.toCents(tp.winner), `${mode.id} à ${t.stake}`);
+      } else {
+        assert.strictEqual(v.winnerCents, C.toCents(tp.winner), `${mode.id} à ${t.stake}`);
+        assert.strictEqual(v.netCents, C.toCents(tp.split), `${mode.id} à ${t.stake}`);
+        assert.strictEqual(v.netCents * mode.teamSize, v.winnerCents, 'le pot se partage sans reste');
+      }
+      assert.strictEqual(v.grossCents - v.feeCents, mode.cashout ? v.netCents : v.winnerCents);
+    }
+  }
+});
+test('la commission ne tombe jamais à zéro sur une table à 0,50 $', () => {
+  const b = V_BILLET();
+  const gagne = V_RAPPORT({ seconds: 154, rank: 1 });
+  const v = verdict(b, gagne, V_RENDU(gagne));
+  assert.ok(v.feeCents > 0, 'une victoire à 0,50 $ sans commission');
+  assert.strictEqual(v.feeCents + v.netCents, v.grossCents);
+  // Et sur toutes les sacoches atteignables d'une table à 0,50 $ en Resurgence, au centime près.
+  const res = V_BILLET({ mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence) });
+  const max = C.purseBound(res.stakeCents, res.seats).maxCents;
+  for (let sacoche = 1; sacoche <= max; sacoche++) {
+    const r = V_RAPPORT({ seconds: 40, kills: 1, cashedOut: true, purseCents: sacoche });
+    const w = verdict(res, r, V_RENDU(r));
+    assert.strictEqual(w.ok, true, String(sacoche));
+    assert.ok(w.feeCents > 0, `${sacoche} centimes encaissés sans commission`);
+    assert.strictEqual(w.feeCents + w.netCents, w.grossCents, String(sacoche));
+  }
+});
+test('un rapport honnête au bord de la tolérance est accepté', () => {
+  // Refuser à tort coûte plus cher qu'accepter à tort tant qu'aucun argent n'est en jeu. Quatre
+  // bords, tous atteints par un joueur honnête dont l'onglet a dormi ou dont l'horloge ment.
+  const b = V_BILLET();
+  const max = C.zoneTotalS(C.zonePlan(b.seed, C.MODES.solo)) + C.GRACE + C.ENVELOPPE.margeDureeS;
+  const bords = [
+    // la partie la plus longue que le plan de zone autorise
+    [V_RAPPORT({ seconds: max, rank: 2 }), 3],
+    // un rapport qui arrive une demi-heure après, mais avant l'expiration du billet : une
+    // déconnexion n'annule rien, sinon couper le wifi serait la meilleure stratégie du jeu
+    [V_RAPPORT({ seconds: 154, rank: 2 }), 1800],
+    // un joueur dont le chronomètre avance plus vite que celui du serveur, au bord de la marge
+    [V_RAPPORT({ seconds: 154, rank: 2 }), 3 - C.ENVELOPPE.margeHorlogeS],
+    // une victoire annoncée au plus tôt que l'horloge du serveur autorise
+    [V_RAPPORT({ seconds: 154, rank: 1 }), -C.ENVELOPPE.margeVictoireS],
+  ];
+  for (const [r, retard] of bords) {
+    const v = verdict(b, r, V_RENDU(r, b, retard));
+    assert.strictEqual(v.ok, true, `retard ${retard} : ${v.controle} — ${v.motif}`);
+  }
+  // La marge de victoire doit couvrir TOUT le sas : un billet demandé à la fin du sas donne un
+  // coup d'envoi plus tôt que `openedAt + LOBBY.wait`, et ce joueur-là est honnête.
+  assert.ok(C.ENVELOPPE.margeVictoireS > C.LOBBY.wait,
+    'une marge de victoire plus courte que le sas refuserait des victoires honnêtes');
+});
+test('en Resurgence le montant est encadré, pas recalculé', () => {
+  // L'invariant « aucun montant ne vient du client » ne vaut PAS ici, et le test le dit au lieu de
+  // le laisser croire : le net suit la sacoche déclarée, sur tout l'intervalle de la borne.
+  const b = V_BILLET({ mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence) });
+  const max = C.purseBound(b.stakeCents, b.seats).maxCents;
+  assert.strictEqual(max, b.stakeCents * 50, 'l\'intervalle va de 0 à 50 mises');
+  const nets = [0, 1, 50, 500, max].map(sacoche => {
+    const r = V_RAPPORT({ seconds: 40, kills: 1, cashedOut: true, purseCents: sacoche });
+    return verdict(b, r, V_RENDU(r)).netCents;
+  });
+  assert.deepStrictEqual(nets, [0, 1, 50, 500, max].map(s => C.cashoutCents(s).netCents));
+  assert.ok(nets[4] > nets[0], 'le montant déclaré décide bel et bien du net en Resurgence');
+  // En MAXWIN, la même sacoche n'a aucune voix : le net ne dépend que de la mise et du mode.
+  const m = V_BILLET();
+  const nuls = [0, 42, C.purseBound(m.stakeCents, m.seats).maxCents].map(sacoche => {
+    const r = V_RAPPORT({ seconds: 154, rank: 1, purseCents: sacoche });
+    return verdict(m, r, V_RENDU(r)).netCents;
+  });
+  assert.deepStrictEqual(nuls, [0, 1, 2].map(() => C.payoutCents(m.stakeCents, C.MODES.solo).splitCents));
+});
+test('en MAXWIN, `cashedOut` n\'ouvre aucune caisse : c\'est le mode qui décide du paiement', () => {
+  // Il n'y a pas de bouton d'encaissement en MAXWIN. Un rapport qui le prétend ne doit surtout pas
+  // basculer le règlement sur la sacoche déclarée : ce serait le seul chemin par lequel un client
+  // MAXWIN choisirait son montant, et l'invariant « aucun montant ne vient du client » tomberait.
+  const b = V_BILLET();
+  const max = C.purseBound(b.stakeCents, b.seats).maxCents;
+  const gagnee = V_RAPPORT({ seconds: 154, rank: 1, cashedOut: true, purseCents: max });
+  const v = verdict(b, gagnee, V_RENDU(gagnee));
+  assert.strictEqual(v.issue, 'victoire');
+  assert.strictEqual(v.netCents, C.payoutCents(b.stakeCents, C.MODES.solo).splitCents);
+  const perdue = V_RAPPORT({ seconds: 154, rank: 6, cashedOut: true, purseCents: max });
+  const w = verdict(b, perdue, V_RENDU(perdue));
+  assert.strictEqual(w.issue, 'defaite');
+  assert.strictEqual(w.netCents, 0, 'une défaite MAXWIN ne s\'encaisse pas');
+});
+test('l\'écart entre le net annoncé et le net compté est mesuré, jamais payé', () => {
+  const b = V_BILLET();
+  const attendu = C.payoutCents(50, C.MODES.solo).splitCents;
+  for (const annonce of [0, 1, attendu, attendu + 1, 9_999_999]) {
+    const r = V_RAPPORT({ seconds: 154, rank: 1, declaredNetCents: annonce });
+    const v = verdict(b, r, V_RENDU(r));
+    assert.strictEqual(v.netCents, attendu, 'le net annoncé n\'est jamais payé');
+    assert.strictEqual(v.declaredNetCents, annonce);
+    assert.strictEqual(v.ecartCents, annonce - attendu, 'l\'écart doit être rendu pour être stocké');
+  }
+  // Un refus mesure aussi : la partie ne comptera pour rien, la mesure reste.
+  const menteur = V_RAPPORT({ seconds: 60, rank: 2, cubes: 99, declaredNetCents: 4242 });
+  const v = verdict(b, menteur, V_RENDU(menteur));
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.ecartCents, 4242);
+});
+test('une défaite ne paie rien, dans les cinq modes', () => {
+  for (const mode of Object.values(C.MODES)) {
+    const seats = C.seatsOf(mode);
+    const b = V_BILLET({ mode: mode.id, seats });
+    const r = V_RAPPORT({ seconds: 60, rank: Math.min(4, mode.teams), deaths: C.livesFor(mode),
+                          purseCents: C.purseBound(b.stakeCents, seats).maxCents });
+    const v = verdict(b, r, V_RENDU(r));
+    assert.strictEqual(v.ok, true, mode.id);
+    assert.strictEqual(v.issue, 'defaite', mode.id);
+    assert.deepStrictEqual([v.grossCents, v.feeCents, v.netCents, v.winnerCents], [0, 0, 0, 0], mode.id);
+  }
+});
+test('un billet expiré ne se règle plus, et le dit avec son propre statut', () => {
+  const b = V_BILLET();
+  const r = V_RAPPORT({ seconds: 60, rank: 1 });
+  assert.strictEqual(verdict(b, r, b.expiresAt).ok, true, 'la seconde d\'expiration elle-même passe encore');
+  const v = verdict(b, r, b.expiresAt + 1);
+  assert.strictEqual(v.controle, 'expire');
+  assert.strictEqual(v.statut, 'expired', 'un billet périmé n\'est pas un rapport refusé');
+  assert.strictEqual(v.netCents, 0);
+});
+test('un billet ou un rapport illisible est refusé, jamais réglé, et ne lance sur rien', () => {
+  const bon = V_RAPPORT({ seconds: 60, rank: 2 });
+  for (const billet of [null, undefined, {}, [], 42, 'billet', { mode: 'lune', stakeCents: 50, seats: 20 },
+                        V_BILLET({ mode: 'constructor' }), V_BILLET({ stakeCents: 0 }),
+                        V_BILLET({ openedAt: 'jamais' })]) {
+    const v = verdict(billet, bon, V_T0 + 100_000);
+    assert.strictEqual(v.ok, false, JSON.stringify(billet));
+    assert.strictEqual(v.controle, 'billet', JSON.stringify(billet));
+  }
+  for (const rapport of [null, undefined, {}, [], 42, 'rapport', { ...bon, triche: 1 },
+                         { ...bon, kills: 1.5 }, { ...bon, purseCents: null }]) {
+    const v = verdict(V_BILLET(), rapport, V_T0 + 100_000);
+    assert.strictEqual(v.ok, false, JSON.stringify(rapport));
+    assert.strictEqual(v.controle, 'rapport', JSON.stringify(rapport));
+    assert.strictEqual(v.netCents, 0);
+  }
+  // Une horloge absente ou folle ne doit pas non plus régler quoi que ce soit.
+  for (const t of [undefined, null, NaN, Infinity, 'maintenant'])
+    assert.strictEqual(verdict(V_BILLET(), bon, t).controle, 'billet', String(t));
+});
+test('le verdict ne rend aucun motif absent d\'ENVELOPPE, et aucune ligne d\'ENVELOPPE n\'est morte', () => {
+  // Ce test est le seul qui relie la liste écrite au code qui l'applique. Ajouter un contrôle sans
+  // l'inscrire dans ENVELOPPE, ou laisser une ligne qui ne refuse plus rien, le fait tomber.
+  const declares = Object.keys(C.ENVELOPPE.controles).sort();
+  assert.deepStrictEqual([...V_MOTIFS].sort(), declares,
+    'les motifs réellement prononcés par les tests doivent être exactement ceux qu\'ENVELOPPE annonce');
+  for (const m of declares) assert.ok(C.ENVELOPPE.controles[m].length > 10, m);
+});
+test('le verdict est nommé pour ce qu\'il est : une enveloppe de plausibilité, pas de l\'anti-triche', () => {
+  // Écrite seulement dans le README, cette limite serait oubliée exactement le jour où elle
+  // protégerait de l'argent. Elle doit donc être lisible dans le code, dans le nom de la constante
+  // qui liste les contrôles, et dans le nom de ces tests.
+  const bloc = core.slice(core.indexOf('// ---- Le verdict d\'une partie'), core.indexOf('  return { MAP, PLAYERS,'));
+  assert.ok(bloc.length > 2000, 'le bloc du verdict n\'a pas été retrouvé dans CORE');
+  const entete = bloc.slice(0, bloc.indexOf('const ENVELOPPE'));
+  assert.match(entete, /ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE/);
+  assert.match(entete, /RECALCULÉ/, 'l\'en-tête doit dire que MAXWIN est recalculé');
+  assert.match(entete, /ENCADRÉ, pas recalculé/, 'et que Resurgence ne l\'est pas');
+  assert.match(entete, /0 à 50 mises/, 'l\'intervalle de la borne Resurgence doit être écrit');
+  assert.match(entete, /JAMAIS payé ni cru/, 'le sort de declaredNetCents doit être écrit');
+  assert.strictEqual(typeof C.ENVELOPPE.controles, 'object');
+  const nomsDeTests = fs.readFileSync(path.join(__dirname, 'test.js'), 'utf8');
+  assert.ok(nomsDeTests.includes('Le verdict : une enveloppe de plausibilité, pas de l\\\'anti-triche'),
+    'la section de tests doit porter le nom de ce que la fonction est');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
