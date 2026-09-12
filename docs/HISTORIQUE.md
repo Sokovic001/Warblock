@@ -33,6 +33,14 @@ ce qui a suivi découle de ce choix.
 | **Crossmint plutôt que Clerk** | Même fournisseur pour la connexion par email et pour le portefeuille : le portefeuille de la phase 04 naît du compte de la phase 01, sans second fournisseur à réconcilier. |
 | **Le jeu reste jouable sans compte** | La promesse du fichier unique tient : on l'ouvre et on joue. Se connecter ajoute un profil qui suit le joueur d'une machine à l'autre, ça n'ouvre pas la porte. |
 | **Connexion par code email, pas par le composant React de Crossmint** | Leur interface demande un bundler, que ce dépôt n'a pas et ne veut pas. Leurs routes de connexion sont du HTTP ordinaire : quatre appels, la clé `ck_` en en-tête, et `index.html` reste un seul fichier. |
+| **La phase 02 est scindée en 02a et 02b, et les deux moitiés sont nommées** | « Le serveur devient l'autorité du jeu » recouvrait deux chantiers de tailles incomparables : posséder l'**identité** d'une partie tient en quelques centaines de lignes, la **simuler** est la réécriture du jeu. Sans deux noms, une 02a livrée se serait lue comme une phase 02 finie, et la phase 03 aurait démarré sur cette croyance — exactement l'accident que l'ordre « non négociable » existe pour empêcher. |
+| **La couche monétaire en centimes entiers vient AVANT la première écriture en base** | `cashoutPayout(0.01)` rendait une commission nulle sur un brut non nul, contre la règle « 20 % de tout paiement, sans exception ». Un suffixe `Cents` sur un nom de variable n'attrape pas ça ; un test exhaustif de 0 à 1 000 000 si. Une couture se construit avant qu'il y ait des données à migrer, pas après. |
+| **La commission s'arrondit vers le haut** | C'est ce qui garantit qu'elle est strictement positive dès que le brut l'est. Sur les montants réellement atteignables — la sacoche est un multiple de la mise, et les mises valent 50, 100, 500 ou 1000 centimes — arrondi haut et arrondi au plus proche coïncident, donc le choix ne coûte rien au joueur. |
+| **Le plan de zone descend dans `WBCore` et sort de la seule graine** | Une règle qui décide de la fin d'une partie était écrite après `/*CORE-END*/`, donc jamais testée, et tirait ses centres sur `Math.random()`. La raison insuffisante, à écrire aussi : il reste une trentaine d'appels à `Math.random()` dans le bloc `Game`, donc **le gaz devient reproductible, pas la partie**. Le prétendre serait un mensonge dont la phase 03 hériterait. |
+| **Deux graines, et la secrète ne sort jamais** | Elle ne sert à rien en 02a puisque rien n'est simulé, et c'est exactement pourquoi elle est créée maintenant : le jour où le serveur décidera du contenu des caisses, il faudra que le client ne l'ait jamais reçue. Une colonne ajoutée avant qu'une base ne tourne coûte zéro migration. |
+| **L'idempotence est arbitrée par la base, jamais par un `select` préalable** | Même doctrine que `name_key` : demander « est-ce libre ? » puis insérer laisse une fenêtre entre les deux. Trois clés nommées — `(user_id, client_key)`, l'index partiel « un seul billet ouvert », `(match_id)` pour le règlement. La clé fournie par le client n'est pas un détail : sans elle, un `POST` dont la réponse se perd est indistinguable d'un `POST` jamais arrivé. |
+| **Un rapport de partie refuse les champs inconnus ; un profil les ignore** | `PATCH /api/me` peut ignorer le superflu sans conséquence. Sur un corps qui décide d'un montant, le silence est la mauvaise valeur par défaut : tout champ inconnu vaut un refus, avec un code. La même indulgence aux deux endroits aurait été une règle uniforme et fausse. |
+| **Le chemin de secours du client se teste comme un cas normal, et s'écrit en premier** | `seedFor`, `matchFlow`, `reportFrom` et `checkReport` ont été livrées avant les routes, précisément pour geler le contrat que le serveur devrait servir. Le module qui branche le jeu est le dernier et porte tout le risque : s'il glissait, trois modules de serveur restaient du code mort que personne n'aurait vu tourner. |
 
 ---
 
@@ -225,6 +233,41 @@ appelant — le patron du `respawn()` défini deux fois, avec la copie vivante d
 
 ---
 
+## Bugs de frontière : ce qu'un pilote rend, et ce qu'une colonne accepte
+
+Ceux-là n'existent qu'entre deux couches, et aucun des deux côtés n'a tort tout seul. Ils sont
+séparés des précédents parce qu'ils ne se trouvent ni en relisant le code, ni en jouant.
+
+- **`pg` rend les `bigint` sous forme de chaîne.** Il ne peut pas garantir qu'ils tiennent dans un
+  nombre JavaScript, donc il n'essaie pas. Une graine rendue en chaîne est refusée par `seedFor`,
+  qui repart alors sur la graine locale : **le joueur voit une autre carte que celle de son billet,
+  sans le moindre message**. La conversion est écrite deux fois, dans `db-pg.js` et dans la liste
+  blanche d'`app.js`, parce que la panne est silencieuse. `count()` et `sum()` ont le même
+  comportement et c'est pire : une graine en chaîne fait au moins diverger la partie, une
+  statistique en chaîne ne se voit qu'à l'écran, des semaines plus tard. Et `db-pg.js` n'étant
+  jamais exécuté par les tests, c'est la **doublure** qui doit mentir comme le vrai pilote — sans
+  quoi le test ne prouve rien.
+- **Un entier « valide » qui ne tient pas dans sa colonne laissait la ligne ouverte.** Un rapport à
+  3 000 000 000 passait la validation, puis faisait lever `22003` à Postgres : la route répondait
+  500 et le billet restait `open`. Le joueur se retrouvait enfermé dans un billet mort jusqu'à
+  l'expiration, puisqu'il n'en a qu'un à la fois. La borne haute de chaque entier vient donc du
+  **schéma** (2 147 483 647) et non du jeu, et une garde relie chaque champ à sa colonne. Leçon :
+  une validation qui ignore la largeur de la destination n'est pas une validation.
+- **Le rang rendu est celui du joueur, pas celui de son équipe.** Le contrôle « rang ≤ nombre
+  d'équipes » paraissait évident ; un joueur de Duo éliminé pendant que son coéquipier se bat
+  encore annonce le nombre d'équipes **plus un**. La borne a été élargie plutôt que le joueur
+  refusé. C'est le troisième contrôle de plausibilité faux à l'usage, après les deux que la
+  spécification avait déjà écartés : **une règle de plausibilité se vérifie contre le code du jeu,
+  jamais contre l'intuition.**
+
+Ces trois-là partagent une cause : ce qui a été supposé d'un composant qu'on ne fait pas tourner.
+Aucune base n'a jamais tourné ici, et c'est la dette la plus silencieuse du dossier — l'index unique
+partiel, `name_key` et la clause `where status = 'open' and net_cents is null` n'ont été éprouvés
+que contre une doublure qui **imite** les contraintes au lieu de les subir. Un test qui passe contre
+la doublure prouve la doublure.
+
+---
+
 ## Ce que l'utilisateur valide et rejette
 
 - **Retour visuel immédiat par capture d'écran.** Les corrections passent par des captures
@@ -246,9 +289,29 @@ appelant — le patron du `respawn()` défini deux fois, avec la copie vivante d
 - Qualité graphique adaptative à quatre niveaux, corrigée par les FPS mesurés.
 - **117 tests**, sans dépendance.
 
+## État après la phase 02a
+
+- Le jeu n'a pas changé de nature : toujours un seul `index.html`, toujours jouable sans compte,
+  sans serveur et sans réseau — graine comprise.
+- `api/` détient les comptes, les profils, et depuis cette phase l'**identité** des parties :
+  billet, verdict, statistiques par agrégat sur des lignes immuables. Aucune colonne solde.
+- **290 tests sur le jeu, 104 sur l'API** sans rien installer, 113 avec `jose`. Aucune base, aucun
+  réseau : tout est injecté dans `createApp()`.
+- Toujours aucun euro, et le portefeuille reste une variable du navigateur.
+
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
-- **Serveur autoritaire** : tout tourne dans le navigateur, le solde est modifiable depuis la console.
-- **Cadre légal** avant tout argent réel.
+- **Serveur autoritaire** : c'est la phase 02b, **pas commencée**. Le serveur possède l'identité
+  d'une partie, pas son déroulement : mouvement, tirs, dégâts et bots vivent toujours dans le bloc
+  `Game`, hors de toute partie testée, et le solde reste modifiable depuis la console. Le verdict
+  de 02a est une **enveloppe de plausibilité** et il n'arrête presque rien — ne jamais le présenter
+  comme un premier étage d'anti-triche.
+- **Aucune base n'a jamais tourné.** Les contraintes qui arbitrent l'unicité n'ont été éprouvées
+  que contre une doublure.
+- **Aucun test ne regarde le jeu tourner.** Deux bugs de ce journal n'ont été trouvés que par un
+  test navigateur, et il n'en existe pas de harnais. La seule preuve que le gaz déterministe n'a
+  pas rendu les parties ennuyeuses est un humain qui joue une partie entière.
+- **Cadre légal** avant tout argent réel, et la décision d'exploitation ci-dessus — la maison est
+  la contrepartie de chaque pot — à trancher avant la phase 04.
 - **Icône définitive** : plusieurs directions explorées, décision non figée.
