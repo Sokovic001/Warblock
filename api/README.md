@@ -14,7 +14,7 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | Route | Ce qu'elle fait |
 |---|---|
 | `GET /api/health` | Répond `{ ok: true }`. Pour la surveillance. |
-| `GET /api/me` | Rend le profil du joueur connecté. **La première connexion crée le compte.** |
+| `GET /api/me` | Rend le profil du joueur connecté, **statistiques agrégées** comprises. La première connexion crée le compte. |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
 | `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, expiration. |
 | `POST /api/match/:id/result` | Juge le rapport rendu, recalcule les montants et **clôt** la ligne. |
@@ -169,6 +169,57 @@ prend son heure du même endroit que le reste du routeur. `main.js` l'appelle ch
 du code qui manipulera de l'argent et que personne ne regarde tourner : il se teste comme le
 reste, horloge injectée, sans attendre.
 
+## Les statistiques sont la somme des parties, pas des compteurs
+
+`GET /api/me` rend `matches`, `wins`, `kills` et `best`. Aucun de ces quatre nombres n'est stocké :
+ils sont lus par **agrégat** sur la table `matches`, et seules les parties `settled` y entrent. Une
+partie refusée, périmée ou encore ouverte ne compte pour rien — elle n'a pas de résultat opposable.
+
+```sql
+count(*) · count(*) filter (where issue in ('victoire','encaissement')) · sum(kills) · max(net_cents)
+where user_id = $1 and status = 'settled'
+```
+
+C'est exactement le raisonnement de l'absence de colonne solde : **un compteur qu'on incrémente est
+une case qu'on écrase, et un double envoi la fausse pour toujours.** Ici, un double envoi ne peut
+rien fausser puisqu'il n'y a rien à écrire — la ligne de partie s'insère puis se règle une fois, et
+la somme se refait à l'identique. La phase 02a met donc en place, sur des chiffres qui ne valent
+rien, la mécanique que le grand livre de la phase 03 exigera.
+
+C'est un **revirement** sur une décision écrite et livrée en phase 01, qui avait créé une table de
+quatre compteurs. Aucune base n'ayant jamais tourné, c'était le dernier moment gratuit pour corriger
+le schéma sans migration. La décision renversée et sa raison sont dans `docs/HISTORIQUE.md`.
+
+Deux points de détail qui coûteraient cher plus tard :
+
+- `wins` retient la **victoire et l'encaissement**. Sortir de Resurgence avec sa sacoche est une
+  sortie gagnante, et `endMatch` la compte déjà comme telle côté jeu : compter autrement ferait
+  *baisser* le compteur d'un joueur le jour où il se connecte.
+- `best` est un **maximum, en centimes entiers**, et il le reste jusqu'au bout du réseau. Il ne
+  redevient des dollars qu'une seule fois, dans `applyAccount` côté jeu. Convertir ici ferait un
+  second point de conversion, ce que la couche monétaire existe précisément pour empêcher.
+
+Un piège du pilote, le même que pour les graines et en pire : `count()` et `sum()` rendent un
+`bigint`, donc une **chaîne**. Sans conversion, `kills` traverserait le réseau en texte — une graine
+en chaîne fait au moins repartir le jeu sur la sienne, une statistique en chaîne ne se voit qu'à
+l'écran, des semaines plus tard. La conversion est donc écrite **deux fois**, dans `db-pg.js` et
+dans la liste blanche de `app.js`, exactement comme pour les graines ; un test fait mentir la
+doublure comme le vrai pilote, ce que `db-pg.js` seul ne permettrait pas — il n'est jamais exécuté.
+
+### Ce que les gardes textuelles prouvent, et ce qu'elles ne prouvent pas
+
+Faute de base qui tourne, deux tests lisent le **texte** de `schema.sql` et de `db-pg.js` : toute
+colonne dont le pilote parle existe dans le schéma, les colonnes d'argent sont entières et
+contraintes positives, aucune ne s'appelle solde, et aucun `update` ne vise un montant de `matches`.
+Elles attrapent la dérive la plus probable — une requête restée en arrière après la disparition
+d'une table.
+
+**Elles vérifient du texte, et rien d'autre.** L'index unique partiel « un seul billet ouvert »,
+comme la contrainte `name_key` de la phase 01 et comme la clause `where status = 'open' and
+net_cents is null` qui arbitre l'unicité du règlement, n'a jamais été éprouvé contre une vraie base.
+Un test qui passe contre la doublure prouve la doublure, pas Postgres. C'est la dette la plus
+silencieuse de la phase, et elle se solde le jour où une base tournera — pas avant.
+
 ## Les fichiers
 
 ```
@@ -178,8 +229,8 @@ crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sa
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
-schema.sql          le schéma : users, user_stats, matches. Aucune colonne « solde », volontairement.
-test.js             89 tests sans rien installer, 98 avec jose
+schema.sql          le schéma : users, matches. Deux tables, et aucune colonne « solde ».
+test.js             97 tests sans rien installer, 106 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -270,8 +321,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 89 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 98 : les 89, plus la chaîne complète de vérification
+node api/test.js          # 97 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 106 : les 97, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
@@ -280,7 +331,9 @@ l'authentification, la validation, l'unicité du pseudo, la limitation de débit
 des clés d'API, chaque refus de jeton, et tout le billet de partie — graines, idempotence,
 expiration comprises. Une horloge injectée fait vieillir un billet sans attendre, et c'est elle qui
 permet d'éprouver le verdict et le veilleur : un mensonge par test, chacun nommé d'après le
-mensonge qu'il arrête.
+mensonge qu'il arrête. Les statistiques s'éprouvent de la même façon, et de la seule qui vaille :
+en **jouant** des parties entières contre la doublure, du billet au règlement, puis en comparant ce
+que `GET /api/me` rend à la somme des lignes.
 
 Les neuf tests supplémentaires font tourner la vraie cryptographie : ils génèrent une paire de clés,
 servent un trousseau public en local, et éprouvent ce qu'on ne peut pas demander à un fournisseur —
@@ -309,8 +362,9 @@ pourquoi un email absent du jeton n'empêche jamais de se connecter.
 est-il libre ? » puis l'insérer laisse une fenêtre entre les deux, et deux joueurs rapides passent
 tous les deux. La base tranche, le serveur traduit en `409`.
 
-**Les statistiques sont en lecture seule pour le client.** `PATCH /api/me` n'accepte que trois
-champs ; tout le reste du corps est ignoré, y compris `stats` et `id`.
+**Les statistiques sont en lecture seule pour le client** — et, depuis la phase 02a, pour le serveur
+lui-même : personne ne les écrit, elles sont une somme. `PATCH /api/me` n'accepte que trois champs ;
+tout le reste du corps est ignoré, y compris `stats` et `id`.
 
 ## Le côté jeu
 

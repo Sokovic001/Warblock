@@ -25,7 +25,19 @@ function fakeDb(seed = []) {
   const users = seed.map(u => ({ ...u }));
   const matches = [];
   let next = users.length + 1, nextMatch = 1;
-  const statsOf = id => ({ matches: 0, wins: 0, kills: 0, best: 0, ...(users.find(u => u.id === id) || {}).stats });
+  // Les statistiques sont la SOMME des parties réglées, exactement comme l'agrégat SQL de
+  // db-pg.js. Aucun compteur n'existe nulle part : il n'y a rien à incrémenter, donc rien qu'un
+  // double envoi puisse fausser. Une partie refusée, périmée ou encore ouverte ne compte pour
+  // rien, et `wins` retient la victoire comme l'encaissement — le jeu compte les deux.
+  const statsOf = id => {
+    const reglees = matches.filter(m => m.user_id === id && m.status === 'settled');
+    return {
+      matches: reglees.length,
+      wins: reglees.filter(m => m.issue === 'victoire' || m.issue === 'encaissement').length,
+      kills: reglees.reduce((s, m) => s + (m.kills || 0), 0),
+      best: reglees.reduce((b, m) => Math.max(b, m.net_cents || 0), 0),
+    };
+  };
   return {
     users,
     matches,
@@ -84,7 +96,7 @@ function fakeDb(seed = []) {
           base = name.slice(0, 14 - s.length) + s; cle = nameKey(base);
         }
         u = { id: next++, auth_id: authId, email, name: base, name_key: cle, avatar: '', country: null,
-              created_at: '2026-01-01T00:00:00Z', stats: { matches: 0, wins: 0, kills: 0, best: 0 } };
+              created_at: '2026-01-01T00:00:00Z' };
         users.push(u);
       }
       return { user: u, stats: statsOf(u.id) };
@@ -569,7 +581,10 @@ test('aucune colonne solde, et aucun montant déjà écrit n\'est mis à jour', 
   // l'absence de colonne solde.
   const fs = require('node:fs'), path = require('node:path');
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
-  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8');
+  // Les commentaires de `db-pg.js` citent eux aussi des morceaux de requête entre accents graves :
+  // sans les retirer, la garde finirait par prendre un commentaire pour une écriture — et un
+  // commentaire est toujours d'accord avec ce qu'on veut lui faire dire.
+  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
   assert.ok(!/\b(solde|balance|wallet)\b/i.test(sql), 'une colonne de solde est apparue dans le schéma');
   // Chaque requête est UN littéral entre accents graves : on découpe là-dessus plutôt que de
   // balayer le fichier au jugé. Une plage qui court d'une requête à la suivante avale les
@@ -855,6 +870,171 @@ await test('la limitation de débit du résultat a son propre seau', async () =>
   assert.deepStrictEqual(codes, [200, 200, 429], codes.join(','));
   // Le seau du billet, lui, n'a servi qu'une fois : demander une partie reste possible.
   assert.strictEqual((await demander(app, { ...DEMANDE, clientKey: 'cle-2' })).code, 200);
+});
+
+console.log('Les statistiques sont la somme des parties');
+// Une partie entière, du billet au règlement, avec une horloge qui avance comme celle d'un joueur
+// honnête. Chaque partie ouvre SON billet : un joueur n'en a qu'un ouvert à la fois, et c'est le
+// règlement qui libère la place — donc enchaîner des parties éprouve aussi cela.
+const jouer = async (app, horloge, cle, rapport, demande = DEMANDE) => {
+  const b = await demander(app, { ...demande, clientKey: cle });
+  horloge.t = Date.parse(b.corps.openedAt) + (C.LOBBY.wait + rapport.seconds + 3) * 1000;
+  return rendre(app, b.corps.id, rapport);
+};
+const mesStats = async app => (await appel(app, { token: 'ok:u1:Loic' })).corps.stats;
+
+await test('les statistiques rendues sont exactement la somme des parties réglées', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  assert.deepStrictEqual(await mesStats(app), { matches: 0, wins: 0, kills: 0, best: 0 },
+    'un compte neuf n\'a rien à initialiser : la somme d\'un ensemble vide vaut zéro');
+
+  const gagnee = await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, kills: 7 }));
+  assert.strictEqual(gagnee.corps.status, 'settled');
+  const perdue = await jouer(app, horloge, 'p2', RAPPORT({ seconds: 60, rank: 5, kills: 2 }));
+  assert.strictEqual(perdue.corps.issue, 'defaite');
+
+  const s = await mesStats(app);
+  assert.deepStrictEqual(s, {
+    matches: 2, wins: 1, kills: 9,
+    best: C.payoutCents(50, C.MODES.solo).splitCents,
+  });
+  // Et rien nulle part ne ressemble à un compteur : la somme se refait à l'identique depuis les
+  // lignes, ce qui est précisément la propriété qu'un double envoi ne peut pas casser.
+  const reglees = db.matches.filter(m => m.status === 'settled');
+  assert.strictEqual(s.matches, reglees.length);
+  assert.strictEqual(s.kills, reglees.reduce((t, m) => t + m.kills, 0));
+});
+await test('une partie refusée ou restée ouverte ne compte pour rien', async () => {
+  const { db, app, horloge } = bancDeBillet();
+  await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, kills: 3 }));
+  const avant = await mesStats(app);
+
+  // Refusée : la ligne est close avec son motif, et aucune somme ne la verra jamais.
+  const refus = await jouer(app, horloge, 'p2', RAPPORT({ seconds: 60, rank: 2, kills: 999 }));
+  assert.strictEqual(refus.corps.status, 'rejected');
+  assert.deepStrictEqual(await mesStats(app), avant, 'une partie refusée a compté');
+
+  // Restée ouverte : le billet est pris, la partie n'est jamais rendue. Elle ne vaut rien non plus,
+  // sinon demander un billet suffirait à gonfler son compteur de parties.
+  const ouvert = await demander(app, { ...DEMANDE, clientKey: 'p3' });
+  assert.strictEqual(ouvert.code, 200);
+  assert.deepStrictEqual(await mesStats(app), avant, 'un billet ouvert a compté');
+
+  // Et périmée, pas davantage : le veilleur ferme une porte, il ne règle rien.
+  horloge.t = Date.parse(ouvert.corps.expiresAt) + 1;
+  assert.deepStrictEqual(await app.veiller(), { closes: 1 });
+  assert.deepStrictEqual(await mesStats(app), avant, 'une partie périmée a compté');
+  assert.strictEqual(db.matches.length, 3);
+});
+await test('best est le plus grand net en centimes, jamais le dernier ni une somme', async () => {
+  const { app, horloge } = bancDeBillet();
+  const grosse = C.payoutCents(C.toCents(10), C.MODES.solo).splitCents;
+  const petite = C.payoutCents(50, C.MODES.solo).splitCents;
+  assert.ok(grosse > petite);
+
+  await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1 }), { ...DEMANDE, stake: 10 });
+  assert.strictEqual((await mesStats(app)).best, grosse);
+  // Une victoire plus modeste ensuite ne doit RIEN changer : c'est un maximum, pas un dernier
+  // résultat, et surtout pas un cumul.
+  await jouer(app, horloge, 'p2', RAPPORT({ seconds: 154, rank: 1 }), { ...DEMANDE, stake: 0.5 });
+  const s = await mesStats(app);
+  assert.strictEqual(s.best, grosse);
+  assert.notStrictEqual(s.best, grosse + petite);
+  // En centimes ENTIERS jusqu'au bout du réseau. La conversion en dollars n'a lieu qu'une fois,
+  // côté jeu, dans `applyAccount` — que l'on vérifie ici brancher sur la même valeur.
+  assert.ok(Number.isInteger(s.best));
+  assert.strictEqual(C.applyAccount(null, { stats: s }, []).stats.best, C.fromCents(grosse));
+});
+await test('un encaissement Resurgence compte comme une sortie gagnante, comme dans le jeu', async () => {
+  // `endMatch` incrémente `wins` dès que `won` est vrai, encaissement compris. Si le serveur
+  // comptait autrement, se connecter ferait BAISSER le compteur d'un joueur de Resurgence.
+  const { app, horloge } = bancDeBillet();
+  const demande = { ...DEMANDE, mode: 'resurgence' };
+  const b = await demander(app, { ...demande, clientKey: 'p0' });
+  const max = C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents;
+  const r = RAPPORT({ seconds: 40, kills: 5, cashedOut: true, purseCents: max });
+  horloge.t = Date.parse(b.corps.openedAt) + (C.LOBBY.wait + r.seconds + 3) * 1000;
+  const rep = await rendre(app, b.corps.id, r);
+  assert.strictEqual(rep.corps.issue, 'encaissement');
+  assert.deepStrictEqual(await mesStats(app),
+    { matches: 1, wins: 1, kills: 5, best: C.cashoutCents(max).netCents });
+});
+await test('les parties d\'un joueur ne comptent que pour lui', async () => {
+  const { app, horloge } = bancDeBillet();
+  await jouer(app, horloge, 'p1', RAPPORT({ seconds: 154, rank: 1, kills: 4 }));
+  const voisin = await appel(app, { method: 'POST', path: '/api/match', token: 'ok:u2:Zoe',
+                                    body: { ...DEMANDE, clientKey: 'z-1' } });
+  const r = RAPPORT({ seconds: 154, rank: 1, kills: 11 });
+  horloge.t = Date.parse(voisin.corps.openedAt) + (C.LOBBY.wait + r.seconds + 3) * 1000;
+  await appel(app, { method: 'POST', path: `/api/match/${voisin.corps.id}/result`,
+                     token: 'ok:u2:Zoe', body: r });
+  const a = await mesStats(app);
+  const z = (await appel(app, { token: 'ok:u2:Zoe' })).corps.stats;
+  assert.strictEqual(a.kills, 4);
+  assert.strictEqual(z.kills, 11);
+  assert.strictEqual(a.matches, 1);
+  assert.strictEqual(z.matches, 1);
+});
+await test('des statistiques rendues en chaînes par la base ressortent en nombres', async () => {
+  // `count()` et `sum()` rendent un `bigint`, que le pilote Postgres livre sous forme de CHAÎNE —
+  // le même piège que les graines, en pire : une graine en chaîne fait repartir le jeu sur la
+  // sienne, une statistique en chaîne ne se voit qu'à l'écran, des semaines plus tard. La doublure
+  // ment donc ici comme le vrai pilote, plutôt que comme l'idée qu'on s'en fait.
+  const db = fakeDb();
+  const brute = db.findOrCreate;
+  db.findOrCreate = async a => ({
+    user: (await brute(a)).user,
+    stats: { matches: '2', wins: '1', kills: '9', best: '160' },
+  });
+  const r = await appel(appDe(db), { token: 'ok:u1:Loic' });
+  for (const [k, v] of Object.entries(r.corps.stats)) assert.strictEqual(typeof v, 'number', k);
+  assert.deepStrictEqual(r.corps.stats, { matches: 2, wins: 1, kills: 9, best: 160 });
+  assert.strictEqual(C.applyAccount(null, r.corps, []).stats.best, C.fromCents(160));
+});
+test('toute colonne dont db-pg.js parle existe encore dans le schéma', () => {
+  // Première des deux gardes AU NIVEAU DU TEXTE. Aucune base ne tourne : elle attrape la dérive
+  // entre la doublure et Postgres là où elle est la plus probable aujourd'hui — une requête restée
+  // en arrière après la disparition d'une table, qui ne planterait qu'au premier déploiement.
+  const fs = require('node:fs'), path = require('node:path');
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
+  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const mots = t => new Set(t.match(/\b[a-z_][a-z0-9_]*\b/g) || []);
+  const schema = mots(sql);
+  // Les requêtes, c'est-à-dire les littéraux entre accents graves plus les listes de colonnes
+  // qu'ils interpolent. On retire les interpolations (du code, pas des colonnes — les deux listes
+  // sont relues à part), les alias (`as parties`) et les chaînes ('settled').
+  const listes = (pg.match(/^const \w+ =[^;]*;/gm) || []).join(' ').replace(/'/g, ' ');
+  const corps = (pg.match(/`[^`]*`/g) || []).join(' ')
+    .replace(/\$\{[^}]*\}/g, ' ').replace(/'[^']*'/g, ' ');
+  const SQL = new Set(['const', 'select', 'from', 'where', 'and', 'or', 'in', 'is', 'not', 'null',
+    'insert', 'into', 'values', 'on', 'conflict', 'do', 'nothing', 'returning', 'update', 'set',
+    'order', 'by', 'limit', 'count', 'sum', 'max', 'coalesce', 'filter', 'as', 'now']);
+  const utilises = mots((listes + ' ' + corps).replace(/\bas\s+\w+/g, ' '));
+  assert.ok(utilises.size > 20, `seulement ${utilises.size} identifiants retrouvés dans db-pg.js`);
+  for (const mot of utilises)
+    if (!SQL.has(mot)) assert.ok(schema.has(mot), `db-pg.js parle de « ${mot} », absent de schema.sql`);
+});
+test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées', () => {
+  // Le revirement se vérifie, il ne se raconte pas : un compteur qu'on incrémente est une case
+  // qu'on écrase, et un double envoi la fausse pour toujours. La raison est dans
+  // docs/HISTORIQUE.md, à sa place — une décision renversée, pas une ligne de module.
+  const fs = require('node:fs'), path = require('node:path');
+  for (const f of ['schema.sql', 'db-pg.js', 'app.js', 'README.md'])
+    assert.ok(!/user_stats/.test(fs.readFileSync(path.join(__dirname, f), 'utf8')),
+      `${f} parle encore d'une table de compteurs`);
+  const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
+  assert.deepStrictEqual((sql.match(/create table if not exists (\w+)/g) || []).sort(),
+    ['create table if not exists matches', 'create table if not exists users']);
+  // « Une partie refusée ou restée ouverte ne compte pour rien » se prouve plus haut contre la
+  // doublure ; la vraie requête, elle, n'est jamais exécutée par un test. On relit donc son texte.
+  // Les commentaires sont retirés d'abord : ils citent `count()` et `sum()` entre accents graves,
+  // et une garde qui prend un commentaire pour une requête ne garde rien. C'est arrivé en
+  // écrivant ce test, exactement comme au module précédent.
+  const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const agregat = (pg.match(/`[^`]*`/g) || []).filter(q => /\bcount\s*\(/i.test(q));
+  assert.strictEqual(agregat.length, 1, 'une seule requête doit agréger les statistiques');
+  assert.match(agregat[0], /from\s+matches/);
+  assert.match(agregat[0], /status\s*=\s*'settled'/, 'l\'agrégat compterait des parties non réglées');
 });
 
 console.log('Le serveur partage les règles du jeu');

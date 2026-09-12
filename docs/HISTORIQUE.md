@@ -36,6 +36,33 @@ ce qui a suivi découle de ce choix.
 
 ---
 
+## Décisions renversées
+
+### `user_stats` : la table de compteurs livrée en phase 01, supprimée en phase 02a
+
+La phase 01 a écrit et livré une table `user_stats` — quatre colonnes, `matches`, `wins`, `kills`,
+`best` — qu'on incrémentait à la fin de chaque partie. La phase 02a la **supprime**, et les quatre
+chiffres sont désormais lus par agrégat sur les parties réglées de la table `matches`.
+
+La raison est celle qui avait déjà interdit la colonne « solde », et on ne l'avait pas appliquée
+jusqu'au bout : **un compteur qu'on incrémente est une case qu'on écrase.** Un double envoi, une
+reprise après coupure, un règlement rejoué, et la case est fausse pour toujours — sans qu'aucune
+trace ne permette de la recalculer. Une somme sur des lignes immuables ne peut pas être fausse : on
+la refait, elle redonne la même chose. Les parties, elles, s'insèrent puis se règlent une fois.
+
+Pourquoi maintenant, et pourquoi ce n'est pas un détail de module : **aucune base n'a jamais
+tourné.** C'était le dernier moment où le schéma pouvait changer sans migration, donc gratuitement.
+Le même revirement fait six mois plus tard aurait coûté une reprise de données, et personne ne
+l'aurait entrepris pour des statistiques d'affichage — on aurait gardé les compteurs, et la phase 03
+aurait hérité du patron qu'elle existe pour interdire. La phase 02a sert précisément à répéter, sur
+des chiffres qui ne valent rien, la mécanique que le grand livre exigera.
+
+Ce qui se perd, et qui est assumé : une somme coûte plus cher à lire qu'une case, et le jour où un
+joueur aura des milliers de parties, il faudra un index — il existe déjà — ou une vue matérialisée.
+C'est un problème de performance, qui se répare ; une case fausse ne se répare pas.
+
+---
+
 ## Pistes essayées puis abandonnées
 
 - **Lobby mobile refait de zéro, façon Brawl Stars** (personnage au centre, onglets latéraux) :

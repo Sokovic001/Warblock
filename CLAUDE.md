@@ -30,7 +30,7 @@ peut pas tenir ce rôle seul. Détails et raisons dans `api/README.md`.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 269 tests sur le jeu (`node test.js`) et
-  89 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  97 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.

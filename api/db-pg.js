@@ -33,9 +33,31 @@ function pgDb(connectionString) {
     connectionTimeoutMillis: 5_000,
   });
 
+  // Les statistiques sont la SOMME des parties réglées, jamais un compteur qu'on incrémente. La
+  // table de compteurs de la phase 01 a disparu pour cette raison : un compteur est une case qu'on
+  // écrase, et un double envoi la fausse pour toujours — exactement ce qu'on refuse déjà pour un
+  // solde. Ici, un double envoi ne peut rien fausser puisqu'il n'y a rien à écrire.
+  //
+  // Seul `status = 'settled'` compte. Une partie refusée ('rejected'), périmée ('expired') ou
+  // encore ouverte ne compte pour rien : elle n'a pas de résultat opposable.
+  //
+  // `wins` retient la victoire ET l'encaissement, parce que le jeu lui-même compte les deux —
+  // sortir de Resurgence avec sa sacoche est une sortie gagnante, et le compteur ne doit pas
+  // baisser le jour où le joueur se connecte.
   async function stats(client, userId) {
-    const r = await client.query('select matches, wins, kills, best from user_stats where user_id = $1', [userId]);
-    return r.rows[0] || { matches: 0, wins: 0, kills: 0, best: 0 };
+    const r = await client.query(`
+      select count(*)                                                     as parties,
+             count(*) filter (where issue in ('victoire', 'encaissement')) as gagnees,
+             coalesce(sum(kills), 0)                                      as tues,
+             coalesce(max(net_cents), 0)                                  as meilleur
+        from matches
+       where user_id = $1 and status = 'settled'`, [userId]);
+    const l = r.rows[0] || {};
+    // Le même piège de pilote que les graines, et il mord plus fort ici : `count()` et `sum()`
+    // rendent un `bigint`, donc une CHAÎNE. Sans cette conversion, `kills` partirait au client
+    // sous forme de texte et `applyAccount` en ferait ce qu'il pourrait — silencieusement.
+    const n = v => (Number(v) || 0);
+    return { matches: n(l.parties), wins: n(l.gagnees), kills: n(l.tues), best: n(l.meilleur) };
   }
 
   return {
@@ -73,7 +95,9 @@ function pgDb(connectionString) {
             throw e;
           }
         }
-        await client.query('insert into user_stats (user_id) values ($1) on conflict do nothing', [user.id]);
+        // Rien à initialiser : un compte neuf n'a aucune partie réglée, et la somme d'un ensemble
+        // vide vaut zéro. C'est une ligne de moins à écrire, et surtout une ligne de moins à
+        // réconcilier le jour où deux écritures se croiseraient.
         const s = await stats(client, user.id);
         await client.query('commit');
         return { user, stats: s };

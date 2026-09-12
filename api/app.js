@@ -125,6 +125,9 @@ function graine32(source) {
 }
 
 // ---------- ce qu'on rend au client ----------
+// Le pilote Postgres rend les `bigint` — et donc tout ce que `count()` et `sum()` produisent — sous
+// forme de CHAÎNE. Ce qui traverse le réseau doit être un nombre.
+const nombre = v => (Number(v) || 0);
 // Liste blanche explicite. Un `select *` renvoyé tel quel finit toujours par exposer une colonne
 // ajoutée plus tard sans y penser.
 const moi = (u, s) => ({
@@ -134,7 +137,17 @@ const moi = (u, s) => ({
   country: u.country || null,
   email: u.email,
   createdAt: u.created_at,
-  stats: { matches: s.matches, wins: s.wins, kills: s.kills, best: s.best },
+  // Les statistiques sont un AGRÉGAT sur les parties réglées, jamais des compteurs : il n'existe
+  // aucune case à incrémenter, donc aucune à écraser ni à réparer. `best` reste en CENTIMES
+  // entiers jusqu'au bout du réseau ; il ne redevient des dollars qu'une fois, dans
+  // `applyAccount`, côté jeu. Convertir ici ferait un second point de conversion, et c'est
+  // exactement ce que la couche monétaire existe pour empêcher.
+  //
+  // `Number` une seconde fois, comme pour les graines et pour la même raison : `count()` et
+  // `sum()` rendent un `bigint`, que le pilote Postgres livre en CHAÎNE. Une statistique partie en
+  // texte ne se voit qu'à l'écran, longtemps après, et deux lignes coûtent moins qu'une panne
+  // silencieuse.
+  stats: { matches: nombre(s.matches), wins: nombre(s.wins), kills: nombre(s.kills), best: nombre(s.best) },
 });
 
 // Le billet, tel qu'il part au client. Même liste blanche explicite que `moi`, et une raison de

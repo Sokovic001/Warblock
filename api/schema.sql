@@ -25,17 +25,11 @@ create table if not exists users (
   constraint users_name_key_len check (char_length(name_key) between 1 and 14)
 );
 
--- Les statistiques quittent l'objet `profile` du navigateur. Elles ne sont pas de l'argent, mais
--- elles seront affichées publiquement : le client ne doit pas pouvoir les écrire.
-create table if not exists user_stats (
-  user_id  bigint  primary key references users(id) on delete cascade,
-  matches  integer not null default 0 check (matches >= 0),
-  wins     integer not null default 0 check (wins    >= 0),
-  kills    integer not null default 0 check (kills   >= 0),
-  -- en CENTIMES, entier. Le jeu calcule déjà au centime via cents() ; côté base, le nombre à
-  -- virgule n'a pas droit de cité, et cette colonne fixe l'habitude dès maintenant.
-  best     integer not null default 0 check (best    >= 0)
-);
+-- Les statistiques n'ont PAS de table, et c'est un revirement assumé sur la phase 01, qui en avait
+-- écrit une : quatre compteurs qu'on incrémentait. Elles se lisent désormais par agrégat sur les
+-- parties réglées de `matches` — voir la fin de ce fichier, et `docs/HISTORIQUE.md` pour la raison.
+-- C'est le même raisonnement que l'absence de colonne solde : un compteur qu'on incrémente est une
+-- case qu'on écrase, et un double envoi la fausse pour toujours.
 
 -- Les recherches se font par identifiant fournisseur à chaque requête authentifiée : l'index unique
 -- sur auth_id suffit. name_key porte déjà le sien.
@@ -140,6 +134,8 @@ create unique index if not exists matches_client_key_uniq on matches (user_id, c
 -- partie réglée ou périmée, la place se libère d'elle-même.
 create unique index if not exists matches_un_seul_ouvert on matches (user_id) where status = 'open';
 
--- Les statistiques de la phase 02a seront une somme sur les parties réglées d'un joueur, pas un
--- compteur qu'on incrémente : c'est cet index-là qu'elles liront.
+-- Les statistiques sont une SOMME sur les parties réglées d'un joueur, pas un compteur qu'on
+-- incrémente : c'est cet index-là qu'elles lisent. `matches` est donc la source de vérité de
+-- `matches`, `wins`, `kills` et `best`, et il n'existe nulle part ailleurs de case à écraser.
+-- Une partie refusée ou restée ouverte ne compte pour rien : la clause porte `status = 'settled'`.
 create index if not exists matches_user_status_idx on matches (user_id, status);
