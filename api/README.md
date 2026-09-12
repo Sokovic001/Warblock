@@ -82,11 +82,30 @@ joueur.
 where status='open'`. On insère, et c'est l'insertion refusée qui apprend ce qui existait déjà.
 Conséquences, toutes testées :
 
-- un second appel rend le billet ouvert existant, avec un `200` et jamais une erreur ;
+- un second appel rend le billet ouvert existant, avec un `200` et jamais une erreur — **à
+  condition qu'aucune partie n'ait encore été rendue dessus** ;
 - la clé qui a **créé** un billet rend toujours ce billet, même une fois périmé : la ligne porte la
   clé, donc la réponse ne change plus ;
 - un billet périmé est clos (`status = 'expired'`) au moment où l'insertion bute dessus, ce qui
   libère la place. Le seul `update` de cette table, et il ne touche qu'un statut, jamais un montant.
+
+**UN BILLET NE SERT QU'UNE TENTATIVE, ET C'EST UNE RÈGLE D'ARGENT.** Depuis que le serveur rejoue,
+toute la partie est une fonction pure de `seed_public` : la carte, les caisses, les vingt bots et le
+plan de gaz. Un billet resservi est donc le **même monde**. Sans cette règle, il suffisait de bloquer
+l'envoi de sa trace — un bloqueur, un wifi coupé deux secondes — pour recevoir un 409, garder son
+billet ouvert, recliquer sur la table, retrouver la même graine, et rejouer en connaissance de cause
+le monde qu'on venait d'explorer, autant de fois que la vie du billet le permet, jusqu'à faire régler
+sa meilleure tentative. Ce n'est pas l'ESP structurel déjà consigné — le client connaît le butin de
+la partie qu'il joue — c'est une répétition générale gratuite de la partie qu'il va faire payer.
+
+La colonne `first_result_at` est donc posée par `POST /api/match/:id/result` dès qu'un résultat
+arrive, **quelle qu'en soit l'issue**, et une seule fois : la clause porte `status = 'open' and
+first_result_at is null`, si bien qu'un résultat renvoyé ne modifie pas la ligne et que
+l'idempotence de la route reste totale. `createMatch` ne rend alors plus ce billet — il le clôt sans
+montant (`status = 'abandoned'`, comme le veilleur) et en ouvre un neuf, donc une graine neuve. Ce
+qui reste ouvert, et qui est tout l'équilibre : renvoyer une trace perdue puis son résultat sur le
+**même** `match_id` marche toujours. On ferme la porte d'un second monde identique, pas celle du
+joueur dont le réseau a lâché.
 
 Une limite connue, écrite plutôt que passée sous silence : une clé arrivée **pendant** qu'un billet
 était déjà ouvert n'écrit aucune ligne — elle reçoit ce billet-là. Rejouée après l'expiration de
@@ -144,10 +163,24 @@ des cas normaux.
 **La table `match_traces` est en insertion seule.** Clé primaire `(match_id, seq)`,
 `on conflict do nothing`, **premier écrit gagne**, aucun `update`, aucun `delete` : c'est la doctrine
 d'idempotence déjà arbitrée par la base en 02a, poussée jusqu'au bout. Un segment renvoyé n'écrit pas
-de seconde ligne et ne réécrit pas la première, même s'il porte d'autres données — sinon un client
-pourrait réécrire sa trace après coup, ce qui la viderait de toute valeur de preuve. La réponse ne
-dit d'ailleurs pas si la ligne vient d'être écrite : elle rend l'état de la trace, donc un rejeu rend
-exactement la même réponse que le premier appel.
+de seconde ligne et ne réécrit pas la première — sinon un client pourrait réécrire sa trace après
+coup, ce qui la viderait de toute valeur de preuve. Un renvoi **à l'identique** rend donc exactement
+la même réponse que le premier appel : elle dit l'état de la trace, jamais si la ligne vient d'être
+écrite.
+
+**Mais un rang déjà posé dont les données DIFFÈRENT est refusé, en 409 `trace_divergente`.** Avalé en
+silence, il permettait de **coudre deux parties bout à bout** : le segment 0 d'une tentative et les
+segments suivants d'une autre se recollaient en une partie que personne n'a jouée, et le serveur
+écrivait un montant dessus. Le premier écrit gagne toujours — la ligne posée ne bouge pas d'un
+caractère — mais le client apprend enfin que son segment n'a pas été pris, et son envoi s'arrête là.
+
+**Un segment qui ne porte que des jetons d'acte est ACCEPTÉ, et sa colonne `steps` vaut zéro.** Le
+découpage coupe au **jeton**, et un jeton d'action ponctuelle ne compte aucun pas : quand la
+frontière des 24 000 caractères tombe juste avant le dernier geste, le segment de queue ne porte que
+l'abandon ou l'encaissement. Le refuser sur un décompte de pas nul coupait l'envoi juste avant la fin
+de la partie, le rejeu s'arrêtait avant l'acte terminal, et le règlement sortait en `non_terminal`
+sans écrire un centime — sur une partie parfaitement honnête. Ce qui reste refusé, c'est le segment
+**sans contenu**, avec le détail `vide`.
 
 **Trois bornes, et chacune dit ce qu'elle borne.**
 
@@ -166,8 +199,9 @@ exactement la même réponse que le premier appel.
 bloquée.** C'est la leçon du `22003` : un joueur n'a qu'un billet ouvert à la fois, donc un 500 qui
 laisse la ligne `open` l'enferme jusqu'à l'expiration. Ici la garantie est **structurelle** — cette
 route n'écrit jamais dans `matches`, pas même pour clore une ligne périmée, que le veilleur de la 02a
-ramasse déjà. Sept codes nommés, chacun testé : `corps`, `seq`, `sim_version`, `donnees`,
-`trop_de_pas`, `billet_clos`, `expire`, plus un `404` pour un billet inconnu ou qui n'est pas le sien.
+ramasse déjà. Huit codes nommés, chacun testé : `corps`, `seq`, `sim_version`, `donnees`,
+`trop_de_pas`, `trace_divergente`, `billet_clos`, `expire`, plus un `404` pour un billet inconnu ou
+qui n'est pas le sien.
 
 **La dette, nommée plutôt que tue** : `match_traces` n'a **aucune politique de conservation**, et
 elle est renvoyée à la phase 03. Et comme partout ailleurs dans ce dossier, aucune base n'a jamais
@@ -239,6 +273,13 @@ définitive, ou la fin du plan de zone — pour que la route écrive un montant.
 sans montant. C'est le seul endroit du dossier qui refuse sans clore, et c'est délibéré : clore ici
 ferait un second endroit qui ferme une ligne, et un joueur dont la trace s'est perdue en route mérite
 de pouvoir la renvoyer tant que son billet vit.
+
+Trois règles de simulation vivent dans le jeu pour que cette phrase tienne, et deux y sont
+descendues tard : le **compte à rebours d'intro**, posé par `newMatch` — écrit dans le seul bloc
+`Game`, le serveur rejouait en pas RÉELS les deux cent quarante pas passés à décompter et jugeait
+une autre partie que celle qui s'était affichée — et `WBSim.abandon`, parce que QUITTER se presse
+aussi pendant les cinq secondes de réapparition, où `kill` sort sur `!alive` : la partie n'atteignait
+alors jamais d'état terminal, et le joueur ne voyait jamais la sienne enregistrée.
 
 La règle qui décide, `WBSim.terminal`, vit dans le **jeu** et pas dans l'API : le serveur et le
 navigateur doivent en avoir exactement une idée. Idem pour les faits eux-mêmes — `WBSim.faits` est la
@@ -494,7 +535,7 @@ auth-crossmint.js   vérifie les jetons de session                  ← touche l
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
 schema.sql          le schéma : users, matches, match_traces. Aucune colonne « solde ».
-test.js             128 tests sans rien installer, 137 avec jose
+test.js             134 tests sans rien installer, 143 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -597,8 +638,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 128 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 137 : les 128, plus la chaîne complète de vérification
+node api/test.js          # 134 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 143 : les 134, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans

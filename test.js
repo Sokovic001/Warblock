@@ -2409,13 +2409,20 @@ test('le verdict est nommé pour ce qu\'il est : une enveloppe de plausibilité,
   assert.ok(bloc.length > 2000, 'le bloc du verdict n\'a pas été retrouvé dans CORE');
   const entete = bloc.slice(0, bloc.indexOf('const ENVELOPPE'));
   assert.match(entete, /ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE/);
-  // L'aveu a DURCI et il ne doit plus pouvoir s'adoucir : le net dépend d'un nombre déclaré par le
-  // client dans les DEUX jeux, pas seulement en Resurgence. Écrire « MAXWIN est recalculé » était
-  // vrai du code et faux du jeu ; c'est ce mensonge-là que ce test interdit de réécrire.
-  assert.match(entete, /EST FAUX, DANS LES DEUX JEUX/, 'l\'en-tête doit dire que l\'invariant ne vaut nulle part');
-  assert.match(entete, /ENCADRÉ, pas recalculé/, 'et que le net est encadré');
-  assert.ok(!/le net est RECALCULÉ/.test(entete), 'plus aucun net n\'est recalculé depuis la seule mise');
-  assert.match(entete, /0 à 20 mises en MAXWIN et de 0 à 50 en Resurgence/, 'les deux intervalles doivent être écrits');
+  // L'AVEU DE LA 02a EST LEVÉ, ET L'EN-TÊTE DOIT LE DIRE. Il a longtemps annoncé « le serveur ne
+  // rejoue pas la partie » et « la sacoche est DÉCLARÉE par le client » : c'est exactement ce que
+  // le module 7 a renversé, et un commentaire faux à l'endroit qui décide d'un montant est pire
+  // que pas de commentaire — la phase 03 y lira quelles lignes sont opposables.
+  assert.ok(!/ne rejoue pas la partie/.test(entete),
+    'l\'en-tête prétend encore que le serveur ne rejoue pas : c\'est faux depuis le module 7');
+  assert.ok(!/DÉCLARÉ par le client/.test(entete),
+    'l\'en-tête prétend encore que la sacoche est déclarée : elle sort du rejeu');
+  assert.match(entete, /le serveur REJOUE la partie/, 'l\'en-tête doit dire ce que le serveur fait');
+  assert.match(entete, /AUCUN MONTANT NE VIENT PLUS DU CLIENT/, 'et ce que cela a changé du montant');
+  assert.match(entete, /cesse d'être la seule protection/,
+    'la raison d\'être qui RESTE doit être écrite : l\'enveloppe n\'est plus la seule protection');
+  // Les deux contrôles « évidents et faux », eux, n'ont pas bougé d'un mot : ils restent exacts.
+  assert.match(entete, /DEUX CONTRÔLES « ÉVIDENTS » SONT FAUX/, 'les deux pièges doivent rester écrits');
   assert.match(entete, /PLAFOND/, 'le sort de payoutCents doit être écrit : un plafond, pas un versement');
   assert.match(entete, /JAMAIS payé ni cru/, 'le sort de declaredNetCents doit être écrit');
   assert.strictEqual(typeof C.ENVELOPPE.controles, 'object');
@@ -4045,10 +4052,30 @@ function jouerPartie(C, S, graine, cleMode, miseCents, cleBrawler, trace){
   const mode = C.MODES[cleMode];
   const G = S.newMatch(graine, mode, miseCents, C.BRAWLERS[cleBrawler]);
   const planS = C.zoneTotalS(G.zonePlan);
-  const borne = Math.ceil((planS + C.GRACE) / C.SIM.stepS);
+  // Le compte à rebours d'intro consomme des pas sans faire avancer \`G.pas\` : sans cette marge,
+  // exactement comme \`traceMaxSteps\` la prévoit déjà, une partie honnête toucherait le chien de
+  // garde deux cent quarante pas avant sa fin.
+  const borne = Math.ceil((planS + C.GRACE + C.TRACE.INTRO_S) / C.SIM.stepS);
   const attendu = miseCents * C.seatsOf(mode);
   const sortie = [];
   let pas = 0, fin = null, issue = 'borne', argentKO = 0, echappes = 0, degatsGaz = 0;
+  // ---- LA SECONDE OPINION, ET POURQUOI ELLE NE RELIT PLUS L'ÉTAT ----
+  // Ce harnais annonçait « ses propres formules » et recopiait \`WBSim.faits\` expression pour
+  // expression : \`G.survivedT||G.time\`, \`livesFor(mode)-p.lives\`, \`f.rang\`. Comparé sur cinquante
+  // parties, c'était vrai par CONSTRUCTION — un modèle est d'accord avec lui-même, et le dossier
+  // s'est déjà fait avoir une fois avec la conservation de l'argent. Ce qui suit se calcule depuis
+  // le FLUX D'ÉVÉNEMENTS que la boucle draine déjà, et depuis lui seul : deux chemins distincts,
+  // donc un vrai désaccord possible. C'est notamment ce qui rendrait visible le cas que le \`||\` de
+  // \`seconds\` cache, et le « rang du joueur contre rang de l'équipe » que la 02a a dû élargir.
+  let pasVivant = 0, killsVus = 0, mortsVues = 0, cubesVus = 0, degatsBruts = 0;
+  let sacoche = C.fromCents(miseCents), rangVu = 0, sortiAvecLArgent = false;
+  const encoreEnJeu = () => {
+    // \`inPlay\` réécrit ici plutôt qu'appelé, exactement comme \`free()\` l'a été au module 3 : sans
+    // quoi le second avis emprunterait la fonction qu'il est censé contredire.
+    const t = new Set();
+    for (const en of G.ents) if (!en.cashedOut && (en.alive || en.lives > 0)) t.add(en.team);
+    return t.size;
+  };
   while (pas < borne){
     const e = trace ? (trace[pas] || {}) : pilote(C, S, G);
     if (!trace) sortie.push(e);
@@ -4056,10 +4083,30 @@ function jouerPartie(C, S, graine, cleMode, miseCents, cleBrawler, trace){
     // comme la barre d'espace du jeu : ils sont donc joués ici, entre deux pas, et enregistrés dans
     // la trace comme le reste. Le module 6 devra les y retrouver.
     if (e.sup && G.player.alive) S.useSuper(G, G.player, e.aimDist);
+    // Debout AVANT le pas : c'est ce que la simulation regarde pour décider si ce pas-là compte
+    // dans la survie du joueur. Le lire après manquerait le pas où il tombe.
+    const vivantAvant = G.player.alive;
     for (const ev of S.step(G, e)){
       if (ev.type === 'fin' && !fin) fin = ev;
       if (ev.type === 'degat' && ev.sur === 'gaz') degatsGaz++;
+      if (ev.type === 'degat' && ev.src === G.player) degatsBruts += ev.dmg;
+      if (ev.type === 'ramassage' && ev.e === G.player){
+        if (ev.kind === 'cube') cubesVus = Math.min(C.CUBE.max, cubesVus + ev.amount);
+        else if (ev.kind === 'cash') sacoche += ev.amount;
+      }
+      if (ev.type === 'mort'){
+        if (ev.tueur === G.player){ killsVus++; if (ev.transfert) sacoche = C.bucketAfterKill(sacoche, ev.sacoche); }
+        if (ev.victime === G.player){
+          mortsVues++; cubesVus = 0; sacoche = 0;
+          // Le rang se compte ICI, sur l'état, au moment où le joueur sort : le nombre d'équipes
+          // encore en jeu, plus la sienne. C'est la seule façon qu'un test pose deux fois la
+          // question « rang du joueur ou rang de l'équipe ».
+          if (ev.elimine && !rangVu) rangVu = encoreEnJeu() + 1;
+        }
+      }
+      if (ev.type === 'encaissement' && ev.e === G.player) sortiAvecLArgent = true;
     }
+    if (vivantAvant) pasVivant = G.pas;
     pas++;
     let somme = 0;
     for (const en of G.ents) somme += en.pouch;
@@ -4080,17 +4127,25 @@ function jouerPartie(C, S, graine, cleMode, miseCents, cleBrawler, trace){
            // exécutions du même code sur le même moteur, pas la tolérance entre deux moteurs.
            etat: G.ents.map(e => [e.eid, e.name, e.alive, e.cashedOut, e.hp, e.x, e.z, e.vx, e.vz,
                                   e.pouch, e.cubes, e.kills, e.lives, e.ammo]),
-           // Le rapport de fin, construit exactement comme « endMatch » le construit.
+           // LA SECONDE OPINION. Chaque champ vient du flux d'événements ou d'un compteur tenu par
+           // la boucle, jamais d'une relecture de l'état que \`WBSim.faits\` relit lui aussi.
+           //
+           // \`damage\` fait exception, et l'exception est écrite plutôt que masquée : la simulation
+           // PLAFONNE les dégâts à ce qu'il restait de vie à la cible, et l'événement \`degat\` ne
+           // porte pas ce reste — l'événement se draine après le pas, quand la vie a déjà baissé.
+           // Le flux ne permet donc que la somme BRUTE, et le test compare ce qu'il peut : le
+           // compte de la simulation est non nul et n'excède jamais cette somme.
+           degatsBruts: Math.round(degatsBruts),
            rapport: C.reportFrom({
-             seconds: G.survivedT || G.time,
-             kills: p.kills,
-             deaths: Math.max(0, C.livesFor(mode) - p.lives),
-             rank: (fin && fin.gagne) ? 1 : (fin ? fin.rang : Math.max(1, S.aliveTeams(G).size)),
-             cubes: p.cubes,
+             seconds: pasVivant * C.SIM.stepS,
+             kills: killsVus,
+             deaths: mortsVues,
+             rank: (fin && fin.gagne) ? 1 : (rangVu || encoreEnJeu() || 1),
+             cubes: cubesVus,
              damage: G.dmgDealt,
-             cashedOut: !!(mode.cashout && fin && fin.cashedOut),
-             purseCents: C.toCents(p.pouch),
-             declaredNetCents: (fin && fin.gagne) ? C.toCents(C.cashoutPayout(p.pouch).net) : 0,
+             cashedOut: !!(mode.cashout && sortiAvecLArgent),
+             purseCents: C.toCents(sacoche),
+             declaredNetCents: (fin && fin.gagne) ? C.toCents(C.cashoutPayout(sacoche).net) : 0,
            }) };
 }
 return { pilote, jouerPartie };
@@ -4098,6 +4153,15 @@ return { pilote, jouerPartie };
 const H = new Function(HARNAIS)();
 const jouer = (graine, mode, miseCents, brawler, trace) =>
   H.jouerPartie(C, SIMU, graine, mode, miseCents, brawler, trace);
+// Combien de pas le compte à rebours d'intro consomme sans faire avancer `G.pas`. Il est posé par
+// `newMatch` depuis que c'est une règle de simulation, donc il se MESURE plutôt que de se réécrire
+// à la main : un test qui recopierait 240 cesserait de dire la vérité le jour où la valeur bouge.
+const PAS_INTRO = (() => {
+  const G = SIMU.newMatch(1, C.MODES.solo, 50, C.BRAWLERS.bolt);
+  let n = 0;
+  while (G.intro > 0 && n < 10000){ SIMU.step(G, {}); n++; }
+  return n;
+})();
 
 // Dix graines, les cinq modes, les quatre tables et dix brawlers : cinquante parties complètes,
 // jouées pour de bon. Elles servent à plusieurs tests d'affilée, donc elles se jouent UNE fois.
@@ -4282,13 +4346,48 @@ test('UNE SEULE DÉFINITION DES FAITS D\'UNE PARTIE : le harnais et WBSim disent
   // `endMatch` rendait ces neuf champs au serveur, le harnais les recopiait, et le serveur allait
   // les recopier une troisième fois pour son rejeu. Trois copies d'une même définition, dont deux
   // auraient fini par mentir — et alors le serveur aurait jugé une AUTRE partie que celle que
-  // l'écran du joueur venait d'afficher. `WBSim.faits` est désormais la seule ; le harnais garde
-  // ses propres formules, ce qui en fait une seconde opinion et non une récitation.
+  // l'écran du joueur venait d'afficher. `WBSim.faits` est désormais la seule.
+  //
+  // LE HARNAIS EN EST LA SECONDE OPINION, ET IL A FALLU LA RENDRE VRAIE. Il annonçait « ses propres
+  // formules » et recopiait mot pour mot celles de `faits` — `G.survivedT||G.time`,
+  // `livesFor(mode)-p.lives`, `f.rang`, `p.kills` : la comparaison sur cinquante parties était vraie
+  // par construction, et elle serait restée verte le jour où `rank` aurait rendu le rang de
+  // l'ÉQUIPE au lieu de celui du joueur. C'est le patron que ce dépôt condamne ailleurs — « un
+  // modèle est d'accord avec lui-même par construction ». Le harnais dérive maintenant chaque
+  // chiffre du FLUX D'ÉVÉNEMENTS et de l'état au moment de l'élimination, sans emprunter ni les
+  // mêmes expressions ni les mêmes objets.
   assert.ok(PARTIES.length === 50, 'la volée de parties n\'a pas été jouée');
-  for (const r of PARTIES)
-    assert.deepStrictEqual(
-      C.reportFrom({ ...SIMU.faits(r.G), declaredNetCents: r.rapport.declaredNetCents }),
-      r.rapport, `${r.cleMode} · graine ${r.graine} : SIM et le harnais ne comptent pas pareil`);
+  for (const r of PARTIES){
+    const ou = `${r.cleMode} · graine ${r.graine}`;
+    const sim = C.reportFrom({ ...SIMU.faits(r.G), declaredNetCents: r.rapport.declaredNetCents });
+    // La DURÉE se compare à une seconde près, et l'écart n'est ni une tolérance de confort ni un
+    // désaccord : `G.time` s'accumule par additions de 1/60 et dérive sous le multiple exact, si
+    // bien que 94,5 s comptées en pas et 94,49999999 s accumulées ne s'arrondissent pas du même
+    // côté. Le défaut que ce contrôle existe pour voir — le `||` qui rend la durée de TOUTE la
+    // partie quand `survivedT` vaut zéro — se compte en dizaines de secondes, pas en une.
+    assert.ok(Math.abs(sim.seconds - r.rapport.seconds) <= 1,
+      `${ou} : durée ${sim.seconds} s pour SIM, ${r.rapport.seconds} s comptées en pas vivants`);
+    assert.deepStrictEqual({ ...sim, seconds: 0 }, { ...r.rapport, seconds: 0 },
+      `${ou} : SIM et le harnais ne comptent pas pareil`);
+    // Les DÉGÂTS ne se dérivent pas du flux : la simulation les plafonne à ce qu'il restait de vie
+    // à la cible, et l'événement `degat` ne porte pas ce reste. On compare donc ce qui est
+    // comparable, et on l'écrit plutôt que de faire passer une récitation pour un contrôle.
+    assert.ok(sim.damage <= r.degatsBruts,
+      `${ou} : ${sim.damage} de dégâts comptés pour ${r.degatsBruts} bruts vus passer`);
+  }
+  // Et il s'est passé assez de choses pour que la comparaison morde : sans ces bornes, cinquante
+  // parties où le joueur ne tue personne et ne meurt jamais la rendraient vraie de tous les côtés.
+  assert.ok(PARTIES.reduce((n, r) => n + r.rapport.kills, 0) > 20, 'le joueur n\'a jamais tué personne');
+  assert.ok(PARTIES.reduce((n, r) => n + r.rapport.deaths, 0) > 20, 'le joueur n\'est jamais mort');
+  // LE RANG EST LE POINT QUI COMPTE : c'est celui que la 02a a dû élargir après coup, et le seul
+  // que deux chemins distincts peuvent départager. Il faut donc des rangs INTERMÉDIAIRES, ni 1 ni
+  // le nombre de sièges — sinon les deux côtés tomberaient d'accord sur un cas dégénéré.
+  const intermediaires = PARTIES.filter(r => r.rapport.rank > 1 && r.rapport.rank < C.seatsOf(r.mode)).length;
+  assert.ok(intermediaires >= 20, `seulement ${intermediaires} parties finissent sur un rang intermédiaire`);
+  // Et le plafonnement des dégâts mord vraiment : c'est ce qui prouve que la somme brute du flux
+  // n'est PAS la même quantité, donc que l'exception écrite plus haut en est bien une.
+  const plafonnes = PARTIES.filter(r => SIMU.faits(r.G).damage < r.degatsBruts).length;
+  assert.ok(plafonnes > 5, `le plafond des dégâts n'a mordu que sur ${plafonnes} parties`);
 });
 test('L\'ARGENT EN JEU A UN SEUL COMPTEUR, et le serveur l\'assertera avec celui-là', () => {
   // Le harnais fait sa propre somme à chaque pas — c'est la seconde opinion, et elle reste. Celle
@@ -4419,7 +4518,11 @@ test('SENSIBILITÉ DE L\'EMPREINTE : changer UN SEUL pas de la trace la change',
   // position ET la vitesse, donc un pas de commande inversé s'y inscrit tout de suite.
   const base = jouer(5150, 'solo', 50, 'bolt');
   let vus = 0;
-  for (const k of [90, 300, 900, 1800, 2700]){
+  // Les pas se comptent APRÈS le compte à rebours : pendant l'intro, `step` consomme le pas sans
+  // rien faire avancer, donc y retourner une commande ne peut évidemment rien changer. Ce n'est pas
+  // une tolérance, c'est la définition de l'intro — et l'écrire ici évite de croire un jour que
+  // l'empreinte est aveugle alors que c'est le décompte qui court encore.
+  for (const k of [90, 300, 900, 1800, 2700].map(n => n + PAS_INTRO)){
     const e = base.trace[k];
     // Un pas où le joueur ne demande rien — mort, ou déjà au centre du cercle — n'a rien à changer,
     // et l'exiger serait exiger de l'empreinte qu'elle voie ce que la simulation ne retient pas.
@@ -4543,6 +4646,69 @@ test('BRAWLER_IDS est le roster, et il n\'en existe qu\'une seule copie', () => 
   assert.ok(!sansCommentaires(sim).includes('Object.keys'), 'SIM parcourt les clés d\'un objet');
 });
 
+test('LE COMPTE À REBOURS D\'INTRO EST UNE RÈGLE DE SIMULATION, posée par newMatch et par personne d\'autre', () => {
+  // LE DÉFAUT QUE CE TEST EXISTE POUR INTERDIRE. Le décompte ne vivait que dans le bloc `Game` :
+  // `startMatch` posait `G.intro = 3.999` APRÈS `newMatch`, qui initialisait `intro: 0`. La trace,
+  // elle, enregistre ces pas — le commentaire de `TRACE.INTRO_S` le dit depuis le module 6. Le
+  // serveur repartait donc d'un décompte à zéro et rejouait en pas RÉELS les deux cent quarante pas
+  // que le navigateur avait passés à décompter : il jugeait une autre partie que celle qui s'était
+  // affichée, sur TOUTE partie réellement jouée dans un navigateur. Aucun test ne le voyait, parce
+  // qu'aucun ne posait `G.intro` — il vivait hors du bloc SIM.
+  for (const cle of Object.keys(C.MODES)){
+    const G = SIMU.newMatch(4242, C.MODES[cle], 50, C.BRAWLERS.bolt);
+    assert.ok(G.intro > 0, `${cle} : newMatch ne pose plus le décompte, le rejeu du serveur dérive`);
+  }
+  // Il consomme des pas SANS faire avancer la partie : c'est sa définition, et c'est ce que la
+  // marge de `traceMaxSteps` réserve déjà.
+  assert.ok(PAS_INTRO > 0);
+  assert.ok(PAS_INTRO <= Math.ceil(C.TRACE.INTRO_S / C.SIM.stepS),
+    `le décompte consomme ${PAS_INTRO} pas, au-delà de la marge que TRACE.INTRO_S réserve`);
+  const G = SIMU.newMatch(4242, C.MODES.solo, 50, C.BRAWLERS.bolt);
+  for (let i = 0; i < PAS_INTRO; i++) SIMU.step(G, {});
+  assert.strictEqual(G.pas, 0, 'un pas de décompte a fait avancer la partie');
+  SIMU.step(G, {});
+  assert.strictEqual(G.pas, 1, 'le coup d\'envoi n\'a pas été donné à la fin du décompte');
+  // Et le bloc `Game` ne le pose plus : il ne fait plus que le LIRE pour la bannière et le remettre
+  // à zéro à la fin. Une seconde écriture ferait deux endroits qui doivent s'accorder — la faute
+  // d'origine, exactement.
+  assert.ok(!sansCommentaires(corpsDe('startMatch')).includes('G.intro='),
+    'startMatch repose le décompte : il y aurait de nouveau deux endroits qui doivent s\'accorder');
+});
+
+test('QUITTER PENDANT LA RÉAPPARITION FINIT LA PARTIE : sans cela le rejeu n\'atteint jamais un terminal', () => {
+  // LE DÉFAUT. Le bouton QUITTER pressé alors que le joueur est mort mais a encore des vies
+  // appelait `endMatch` directement : aucun jeton dans la trace, aucun événement `fin`, et
+  // `WBSim.kill` sortait de toute façon sur `!victim.alive`. Le serveur rejouait donc une partie
+  // qui ne finit jamais, refusait en 409 `non_terminal`, n'écrivait aucun montant, et laissait le
+  // billet au veilleur — pour un joueur parfaitement honnête.
+  const mode = C.MODES.solo;
+  const mort = SIMU.newMatch(7411, mode, 50, C.BRAWLERS.bolt);
+  for (let i = 0; i < PAS_INTRO + 400; i++) SIMU.step(mort, {});
+  SIMU.kill(mort, mort.player, null, 'gas');
+  assert.strictEqual(mort.player.alive, false);
+  assert.ok(mort.player.lives > 0, 'le joueur du test doit avoir encore des vies : c\'est tout le cas');
+  assert.strictEqual(SIMU.terminal(mort), null, 'la partie ne doit pas déjà être finie');
+  // Le jeton d'abandon, rejoué exactement comme le serveur le rejoue.
+  assert.strictEqual(SIMU.appliquerActe(mort, { code: C.TRACE.QUIT, ax: 1, az: 0, dist: 0 }), true,
+    'un abandon rejoué sur un joueur en réapparition ne fait rien');
+  assert.ok(SIMU.terminal(mort), 'la partie abandonnée n\'atteint pas d\'état terminal');
+  assert.strictEqual(SIMU.faits(mort).deaths, C.livesFor(mode), 'un abandon solde toutes les vies');
+  assert.strictEqual(mort.player.respawnT, 0, 'le joueur attend encore de revenir');
+  assert.ok(mort.fin && mort.fin.killer === 'Abandon');
+  assert.ok(mort.fin.rang >= 1 && mort.fin.rang <= C.seatsOf(mode) + 1);
+  // Debout, l'abandon passe toujours par `kill` : c'est le même geste, et il rend le même terminal.
+  const debout = SIMU.newMatch(7411, mode, 50, C.BRAWLERS.bolt);
+  for (let i = 0; i < PAS_INTRO + 400; i++) SIMU.step(debout, {});
+  assert.strictEqual(SIMU.abandon(debout), true);
+  assert.strictEqual(debout.player.alive, false);
+  assert.ok(SIMU.terminal(debout));
+  assert.strictEqual(SIMU.faits(debout).deaths, C.livesFor(mode));
+  // Et il n'y a rien à abandonner deux fois : la seconde pression ne réécrit pas la fin.
+  const avant = debout.fin;
+  assert.strictEqual(SIMU.abandon(debout), false, 'un joueur déjà éliminé peut abandonner une seconde fois');
+  assert.strictEqual(debout.fin, avant, 'la fin a été réécrite par un second abandon');
+});
+
 console.log('La trace des entrées du joueur');
 // CE QUE CETTE SECTION PROUVE. La trace est le seul chaînon que le serveur n'a pas : il refait la
 // carte, le gaz, les caisses et les vingt bots depuis la graine publique, il ne sait pas ce que le
@@ -4613,6 +4779,30 @@ test('ALLER-RETOUR SANS PERTE : enregistrée, quantifiée, compressée, décompr
   assert.ok(actes > 0, 'aucune action ponctuelle dans les trois traces : le jeton d\'acte n\'est pas éprouvé');
 });
 
+test('UNE PARTIE AVEC SON DÉCOMPTE SE REJOUE À L\'IDENTIQUE, empreinte et condensés compris', () => {
+  // L'aller-retour de la trace, mais parti d'une partie où le décompte a bien eu lieu — c'est
+  // précisément la partie que le navigateur produit, et la seule que les tests ne jouaient jamais.
+  // Sans lui, le rejeu du serveur consommait les pas d'intro comme de vrais pas et `digest_match`
+  // était faux sur toutes les parties en ligne.
+  for (const [graine, mode, mise, brawler] of
+       [[7401, 'solo', 50, 'bolt'], [7402, 'resurgence', 100, 'medic']]){
+    const joue = jouerEtTracer(graine, mode, mise, brawler, PAS_INTRO + 1200);
+    const ou = `${mode} · graine ${graine}`;
+    // La trace porte bien les pas du décompte : c'est ce qui rend le rejeu exact des deux côtés.
+    assert.strictEqual(joue.rec.pas(), PAS_INTRO + 1200, `${ou} : la trace ne porte pas les pas d'intro`);
+    assert.strictEqual(joue.G.pas, 1200, `${ou} : le décompte a fait avancer la partie`);
+    const rejoue = rejouerTrace(graine, mode, mise, brawler, joue.texte);
+    assert.strictEqual(rejoue.G.pas, joue.G.pas, `${ou} : le rejeu ne joue pas le même nombre de pas`);
+    assert.deepStrictEqual(etatDe(rejoue.G), etatDe(joue.G), `${ou} : l'état final diverge`);
+    assert.strictEqual(SIMU.empreinte(rejoue.G), SIMU.empreinte(joue.G), `${ou} : l'empreinte diverge`);
+    // Et les condensés se suivent d'un bout à l'autre : c'est le nombre que le serveur écrira dans
+    // `digest_match`, et `-1` est la seule valeur qui vaille « d'accord partout ».
+    assert.strictEqual(C.digestsDiff(rejoue.G.empreintes, joue.G.empreintes), -1,
+      `${ou} : les condensés se séparent`);
+    assert.ok(joue.G.empreintes.length > 3, `${ou} : trop peu de condensés pour que la comparaison morde`);
+  }
+});
+
 test('LA TRACE EST LE SEUL CHAÎNON MANQUANT : la même graine sans elle ne rejoue pas la même partie', () => {
   // Sans cette contre-épreuve, l'aller-retour ci-dessus passerait aussi bien sur une trace vide :
   // la graine seule refait déjà la carte, le gaz, les caisses et les vingt bots.
@@ -4628,7 +4818,14 @@ test('changer UN SEUL pas de la trace change ce qu\'elle rejoue', () => {
   const base = rejouerTrace(7305, 'solo', 50, 'bolt', joue.texte);
   // On coupe la première plage en deux et on retourne le déplacement d'un seul pas au milieu.
   const lu = C.traceDecode(joue.texte);
-  const i = lu.items.findIndex(it => it.t === 'p' && (it.mx || it.mz));
+  // On saute les plages consommées par le compte à rebours : un pas joué pendant l'intro ne fait
+  // rien avancer, donc le retourner ne prouverait rien de la trace.
+  let avant = 0;
+  const i = lu.items.findIndex(it => {
+    if (it.t !== 'p') return false;
+    const debut = avant; avant += it.n | 0;
+    return debut >= PAS_INTRO && (it.mx || it.mz);
+  });
   assert.ok(i >= 0, 'aucun pas de la trace ne demandait un mouvement : le test ne prouve rien');
   const items = lu.items.slice();
   const tordu = Object.assign({}, items[i], { mx: -items[i].mx, mz: -items[i].mz, n: 1 });
@@ -4709,6 +4906,41 @@ test('la trace se coupe en UN À TROIS segments, jamais vingt, et toujours sur u
   assert.strictEqual(pas, 9240);
 });
 
+test('UN SEGMENT PEUT NE PORTER QUE DES ACTES : la coupe tombe au jeton, pas au pas', () => {
+  // LE CAS DE FRONTIÈRE, ET CE QU'IL COÛTAIT. Le découpage coupe au JETON, et un jeton d'action
+  // ponctuelle ne compte AUCUN pas. Quand la frontière des 24 000 caractères tombe juste avant le
+  // dernier geste, le segment de queue ne porte que l'abandon ou l'encaissement — et la route de
+  // trace le refusait en 400 sur `!lu.pas`. L'envoi s'arrêtant au premier refus, l'acte terminal
+  // n'arrivait jamais : le rejeu s'arrêtait avant la fin, sortait en `non_terminal`, et la partie
+  // d'un joueur honnête n'était jamais réglée.
+  const rec = C.traceEnregistreur(100000);
+  const parPas = Math.floor(C.TRACE.SEG / 5);
+  // Des pas tous DISTINCTS : aucune plage ne se compresse, donc cinq caractères chacun, et la
+  // frontière tombe exactement au dernier.
+  for (let i = 0; i < parPas; i++)
+    rec.ajouter(C.traceMots({ mx: 1, mz: 0, ax: C.UNIT[i % 1024].x, az: C.UNIT[i % 1024].z,
+                              aimDist: 4, feu: true }));
+  rec.acte(C.TRACE.QUIT, 0);
+  const segs = rec.segments();
+  assert.strictEqual(segs.length, 2, `${segs.length} segments : la frontière n'est pas au bon endroit`);
+  assert.strictEqual(segs[0].length, C.TRACE.SEG, 'le premier segment ne remplit pas exactement la borne');
+  assert.ok(segs[1].startsWith('!'), 'le second segment ne porte pas un jeton d\'acte');
+  assert.strictEqual(segs[1].length, 5, 'le segment de queue ne porte pas exactement un jeton');
+  // Chaque segment est relisible SEUL, et le second ne porte aucun pas : c'est légitime, pas une
+  // trace vide. Le distinguer d'un segment SANS CONTENU est tout ce que la route a à faire.
+  const un = C.traceDecode(segs[0]), deux = C.traceDecode(segs[1]);
+  assert.strictEqual(un.erreur, null);
+  assert.strictEqual(deux.erreur, null, 'un segment d\'actes seuls doit se relire');
+  assert.strictEqual(un.pas, parPas);
+  assert.strictEqual(deux.pas, 0, 'un jeton d\'acte ne compte aucun pas : c\'est toute l\'affaire');
+  assert.strictEqual(deux.items.length, 1);
+  assert.strictEqual(deux.items[0].t, 'a');
+  assert.strictEqual(deux.items[0].code, C.TRACE.QUIT);
+  // Et recollés, ils rendent le texte entier — celui que le rejeu relira.
+  assert.strictEqual(segs.join(''), rec.texte());
+  assert.strictEqual(C.traceDecode(segs.join('')).pas, parPas);
+});
+
 test('une trace malformée est NOMMÉE, jamais une exception', () => {
   // C'est la leçon du `22003`, transposée : un corps qu'on ne sait pas lire doit sortir avec un code
   // que la route traduit en 400. Une exception ici deviendrait un 500, et un 500 sur cette route
@@ -4766,9 +4998,11 @@ test('LES ACTIONS PONCTUELLES SONT DANS LA TRACE : sans elles, une partie rejou�
   assert.strictEqual(C.TRACE.ACTES, codes.length);
 
   // Chaque action a un EFFET quand elle est rejouée, sinon la porter ne servirait à rien.
+  // Le compte à rebours d'abord : tant qu'il court, `step` consomme le pas sans rien faire avancer
+  // et `throwSmoke` refuse — c'est la règle du jeu, pas un artefact de test.
   const neuf = () => {
     const G = SIMU.newMatch(7311, C.MODES.resurgence, 50, C.BRAWLERS.bolt);
-    for (let i = 0; i < 60; i++) SIMU.step(G, {});
+    for (let i = 0; i < PAS_INTRO + 60; i++) SIMU.step(G, {});
     return G;
   };
   const tir = neuf();
@@ -4837,12 +5071,22 @@ test('le jeu ENREGISTRE ce qu\'il joue : un seul écrivain, et rien pendant l\'i
   // directement sur `useSuper` produirait une partie qui ne se rejoue pas, sans que rien ne casse.
   for (const [prim, porte] of Object.entries({ attack: 'tirJoueur', useSuper: 'superJoueur',
                                                throwSmoke: 'gadgetJoueur', doCashOut: 'encaisserJoueur',
-                                               kill: 'abandonJoueur' })) {
+                                               abandon: 'abandonJoueur' })) {
     assert.strictEqual(compte(jeu, new RegExp('\\b' + prim + '\\(', 'g')), 1,
       `${prim}( est appelée plus d'une fois dans le bloc Game : un geste du joueur contourne la trace`);
     assert.ok(sansCommentaires(corpsDe(porte)).includes(prim + '('),
       `la passerelle ${porte} n'appelle plus ${prim}`);
   }
+  // ET L'ÉCRAN DE FIN NE S'OUVRE PLUS DEPUIS UN BOUTON. `endMatch` est la traduction de l'événement
+  // `fin` de la simulation, et rien d'autre : le bouton QUITTER pressé sur un joueur mort mais
+  // encore en vies l'appelait directement, donc aucun jeton dans la trace, aucun événement de fin,
+  // et le rejeu du serveur n'atteignait jamais d'état terminal — 409 `non_terminal` et billet
+  // laissé au veilleur, sur une partie parfaitement honnête. Deux lecteurs sont autorisés : sa
+  // propre définition, et le traducteur de l'événement.
+  assert.strictEqual(compte(jeu, /\bendMatch\(/g), 2,
+    'endMatch( doit n\'avoir que deux occurrences : sa définition et le traducteur de l\'événement « fin »');
+  assert.ok(sansCommentaires(corpsDe('rendreEvenements')).includes('endMatch('),
+    'le traducteur de l\'événement « fin » doit rester le seul appelant d\'endMatch');
 });
 
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

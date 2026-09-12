@@ -9,6 +9,18 @@ prévu juste, et ce qu'elle avait prévu faux.
 finie, cette phase n'ouvre aucune table en argent réel : elle ferme le trou que la 02a avait écrit
 noir sur blanc, elle n'en ferme pas d'autre.
 
+**Reprise après relecture, et `SIM_VERSION` passe à 2.** Quatre défauts trouvés une fois les sept
+modules livrés, tous du même genre : une règle restée du mauvais côté de la frontière SIM/Game, donc
+invisible aux tests, qui construisent leurs parties par `newMatch`.
+Le **compte à rebours d'intro** n'était posé que par `startMatch` alors que la trace enregistre ses
+deux cent quarante pas : le rejeu les consommait comme de vrais pas et jugeait une autre partie —
+`digest_match` était faux sur *toute* partie réellement jouée dans un navigateur. **QUITTER pendant
+la réapparition** appelait `endMatch` sans passer par la trace, et le rejeu n'atteignait alors jamais
+d'état terminal. **Un billet refusé restait resservable**, donc la même graine, donc le même monde à
+répéter jusqu'à faire régler sa meilleure tentative — et deux tentatives pouvaient se coudre bout à
+bout dans `match_traces`. Enfin, **un segment ne portant que des jetons d'acte** était refusé en 400,
+ce qui coupait l'envoi juste avant l'acte terminal. Détails et raisons dans `docs/HISTORIQUE.md`.
+
 ---
 
 ## D'abord, ce que la 02a a avoué

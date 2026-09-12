@@ -2379,8 +2379,9 @@ const WBCore = (function(){
   // à `reportFrom` quoi recopier, et à `checkReport` quoi refuser.
   //
   // Deux montants seulement, et ils ne jouent pas le même rôle :
-  // — `purseCents`, la sacoche portée. Le serveur ne sait pas la refaire ; il la bornera par
-  //   `purseBound`, et c'est tout ce qu'il peut faire honnêtement tant que rien n'est simulé.
+  // — `purseCents`, la sacoche portée telle que le client la rend. Depuis la 02b le serveur la
+  //   RECALCULE par le rejeu et n'écrit jamais que la sienne ; ce champ ne sert plus qu'à ce que le
+  //   client rende un rapport complet, donc comparable — c'est `ecart_cents` qui en vit.
   // — `declaredNetCents`, ce que le client CROIT avoir gagné. Il est conservé pour MESURER
   //   l'écart avec le calcul du serveur, jamais pour payer. Le jeter perdrait les mesures sur
   //   lesquelles un seuil se fixera plus tard.
@@ -2492,14 +2493,19 @@ const WBCore = (function(){
   }
   // ---- Le verdict d'une partie : UNE ENVELOPPE DE PLAUSIBILITÉ, PAS DE L'ANTI-TRICHE.
   //
-  // Le serveur ne rejoue pas la partie. Il ne sait pas qui a tiré sur qui, et il ne le saura pas
-  // avant la phase 02b. Tout ce qu'il peut faire honnêtement, c'est refuser ce qui est IMPOSSIBLE
-  // et recalculer lui-même les montants qu'il sait recalculer. Un client modifié ment à
-  // l'intérieur de l'enveloppe sans être inquiété, et les tolérances d'horloge sont volontairement
-  // larges — un onglet en arrière-plan, un téléphone endormi et une horloge locale fausse sont
-  // beaucoup plus fréquents qu'un tricheur. Ce n'est donc PAS un premier étage d'anti-triche :
-  // c'est la répétition générale du grand livre de la phase 03, faite sur des chiffres qui ne
-  // valent rien, au dernier moment où le schéma peut encore changer sans migration.
+  // Depuis la phase 02b, le serveur REJOUE la partie : il la refait depuis la graine publique du
+  // billet et la trace des entrées du joueur, et les faits qui arrivent ici — durée, kills, morts,
+  // rang, cubes, dégâts, sacoche — sont ceux du rejeu, jamais ceux du corps de la requête.
+  //
+  // ELLE NE DISPARAÎT PAS POUR AUTANT, ET C'EST LE POINT : si le rejeu se trompe, plus rien ne
+  // regarderait le montant avant de l'écrire. L'enveloppe cesse d'être la seule protection, elle
+  // devient la seconde — et elle mord encore, sur des faits que le client ne choisit plus : une
+  // partie de cent quatre secondes rendue à l'instant où le billet s'ouvre est refusée par
+  // `chronometre`, quelle que soit la qualité de la trace qui l'accompagne.
+  //
+  // Elle refuse ce qui est IMPOSSIBLE, et rien d'autre. Les tolérances d'horloge restent
+  // volontairement larges — un onglet en arrière-plan, un téléphone endormi et une horloge locale
+  // fausse sont beaucoup plus fréquents qu'un tricheur.
   //
   // Le nom est écrit ici, dans le code, et pas seulement dans le README : écrit ailleurs, il
   // serait oublié exactement le jour où il protégerait de l'argent.
@@ -2512,23 +2518,22 @@ const WBCore = (function(){
   // — « plus de kills que d'adversaires ». Non : chacun a plusieurs vies — trois, deux en
   //   Resurgence. Le plafond est adversaires × vies.
   //
-  // L'INVARIANT « AUCUN MONTANT NE VIENT DU CLIENT » EST FAUX, DANS LES DEUX JEUX, ET LE DIRE
-  // ENTIER SERAIT UN MENSONGE CONFORTABLE :
-  // — Dans les deux jeux le net est ENCADRÉ, pas recalculé : il vaut `cashoutCents(sacoche)`, et
-  //   la sacoche est précisément le nombre que le serveur ne sait pas refaire. Il applique donc
-  //   une fonction à un montant DÉCLARÉ par le client, seulement borné à [0, mise × sièges] — un
-  //   intervalle qui va de 0 à 20 mises en MAXWIN et de 0 à 50 en Resurgence. C'est faible, c'est
-  //   honnête, et c'est une raison de plus pour qu'aucun euro n'entre avant 02b.
+  // AUCUN MONTANT NE VIENT PLUS DU CLIENT, ET C'EST DÉMONTRÉ, PAS DÉCRÉTÉ :
+  // — Dans les deux jeux le net vaut `cashoutCents(sacoche)`, et la sacoche est celle que le REJEU
+  //   trouve dans la poche du joueur au moment où il sort — plus jamais celle du corps de la
+  //   requête. C'était le seul aveu de la 02a, et la 02b l'a levé.
   // — Le pot forfaitaire de `payoutCents` n'est PLUS un montant payé nulle part : depuis que le
   //   prix MAXWIN est la sacoche emportée (« CARRIED OUT », test.js : `the prize is what you
   //   carry out`), il n'est que le PLAFOND affiché au lobby, le « WIN UP TO ». Le serveur le
   //   recalculait quand même et écrivait un net quatre fois supérieur à ce que l'écran venait de
   //   verser : `ecart_cents`, la colonne censée mesurer la malhonnêteté du client, mesurait en
   //   réalité ce désaccord de conception. La règle du jeu a été retenue, le forfait supprimé.
-  // — La borne n'est pas un décret : l'argent se conserve. La sacoche naît à la mise, se transfère
-  //   entière au tueur, tombe au sol sinon, et l'encaissement la met à zéro. Toute la table dans
-  //   une seule sacoche est donc atteignable, et `cashoutCents(mise × sièges)` retombe au centime
-  //   sur `payoutCents(...).winnerCents` — c'est ce qui garde le « WIN UP TO » honnête.
+  // — La borne `purseBound` reste, comme PLAFOND démontré et non comme décret : l'argent se
+  //   conserve. La sacoche naît à la mise, se transfère entière au tueur, tombe au sol sinon, et
+  //   l'encaissement la met à zéro — et cette conservation-là est assertée par le serveur sur la
+  //   partie qu'il vient de rejouer, avant d'écrire quoi que ce soit. Toute la table dans une
+  //   seule sacoche est donc atteignable, et `cashoutCents(mise × sièges)` retombe au centime sur
+  //   `payoutCents(...).winnerCents` — c'est ce qui garde le « WIN UP TO » honnête.
   //
   // `declaredNetCents` n'est JAMAIS payé ni cru. Le verdict calcule l'ÉCART entre ce que le client
   // annonce et ce que le serveur compte, et le rend pour qu'il soit stocké. On mesure, on ne punit
@@ -3207,6 +3212,28 @@ function kill(G,victim,killer,cause){
   if(elimine&&victim.isPlayer){ evt(G,'fin',{gagne:false,killer:who,rang:aliveTeams(G).size+1}); return; }
   checkTeams(G,victim,who);
 }
+// L'ABANDON, ET POURQUOI C'EST UNE PRIMITIVE ET PAS UN APPEL A `kill`. Le bouton QUITTER se presse
+// aussi pendant les cinq secondes de reapparition, et `kill` sort tout de suite sur le garde
+// `!victim.alive` : l'abandon d'un mort n'ecrivait donc rien dans l'etat, aucun evenement `fin`
+// n'etait emis, et le rejeu du serveur n'atteignait jamais d'etat terminal — 409, aucun montant, billet
+// laisse au veilleur, pour un joueur parfaitement honnete. Les deux cas se traitent ici, du meme
+// cote de la frontiere que le reste des regles, pour que le jeton `QUIT` de la trace reproduise
+// exactement le geste, que le joueur ait ete debout ou au tapis.
+//
+// Rend `true` si l'abandon a eu lieu, `false` s'il n'y avait rien a abandonner — un joueur deja
+// elimine ou deja sorti avec sa sacoche.
+function abandon(G){
+  const p=G&&G.player; if(!p) return false;
+  if(p.alive){ kill(G,p,null,'abandoned'); return true; }
+  if(p.cashedOut||p.lives<=0) return false;
+  // Il attendait de revenir : on solde ses vies d'un coup, exactement comme `kill` le fait sur un
+  // abandon, et on annonce la meme fin. `faits` en tire `deaths = livesFor(mode)`, et le rang se
+  // lit APRES la mise a zero, comme dans `kill` — sans quoi le joueur se compterait lui-meme.
+  p.lives=0; p.respawnT=0;
+  evt(G,'mort',{victime:p,tueur:null,cause:'abandoned',who:'Abandon',sacoche:0,transfert:false,lives:0,elimine:true});
+  evt(G,'fin',{gagne:false,killer:'Abandon',rang:aliveTeams(G).size+1});
+  return true;
+}
 function checkTeams(G,victim,who){
   const at=aliveTeams(G);
   if(!at.has(G.player.team)&&!(G.player.respawnT>0)){ evt(G,'fin',{gagne:false,killer:who||'The gas',rang:at.size+1}); return; }
@@ -3562,7 +3589,22 @@ function zoneUpdate(G,dt){
 // partie que la sienne, et paierait autre chose que ce qu'il a vu : le rejeu du module 7 refusera
 // de juger une trace produite sous une autre version. Elle s'incremente des qu'un meme couple
 // (graine, trace) cesse de rendre le meme etat final — pas quand un commentaire change.
-const SIM_VERSION = 1;
+//
+// Passee a 2 : le compte a rebours d'intro est descendu dans `newMatch`, et l'abandon d'un joueur
+// en attente de reapparition compte enfin. Une meme trace jouee sous la 1 et sous la 2 ne rend plus
+// le meme etat final — c'est exactement le cas que cette constante existe pour nommer.
+const SIM_VERSION = 2;
+// LE COMPTE A REBOURS D'INTRO, ET POURQUOI IL VIT ICI. Il decide du coup d'envoi : tant qu'il court,
+// `step` consomme un pas sans faire avancer quoi que ce soit. C'est donc une regle de SIMULATION, au
+// meme titre que `terminal` et `faits`, et elle doit etre posee par `newMatch` — le seul endroit que
+// le navigateur, le harnais de test et le rejeu du serveur traversent tous les trois. Ecrite dans le
+// bloc `Game`, comme elle l'a ete, le serveur repartait d'un decompte a zero et rejouait en pas
+// REELS les deux cent quarante pas que le navigateur avait passes a decompter : il jugeait une tout
+// autre partie que celle qui s'etait affichee, sur TOUTE partie reellement jouee.
+//
+// La valeur n'est pas ronde : a 4, le premier `Math.ceil` afficherait un « 4 » d'une image. Elle est
+// bornee par `C.TRACE.INTRO_S`, qui reserve deja la place de ces pas dans la trace.
+const INTRO = 3.999;
 // Les noms des vingt adversaires. Ils vivent ici et non plus dans le bloc `Game` parce que
 // `newMatch` en a besoin sans navigateur : un nom apparait dans le journal des kills et dans le
 // rapport de fin, c'est donc une donnee de la partie. Le pseudo d'un bot au SAS D'ATTENTE, lui,
@@ -3581,7 +3623,7 @@ function newMatch(graine, mode, miseCents, brawler, options){
   const opt=options||{};
   const seed=graine>>>0, stake=C.fromCents(miseCents), tier=C.tierFor(stake)||C.TIERS[0];
   const G={ running:true, paused:false, seed, stake, miseCents, tier, modeCfg:mode,
-            alea:C.makeFlux(seed), time:0, pas:0, intro:0, evts:[], hudT:0, aimDist:5,
+            alea:C.makeFlux(seed), time:0, pas:0, intro:INTRO, evts:[], hudT:0, aimDist:5,
             nextEid:0, feuT:0, empreinte:0, empreintes:[], fin:null, debloques:0,
             cells:C.generateMap(seed),
             ents:[], boxes:[], pickups:[], projs:[], fx:[], zones:[], turrets:[], smokes:[], nades:[],
@@ -3712,7 +3754,11 @@ function argentCents(G){
 function appliquerActe(G,a){
   const p=G.player, T=C.TRACE; if(!p) return false;
   if(a.code===T.ENC) return doCashOut(G);
-  if(a.code===T.QUIT){ if(!p.alive) return false; kill(G,p,null,'abandoned'); return true; }
+  // L'abandon N'A PAS de garde `!p.alive` : on quitte aussi pendant les cinq secondes de
+  // reapparition, et c'est `abandon` qui traite les deux cas. Un garde ici rendrait le rejeu
+  // incapable de reproduire l'abandon d'un mort, donc incapable d'atteindre l'etat terminal de sa
+  // partie — 409 `non_terminal` sur une partie parfaitement honnete.
+  if(a.code===T.QUIT) return abandon(G);
   if(!p.alive) return false;
   p.ax=a.ax; p.az=a.az;
   if(a.code===T.TIR) attack(G,p,a.ax,a.az,a.dist);
@@ -3784,7 +3830,7 @@ return { R, SIM_VERSION, EMPREINTE_PAS, BOT_NAMES,
          clamp, maxHp, evt, spawnProjectile, attack, fireSpec, explode, useSuper, hurtTurret,
          dashUpdate, zonesUpdate, murSurSegment, paramSurSegment, projUpdate, damage, hurtBox,
          spawnPickup, removePickup, collect, botCashOut, inPlay, aliveTeams, playersLeft, kill,
-         checkTeams, doCashOut, respawn, throwSmoke, nadesUpdate, spawnSmoke, smokesUpdate,
+         checkTeams, doCashOut, abandon, respawn, throwSmoke, nadesUpdate, spawnSmoke, smokesUpdate,
          findCover, findTarget, pickGoal, botUpdate, joueurUpdate, commonUpdate, zoneUpdate,
          newMatch, step, drainer, condenseEtat, empreinte, appliquerActe, rejouer,
          terminal, faits, argentCents };
@@ -3803,7 +3849,7 @@ const C=WBCore, N=C.MAP, B=C.BRAWLERS;
 // partie passe en premier argument — SIM n'a plus de `G` de portee lexicale, par construction.
 const { R, cellAt, isWall, inBush, free, tryMove, moveEntity, inZone,
         losClear, smokeAt, smokeBetween, canSee, obscured, spawnPoints, makeEntity,
-        clamp, maxHp, attack, useSuper, throwSmoke, dashUpdate, collect, kill, respawn,
+        clamp, maxHp, attack, useSuper, throwSmoke, dashUpdate, collect, abandon, respawn,
         projUpdate, zonesUpdate, nadesUpdate, smokesUpdate, doCashOut, botCashOut,
         aliveTeams, playersLeft, BOT_NAMES, newMatch, drainer, faits, SIM_VERSION } = WBSim;
 const $=id=>document.getElementById(id);
@@ -4373,7 +4419,10 @@ addEventListener('keydown',e=>{ if(e.code==='Escape'&&rulesEl.classList.contains
 $('toLobby').onclick=()=>{ $('end').classList.remove('on'); $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); };
 $('again').onclick=()=>{ $('end').classList.remove('on'); if(wallet>=lastStake) enterWaiting(lastStake); else { $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); } };
 $('sndBtn').onclick=e=>{ e.stopPropagation(); setAudio(!MUS.on); };
-$('quit').onclick=()=>{ if(G&&G.running){ if(G.player.alive) abandonJoueur(); else endMatch(false,{killer:'Abandon',rank:aliveTeams(G).size+1}); } };
+// QUITTER passe par la trace, comme les cinq autres gestes ponctuels. La branche « mort mais des
+// vies restantes » appelait `endMatch` directement : aucun jeton dans la trace, aucun evenement
+// `fin`, et le rejeu du serveur n'atteignait jamais d'etat terminal.
+$('quit').onclick=()=>{ if(G&&G.running) abandonJoueur(); };
 
 // ---------- three ----------
 const canvas=$('c');
@@ -5597,7 +5646,7 @@ function encaisserJoueur(){
 }
 function abandonJoueur(){
   if(TR) TR.acte(C.TRACE.QUIT,0);
-  kill(G,G.player,null,'abandoned'); rendreEvenements(drainer(G));
+  abandon(G); rendreEvenements(drainer(G));
 }
 // Le HUD du joueur qui doit avancer au PAS et pas a l'image : le refroidissement des emotes, et le
 // bouton d'encaissement, dont le verrou est decompte par SIM juste avant. Ces deux-la tiquent avant
@@ -6205,7 +6254,9 @@ function startMatch(stake){
   $('feed').innerHTML=''; openWheel(false); emoteCd=0; chatHistory.length=0; $('chatLog').innerHTML=''; pinChat(false); openChat(false); quickChat(false);
   $('lobby').style.display='none'; $('end').classList.remove('on'); $('game').style.display='block'; $('pause').style.display='none';
   // you already committed in the waiting room: no second confirmation, just a 3-2-1 and go
-  G.paused=false; G.intro=3.999; G.introShown=-1;
+  // Le decompte lui-meme est pose par `WBSim.newMatch` : c'est une regle de simulation, et le rejeu
+  // du serveur doit reposer exactement le meme. Ici il ne reste que ce qui l'AFFICHE.
+  G.paused=false; G.introShown=-1;
   $('intro').className='on'; $('introSub').textContent='';
   resize(); feed(`${tier.label} table · ${mode.cashout?'RESURGENCE '+mode.name:mode.name} · ${money(stake)} buy-in · ${tpay.players} seated`);
   lobbyStop(); musicStart();

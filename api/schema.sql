@@ -87,11 +87,27 @@ create table if not exists matches (
   -- la clé d'idempotence tirée par le client. Sans elle, un POST dont la réponse se perd est
   -- indistinguable d'un POST jamais arrivé.
   client_key   text         not null check (char_length(client_key) between 1 and 64),
-  -- Quatre états. Le quatrième, 'rejected', est arrivé exprès avec le module du verdict, comme la
+  -- Cinq états. Le quatrième, 'rejected', est arrivé exprès avec le module du verdict, comme la
   -- contrainte étroite le demandait : une partie dont le rapport est refusé est CLOSE, avec son
   -- motif, et ne comptera dans aucune statistique.
+  -- Le cinquième, 'abandoned', est arrivé avec `first_result_at` ci-dessous : un billet
+  -- sur lequel une partie a déjà été jouée et qui n'a pas pu être réglé est CLOS sans montant
+  -- quand le joueur en redemande un, exactement comme le veilleur le ferait à l'expiration.
   status       text         not null default 'open'
-               check (status in ('open', 'settled', 'expired', 'rejected')),
+               check (status in ('open', 'settled', 'expired', 'rejected', 'abandoned')),
+  -- L'HEURE DU PREMIER RÉSULTAT RENDU SUR CE BILLET, ET POURQUOI ELLE EXISTE. Toute la partie est
+  -- une fonction pure de `seed_public` : la carte, les caisses, les vingt bots et le plan de gaz.
+  -- Un billet resservi est donc le MÊME monde. Sans cette marque, un joueur qui bloque l'envoi de
+  -- sa trace obtient un 409, garde son billet ouvert, redemande une partie, reçoit la même graine —
+  -- et rejoue en connaissance de cause le monde qu'il vient d'explorer, autant de fois que la vie
+  -- du billet le permet, jusqu'à faire payer sa meilleure tentative.
+  --
+  -- Elle est posée par la route du résultat, quelle que soit l'issue, et UNE SEULE FOIS : la clause
+  -- porte `status = 'open' and first_result_at is null`, si bien qu'un résultat renvoyé ne modifie
+  -- pas la ligne — l'idempotence de cette route reste totale. C'est une écriture de STATUT, jamais
+  -- d'un montant. Un billet déjà marqué n'est jamais resservi à une SECONDE partie ; renvoyer une
+  -- trace perdue puis son résultat sur le même `match_id` reste possible, et c'est le but.
+  first_result_at timestamptz,
   opened_at    timestamptz  not null default now(),
   -- L'expiration se livre AVEC le billet, calculée depuis LOBBY.wait, la durée du plan de zone et
   -- une marge. Sans elle, un onglet fermé enfermerait le joueur dans un billet mort.
@@ -118,9 +134,11 @@ create table if not exists matches (
   gross_cents        integer  check (gross_cents >= 0),
   fee_cents          integer  check (fee_cents   >= 0),
   net_cents          integer  check (net_cents   >= 0),
-  -- La sacoche retenue : DÉCLARÉE par le client, et seulement bornée à [0, stake_cents × seats].
-  -- C'est elle qui décide du brut dans les deux jeux, donc du net : la borne ci-dessus est le
-  -- seul plafond de paiement qui existe.
+  -- La sacoche retenue : celle que le REJEU a trouvée dans la poche du joueur à la fin de la
+  -- partie, jamais celle du corps de la requête. C'est elle qui décide du brut dans les deux jeux,
+  -- donc du net. `purseBound` — [0, stake_cents × seats] — reste le plafond, et il est DÉMONTRÉ et
+  -- non décrété : la conservation de l'argent est assertée sur la partie rejouée avant tout
+  -- règlement. C'est le point que la phase 03 doit lire correctement.
   purse_cents        integer  check (purse_cents >= 0),
   -- Ce que le client CROIT avoir gagné. Conservé pour être comparé, jamais pour être payé.
   declared_net_cents integer  check (declared_net_cents >= 0),
@@ -132,12 +150,17 @@ create table if not exists matches (
   -- par WBCore.REPORT_FIELDS et net_cents est positif. Relever cette borne-là rouvrirait la panne
   -- ici, en silence.
   ecart_cents        integer,
-  -- Les faits DÉCLARÉS par le client, tels quels. Ils sont bornés, ils ne sont pas vérifiés :
-  -- borner n'est pas vérifier. Deux bornes, et elles ne disent pas la même chose — `deaths` est
-  -- tenu par l'enveloppe de plausibilité (on ne meurt pas plus de fois qu'on n'a de vies) ;
-  -- `damage` n'a aucun plafond démontrable depuis le billet et n'est borné que par la CAPACITÉ de
-  -- sa colonne, 2 147 483 647, refusée en amont par WBCore.checkReport. Ils sont là pour que les
-  -- statistiques de la phase 02a soient une somme sur des lignes immuables plutôt qu'un compteur.
+  -- Les faits RECALCULÉS par le rejeu, depuis la graine publique du billet et la trace des entrées
+  -- du joueur. Rien ici ne vient du corps de la requête : un corps gonflé écrit la même ligne qu'un
+  -- corps sincère, et un test le vérifie ligne à ligne.
+  --
+  -- Les bornes de colonne restent, et elles protègent l'ÉCRITURE, pas la véracité : ces champs
+  -- finissent dans des `integer`, qui s'arrêtent à 2 147 483 647, et WBCore.checkReport refuse en
+  -- amont ce qui dépasse — sans quoi Postgres lèverait `22003`, la route rendrait 500, et la ligne
+  -- resterait ouverte. `deaths` est en plus tenu par l'enveloppe de plausibilité (on ne meurt pas
+  -- plus de fois qu'on n'a de vies) ; `damage` n'a aucun plafond démontrable depuis le billet et
+  -- n'est borné que par la capacité de sa colonne. Ils sont là pour que les statistiques soient une
+  -- somme sur des lignes immuables plutôt qu'un compteur.
   seconds            integer  check (seconds >= 0),
   kills              integer  check (kills   >= 0),
   deaths             integer  check (deaths  >= 0),
@@ -146,9 +169,8 @@ create table if not exists matches (
   damage             integer  check (damage  >= 0),
   cashed_out         boolean,
 
-  -- ---- Phase 02b : ce que le REJEU a coûté et ce qu'il a trouvé. Les faits ci-dessus ne sont
-  -- plus déclarés par le client depuis que la route les recalcule ; ces cinq colonnes-ci disent
-  -- comment ils l'ont été, et elles sont écrites par la même écriture unique.
+  -- ---- Phase 02b : ce que le REJEU a coûté et ce qu'il a trouvé. Écrites par la même écriture
+  -- unique que tout le reste du règlement.
   --
   -- Le nombre de pas réellement rejoués. La durée d'une partie se compte en pas × SIM.stepS,
   -- jamais sur une horloge : c'est le seul repère qu'un rejeu partage avec la partie d'origine.
@@ -226,7 +248,13 @@ create table if not exists match_traces (
   -- Le nombre de pas de simulation que ce segment contient. Il est COMPTÉ par le serveur en
   -- relisant la grammaire, jamais annoncé par le client : un nombre déclaré serait un nombre à
   -- vérifier, donc un nombre de plus à ne pas croire.
-  steps       integer      not null check (steps > 0),
+  --
+  -- ZÉRO EST UNE VALEUR LÉGITIME, et `> 0` était un piège. Le découpage coupe au JETON, et un jeton
+  -- d'action ponctuelle ne compte aucun pas : quand la frontière des 24 000 caractères tombe juste
+  -- avant le dernier geste, le segment de queue ne porte que l'abandon ou l'encaissement. Le
+  -- refuser fait échouer l'envoi juste avant la fin de la partie, donc `non_terminal` au règlement
+  -- et aucun montant écrit — sur une partie parfaitement honnête.
+  steps       integer      not null check (steps >= 0),
   -- Le segment lui-même : la grammaire de WBCore.traceDecode, en base64url plus deux marqueurs.
   -- La borne haute est celle de MAX_TRACE_BODY, moins la place de l'enveloppe JSON.
   data        text         not null check (char_length(data) between 1 and 65536),

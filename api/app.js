@@ -464,7 +464,13 @@ function createApp({
     const lu = C.traceDecode(corps.data, maxPas, true);
     if (lu.erreur === 'trop_de_pas')
       return envoyer(res, 400, { erreur: `Cette trace dépasse à elle seule les ${maxPas} pas qu'une partie de ce mode peut durer.`, code: 'trop_de_pas' }, origin);
-    if (lu.erreur || !lu.pas)
+    // UN SEGMENT SANS PAS N'EST PAS UN SEGMENT VIDE. Le découpage coupe au JETON, et un jeton
+    // d'action ponctuelle — abandon, encaissement — ne compte aucun pas : quand la frontière des
+    // 24 000 caractères tombe juste avant le dernier geste, le segment de queue ne porte que lui.
+    // Le refuser sur `!lu.pas` coupait l'envoi juste avant la fin de la partie, et le règlement
+    // sortait alors en `non_terminal` sans écrire un centime, sur une partie honnête. Ce qui reste
+    // refusé, c'est le segment sans contenu du tout.
+    if (lu.erreur || typeof corps.data !== 'string' || !corps.data.length)
       return envoyer(res, 400, { erreur: 'Trace malformée.', code: 'donnees', detail: lu.erreur || 'vide' }, origin);
 
     const r = await db.addTrace({
@@ -472,6 +478,10 @@ function createApp({
     });
     if (r.refuse === 'trop_de_pas')
       return envoyer(res, 400, { erreur: `Cette partie a déjà rendu ${nombre(r.totalSteps)} pas sur les ${maxPas} qu'elle peut durer.`, code: 'trop_de_pas' }, origin);
+    // Le premier écrit gagne, mais il le dit. Sans ce refus, le segment 0 d'une tentative et les
+    // segments suivants d'une autre se recollaient en une partie que personne n'a jouée.
+    if (r.refuse === 'divergente')
+      return envoyer(res, 409, { erreur: `Le segment ${seq} de cette partie a déjà été reçu, et il ne portait pas les mêmes données. Une trace ne se réécrit pas.`, code: 'trace_divergente' }, origin);
 
     // La réponse ne dit PAS si la ligne a été écrite ou si elle existait déjà : elle rend l'état de
     // la trace. Un rejeu à l'identique rend donc exactement la même réponse, comme pour le billet —
@@ -674,6 +684,17 @@ function createApp({
       if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
       return envoyer(res, 200, reglement(match), origin);
     }
+
+    // LE BILLET EST MARQUÉ JOUÉ AVANT MÊME D'ÊTRE JUGÉ, et c'est délibéré. Toute la partie est
+    // une fonction pure de `seed_public` : si un billet dont le résultat vient d'être refusé
+    // repartait à une seconde partie, le joueur rejouerait le monde qu'il vient d'explorer — mêmes
+    // caisses, mêmes bots, même gaz — et pourrait répéter la partie payante jusqu'à faire régler sa
+    // meilleure tentative. Bloquer l'envoi de la trace suffisait à déclencher exactement ça.
+    // La marque ne ferme rien ici : la ligne reste ouverte, la trace peut encore arriver et le
+    // résultat être renvoyé sur le MÊME `match_id` — elle ne se pose qu'une fois, donc un renvoi ne
+    // modifie pas la ligne. Ce qu'elle interdit, c'est un second monde identique : `createMatch`
+    // clôt alors le billet sans montant et en ouvre un neuf, avec une graine neuve.
+    await db.markPlayed({ matchId, userId: user.id, at: new Date(now()) });
 
     // LE REJEU DÉCIDE. Tout ce que le corps annonçait — durée, kills, morts, rang, cubes, dégâts,
     // sacoche — est jeté et refait depuis la graine publique du billet et la trace lue en base.

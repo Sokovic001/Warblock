@@ -140,9 +140,56 @@ simulation, comme tout le reste, et `endMatch` les lit. Le harnais garde ses pro
 délibérément : c'est une seconde opinion, et un test compare les deux sur les cinquante parties. Même
 patron que le `free()` réécrit exprès dans `test.js` au module 3.
 
+*Ce qui a été écrit là et qui était faux, corrigé depuis — voir « Une règle laissée dans le bloc
+`Game` » plus bas.* Le harnais ne gardait pas ses propres formules : il recopiait celles de `faits`,
+expression pour expression. La comparaison était donc vraie par construction, et le serait restée le
+jour où `rank` aurait rendu le rang de l'équipe au lieu de celui du joueur.
+
 Le fait de fin a dû descendre **sur l'état** pour cela : `G.fin` retient le premier événement `fin`,
 parce qu'un événement se draine — le bloc `Game` le lit une fois puis il n'existe plus — alors que
 « cette partie a une fin, et laquelle » est un fait de la partie.
+
+### Une règle laissée dans le bloc `Game` est une règle que le serveur ne rejouera pas — phase 02b, reprise
+
+Le compte à rebours de trois secondes vivait dans `startMatch` : `WBSim.newMatch` rendait `intro: 0`
+et le bloc `Game` posait `G.intro = 3.999` juste après. Rien ne cassait — dans le navigateur.
+Ailleurs, tout : la trace enregistre ces deux cent quarante pas (c'est écrit dans le commentaire de
+`TRACE.INTRO_S` depuis le module 6), et le rejeu du serveur, qui repart d'un `newMatch` neuf, les
+consommait comme de **vrais** pas de simulation. Il jugeait donc une autre partie que celle qui
+s'était affichée, sur **toute** partie réellement jouée dans un navigateur : `digest_match` faux
+partout, donc zéro ligne lisible par le grand livre de la phase 03 et cinq agrégats bloqués à zéro,
+et, quand le rejeu n'atteignait pas d'état terminal, un 409 et une partie jamais enregistrée.
+
+Aucun test ne pouvait le voir, et c'est le vrai enseignement : `test.js` comme `api/test.js`
+construisent leurs parties par `newMatch` et ne posaient donc **jamais** `G.intro`, qui vivait hors
+du bloc SIM. Un test ne couvre que ce que le code lui laisse atteindre. Le décompte décide du coup
+d'envoi : c'est une règle de simulation, elle est descendue à côté de `terminal`, `faits` et
+`argentCents`, et le bloc `Game` ne fait plus que la lire pour afficher la bannière.
+
+Deux corollaires du même passage. `WBSim.abandon` existe pour la raison jumelle : QUITTER se presse
+aussi pendant les cinq secondes de réapparition, et `kill` sort tout de suite sur `!victim.alive` —
+l'interface appelait donc `endMatch` directement, sans jeton dans la trace et sans événement de fin,
+et le rejeu n'atteignait jamais de terminal. Et le harnais de `test.js`, qui prétendait donner « une
+seconde opinion » sur les faits, en **recopiait les expressions mot pour mot** : la comparaison sur
+cinquante parties était vraie par construction, exactement le patron que ce journal condamne à
+propos de la conservation de l'argent. Il dérive maintenant ses chiffres du flux d'événements.
+
+### Un billet resservi est le même monde — phase 02b, reprise
+
+Tant que rien n'était simulé, rendre le billet ouvert existant était une pure commodité
+d'idempotence. Depuis que le serveur rejoue, la partie entière est une **fonction pure de la graine
+publique** : même carte, mêmes caisses, mêmes vingt bots, même plan de gaz. Le même billet resservi
+est donc le même monde, et il suffisait de bloquer l'envoi de sa trace — un bloqueur de requêtes,
+deux secondes de wifi coupé — pour obtenir un 409, garder son billet, recliquer sur la table et
+rejouer en connaissance de cause le monde qu'on venait d'explorer, jusqu'à faire régler sa meilleure
+tentative.
+
+La leçon est de conception, pas de code : **une propriété d'idempotence écrite avant que quelque
+chose n'ait de valeur cesse d'être neutre le jour où cette valeur arrive.** Un billet ne sert
+désormais qu'une tentative — `first_result_at`, posée au premier résultat quelle qu'en soit l'issue —
+et la porte qui reste ouverte est nommée : renvoyer une trace perdue puis son résultat sur le même
+`match_id`. La variante involontaire du même défaut est réparée du même coup : deux tentatives ne se
+cousent plus, un `seq` déjà posé dont les données diffèrent sort en 409 nommé au lieu d'être avalé.
 
 ## Trois choses consignées avant le premier euro
 
@@ -418,7 +465,7 @@ passe contre la doublure prouve la doublure.
 - **La divergence est mesurée, jamais punie** : la ligne est réglée et payée, marquée
   `digest_match = false`, et le taux de divergence est un agrégat exposé. Le grand livre de la phase
   03 ne lira que ce qui a convergé.
-- **365 tests sur le jeu, 128 sur l'API** sans rien installer, 137 avec `jose`. Aucune base, aucun
+- **369 tests sur le jeu, 134 sur l'API** sans rien installer, 143 avec `jose`. Aucune base, aucun
   réseau, aucun navigateur : tout est injecté.
 - **Toujours aucun euro, et cette phase n'ouvre aucune table en argent réel.** Le vol de temps
   devient impossible ; le vol de précision — aimbot, ESP — reste entier, et il est structurel.

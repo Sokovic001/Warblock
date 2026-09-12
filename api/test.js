@@ -105,14 +105,24 @@ function fakeDb(seed = []) {
       const rejeu = matches.find(x => x.user_id === m.userId && x.client_key === m.clientKey);
       if (rejeu) return { match: rejeu, repris: true };
       let ouvert = matches.find(x => x.user_id === m.userId && x.status === 'open');
-      if (ouvert && !(new Date(ouvert.expires_at) > m.openedAt)) { ouvert.status = 'expired'; ouvert = null; }
+      if (ouvert) {
+        const vivant = new Date(ouvert.expires_at) > m.openedAt;
+        // UN BILLET NE SERT QU'UNE TENTATIVE. Périmé, ou déjà joué, il est clos sans montant et la
+        // place se libère : le joueur reçoit un billet neuf, donc une graine neuve, donc un autre
+        // monde. Sans cela, bloquer l'envoi de sa trace suffisait à se faire resservir le même.
+        if (!vivant || ouvert.first_result_at) {
+          ouvert.status = vivant ? 'abandoned' : 'expired';
+          ouvert = null;
+        }
+      }
       if (ouvert) return { match: ouvert, repris: true };
       const ligne = {
         id: nextMatch++, user_id: m.userId, mode: m.mode, stake_cents: m.stakeCents, seats: m.seats,
         team_size: m.teamSize,
         brawler: m.brawler, seed_public: m.seedPublic, seed_secret: m.seedSecret,
         sim_version: m.simVersion,
-        client_key: m.clientKey, status: 'open', opened_at: m.openedAt, expires_at: m.expiresAt,
+        client_key: m.clientKey, status: 'open', first_result_at: null,
+        opened_at: m.openedAt, expires_at: m.expiresAt,
       };
       verifierColonnes(ligne);
       matches.push(ligne);
@@ -122,6 +132,16 @@ function fakeDb(seed = []) {
       // `user_id` fait partie de la recherche, pas d'une vérification après coup : un identifiant
       // deviné ne doit rien apprendre sur la partie de quelqu'un d'autre.
       return matches.find(x => String(x.id) === String(matchId) && x.user_id === userId) || null;
+    },
+    // La marque « une partie a été jouée sur ce billet » : une écriture de STATUT, jamais de
+    // montant, et sa clause imite celle du vrai pilote — `status = 'open' and first_result_at is
+    // null`. Elle ne se pose donc qu'une fois, et un résultat renvoyé ne modifie pas la ligne.
+    async markPlayed({ matchId, userId, at }) {
+      const m = matches.find(x => String(x.id) === String(matchId) && x.user_id === userId
+                                  && x.status === 'open' && !x.first_result_at);
+      if (!m) return { marque: false };
+      m.first_result_at = at;
+      return { marque: true };
     },
     async settleMatch(r) {
       const m = matches.find(x => String(x.id) === String(r.matchId) && x.user_id === r.userId);
@@ -151,8 +171,14 @@ function fakeDb(seed = []) {
     // chemin qui modifie ou supprime une ligne déjà posée.
     async addTrace({ matchId, seq, simVersion, steps, data, maxSteps }) {
       const miennes = traces.filter(t => String(t.match_id) === String(matchId));
-      const deja = miennes.some(t => t.seq === seq);
+      const meme = miennes.find(t => t.seq === seq);
       const avant = miennes.reduce((s, t) => s + t.steps, 0);
+      // Le premier écrit gagne, mais il le DIT : un rang déjà posé dont les données diffèrent est
+      // refusé, sans quoi deux tentatives se cousent bout à bout en une partie que personne n'a
+      // jouée. Un renvoi à l'identique reste parfaitement idempotent.
+      if (meme && meme.data !== data)
+        return { refuse: 'divergente', segments: miennes.length, totalSteps: avant };
+      const deja = !!meme;
       if (!deja && avant + steps > maxSteps)
         return { refuse: 'trop_de_pas', segments: miennes.length, totalSteps: avant };
       if (!deja) {
@@ -238,6 +264,16 @@ const SECRETS = Array.from({ length: 40 }, (_, i) => 'a' + String(i + 1).padStar
 const T0 = Date.parse('2026-01-01T12:00:00Z');
 const BRAWLER = Object.keys(C.BRAWLERS)[0];
 const DEMANDE = { mode: 'solo', stake: 0.5, brawler: BRAWLER, clientKey: 'cle-1' };
+// Combien de pas le compte à rebours d'intro consomme sans faire avancer `G.pas`. Il est posé par
+// `WBSim.newMatch` — c'est une règle de simulation, et c'est ce qui permet au rejeu du serveur de
+// le reposer sans que l'API n'en sache rien. On le MESURE plutôt que de le recopier : un test qui
+// écrirait 240 cesserait de dire la vérité le jour où la valeur bouge.
+const PAS_INTRO = (() => {
+  const G = SIM.newMatch(1, C.MODES.solo, 50, C.BRAWLERS[BRAWLER]);
+  let n = 0;
+  while (G.intro > 0 && n < 10000) { SIM.step(G, {}); n++; }
+  return n;
+})();
 
 function bancDeBillet(extra = {}) {
   const db = fakeDb();
@@ -807,11 +843,15 @@ function jouerPartie(o) {
   const cle = JSON.stringify(o);
   if (PARTIES.has(cle)) return PARTIES.get(cle);
   const { graine, mode = 'solo', miseCents = 50, brawler = BRAWLER, encaisser = -1, pasMax = 0,
-          rallonge = 0 } = o;
+          rallonge = 0, encaisserSiRiche = false } = o;
   const cfg = C.MODES[mode];
   const maxPas = C.traceMaxSteps(C.zonePlan(graine, cfg));
   const demande = rallonge ? encaisser + rallonge : pasMax;
-  const borne = demande > 0 ? Math.min(demande, maxPas) : maxPas;
+  // `encaisser`, `pasMax` et `rallonge` se comptent en pas de SIMULATION — ceux que `G.pas` mesure
+  // — et pas en tours de boucle : le compte à rebours d'intro, posé par `newMatch`, consomme ses
+  // pas sans rien faire avancer, exactement comme dans le navigateur. Les compter dans ces bornes
+  // décalerait tous les tests de deux cent quarante pas sans que personne ne le voie.
+  const borne = (demande > 0 ? Math.min(demande + PAS_INTRO, maxPas) : maxPas);
   const rec = C.traceEnregistreur(maxPas);
   const G = SIM.newMatch(graine, cfg, miseCents, C.BRAWLERS[brawler]);
   let pas = 0;
@@ -819,9 +859,19 @@ function jouerPartie(o) {
     // `rallonge` note le jeton d'encaissement dans la trace SANS sortir de la partie, et continue
     // de jouer. C'est la trace d'un client qui rallonge la sienne après avoir encaissé : le serveur
     // doit s'arrêter au jeton, pas au bout du fichier.
-    if (pas === encaisser) {
+    if (G.pas === encaisser) {
       rec.acte(C.TRACE.ENC, 0);
       if (!rallonge) { SIM.doCashOut(G); if (G.fin) break; }
+    }
+    // ENCAISSER DÈS QU'ON EST PLUS RICHE QUE SA MISE, et pas à un pas fixe. Le pas fixe tombait
+    // avant l'expiration de `CASHOUT.lock` dès que le joueur avait pris un coup, si bien que la
+    // seule sortie gagnante du fichier partait avec exactement sa propre mise en poche — rien ne
+    // distinguait alors « la sacoche que le rejeu trouve » de « la mise inscrite sur le billet ».
+    if (encaisserSiRiche && G.player.alive && G.player.pouch > C.fromCents(miseCents)
+        && C.cashoutReady(G.player.cashLock || 0)) {
+      rec.acte(C.TRACE.ENC, 0);
+      SIM.doCashOut(G);
+      if (G.fin) break;
     }
     const brut = pilote(G);
     if (brut.sup && G.player.alive) {
@@ -858,6 +908,9 @@ const partieDe = (b, opts = {}) => jouerPartie({
   ...(opts.encaisser === undefined ? {} : { encaisser: opts.encaisser }),
   ...(opts.pasMax === undefined ? {} : { pasMax: opts.pasMax }),
   ...(opts.rallonge === undefined ? {} : { rallonge: opts.rallonge }),
+  // Le cache `PARTIES` est clé sur les options : une option oubliée ici rendrait la partie d'une
+  // AUTRE configuration, en silence.
+  ...(opts.encaisserSiRiche === undefined ? {} : { encaisserSiRiche: opts.encaisserSiRiche }),
 });
 const poserTrace = async (app, id, segments, token = 'ok:u1:Loic') => {
   for (let i = 0; i < segments.length; i++) {
@@ -917,6 +970,39 @@ await test('LE SERVEUR NE CROIT PLUS AUCUN FAIT DÉCLARÉ : un corps gonflé éc
   assert.deepStrictEqual(Object.keys(un.rep.corps).sort(), CLES_REGLEMENT.slice().sort());
   assert.ok(!JSON.stringify(un.rep.corps).includes(String(SECRETS[0])), 'la graine secrète a fui');
 });
+await test('LE DÉCOMPTE D\'INTRO EST REJOUÉ AUSSI : sans lui, digest_match serait faux sur TOUTE partie', async () => {
+  // LE DÉFAUT. Le compte à rebours ne vivait que dans le bloc `Game` : `startMatch` posait
+  // `G.intro = 3.999` APRÈS `newMatch`, qui rendait `intro: 0`. La trace, elle, enregistre ces pas.
+  // Le serveur repartait donc d'un décompte à zéro et rejouait en pas RÉELS les deux cent quarante
+  // pas passés à décompter : il jugeait une AUTRE partie. Conséquences pour un joueur honnête et
+  // connecté : `digest_match` faux sur toutes ses parties — donc zéro ligne lisible par le grand
+  // livre de la phase 03 et cinq agrégats à zéro — et, quand le rejeu n'atteignait pas de terminal,
+  // un 409 `non_terminal` et une partie jamais enregistrée. Aucun test ne le voyait : ni celui du
+  // jeu ni celui-ci ne posaient jamais `G.intro`, qui vivait hors du bloc SIM.
+  assert.ok(SIM.newMatch(4242, C.MODES.solo, 50, C.BRAWLERS[BRAWLER]).intro > 0,
+    'newMatch ne pose plus le décompte : le rejeu du serveur rejouerait une autre partie');
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const { partie, rep } = await jouerEtRendre(app, horloge, b, { encaisser: 300 });
+  assert.strictEqual(rep.code, 200, JSON.stringify(rep.corps));
+  // La trace porte les pas du décompte, et le serveur les compte comme tels : `trace_steps` les
+  // inclut, la durée non — c'est exactement la différence que le décompte fait.
+  assert.strictEqual(partie.pas, partie.G.pas + PAS_INTRO, 'la partie du test n\'a pas eu de décompte');
+  assert.strictEqual(rep.corps.traceSteps, partie.pas);
+  assert.strictEqual(db.matches[0].seconds, partie.rapport.seconds);
+  // ET LE REJEU A CONVERGÉ, du premier condensé au dernier. C'est le seul chiffre qui dit que le
+  // serveur a rejoué la partie qui s'est affichée, et pas une partie voisine.
+  assert.strictEqual(rep.corps.digestMatch, true, 'le rejeu du serveur diverge de la partie du joueur');
+  assert.strictEqual(rep.corps.divergenceStep, null);
+  assert.strictEqual(db.matches[0].replay_digest, SIM.empreinte(partie.G));
+  const siens = C.digestsDecode(partie.rapport.digests);
+  assert.ok(siens && siens.length > 3, 'trop peu de condensés pour que la convergence prouve quelque chose');
+  assert.strictEqual(C.digestsDiff(partie.G.empreintes, siens), -1);
+  // Et la ligne compte, elle : c'est la conséquence directe de la convergence.
+  const s = (await appel(app, { token: 'ok:u1:Loic' })).corps.stats;
+  assert.strictEqual(s.matches, 1, 'une partie convergée n\'entre pas dans les agrégats');
+  assert.strictEqual(s.divergences, 0);
+});
 await test('L\'EXPLOIT NOMMÉ : prendre un billet, ne jamais jouer, rendre une victoire — vaut ZÉRO', async () => {
   // LE CORPS EXACT QUE LA SPÉCIFICATION NOMME, et il passait mot pour mot en 02a : `RESPAWN` donne
   // un plancher de dix secondes, `LOBBY.wait` plus la marge de victoire rendent cinq secondes
@@ -947,6 +1033,68 @@ await test('L\'EXPLOIT NOMMÉ : prendre un billet, ne jamais jouer, rendre une v
     assert.strictEqual(db.matches[0][col], undefined, `l'exploit a écrit ${col}`);
   assert.strictEqual(db.matches[0].status, 'open');
 });
+await test('UN BILLET NE SERT QU\'UNE TENTATIVE : après un résultat refusé, la graine suivante est AUTRE', async () => {
+  // LE DÉFAUT. Depuis que toute la partie est une fonction pure de la graine publique, un billet
+  // resservi est le même monde : mêmes caisses, mêmes vingt bots, même plan de gaz. Un joueur qui
+  // bloque simplement l'envoi de sa trace obtenait un 409, gardait son billet OUVERT, recliquait
+  // sur la table, recevait le MÊME billet — donc la même graine — et rejouait en connaissance de
+  // cause le monde qu'il venait d'explorer, autant de fois que la vie du billet le permettait,
+  // jusqu'à faire régler sa meilleure tentative. Ce n'est pas l'ESP structurel déjà consigné :
+  // c'est une répétition générale gratuite de la partie qu'il va faire payer.
+  const { db, app, horloge } = bancDeBillet();
+  const TABLE = { ...DEMANDE, mode: 'resurgence', stake: 10 };
+  const b1 = await demander(app, { ...TABLE, clientKey: 'cle-A' });
+  const p1 = partieDe(b1, { encaisser: 300 });
+  horloge.t = Date.parse(b1.corps.openedAt) + (C.LOBBY.wait + p1.rapport.seconds + 3) * 1000;
+  const r1 = await appel(app, { method: 'POST', path: `/api/match/${b1.corps.id}/result`,
+                                token: 'ok:u1:Loic', body: p1.rapport });
+  assert.strictEqual(r1.code, 409, JSON.stringify(r1.corps));
+  assert.strictEqual(r1.corps.code, 'trace_absente');
+  // La ligne reste ouverte — c'est voulu, la trace peut encore arriver — mais elle est MARQUÉE.
+  assert.strictEqual(db.matches[0].status, 'open');
+  assert.ok(db.matches[0].first_result_at, 'le billet n\'est pas marqué comme joué');
+
+  // Il reclique sur la même table, avec une clé d'idempotence NEUVE : c'est une nouvelle demande,
+  // pas le rejeu d'une ancienne.
+  const b2 = await demander(app, { ...TABLE, clientKey: 'cle-B' });
+  assert.strictEqual(b2.code, 200, JSON.stringify(b2.corps));
+  assert.notStrictEqual(b2.corps.id, b1.corps.id, 'le serveur a resservi le même billet');
+  assert.notStrictEqual(b2.corps.seed, b1.corps.seed, 'le serveur a resservi la MÊME graine, donc le même monde');
+  // L'ancien est clos SANS MONTANT, comme le veilleur le ferait : on ferme une porte, on n'écrit
+  // pas d'argent.
+  assert.strictEqual(db.matches[0].status, 'abandoned');
+  for (const col of ['net_cents', 'gross_cents', 'fee_cents', 'purse_cents', 'settled_at'])
+    assert.strictEqual(db.matches[0][col], undefined, `la clôture a écrit ${col}`);
+  assert.strictEqual(db.matches.length, 2);
+  // Et le monde n'est vraiment pas le même : deux graines, deux parties.
+  const A = SIM.newMatch(b1.corps.seed, C.MODES.resurgence, b1.corps.stakeCents, C.BRAWLERS[BRAWLER]);
+  const B = SIM.newMatch(b2.corps.seed, C.MODES.resurgence, b2.corps.stakeCents, C.BRAWLERS[BRAWLER]);
+  assert.notStrictEqual(SIM.condenseEtat(A), SIM.condenseEtat(B), 'les deux billets posent le même monde');
+  assert.notDeepStrictEqual(A.boxes.map(x => [x.x, x.z]), B.boxes.map(x => [x.x, x.z]),
+    'les caisses sont aux mêmes endroits : c\'est le monde qu\'il vient d\'explorer');
+});
+await test('… et le joueur dont la trace s\'est perdue peut toujours la renvoyer sur le MÊME billet', async () => {
+  // La contrepartie, et elle compte autant : la marque ne ferme rien. Un joueur honnête dont le
+  // réseau a lâché au mauvais moment renvoie sa trace puis son résultat sur le même `match_id`, et
+  // il est réglé. Fermer ici ferait un second endroit qui clôt une ligne, et punirait la panne.
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const p = partieDe(b, { encaisser: 300 });
+  horloge.t = ARRIVEE(p.rapport);
+  const rate = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/result`,
+                                  token: 'ok:u1:Loic', body: p.rapport });
+  assert.strictEqual(rate.corps.code, 'trace_absente');
+  const marque = db.matches[0].first_result_at;
+  await poserTrace(app, b.corps.id, p.segments);
+  const bon = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/result`,
+                                 token: 'ok:u1:Loic', body: p.rapport });
+  assert.strictEqual(bon.code, 200, JSON.stringify(bon.corps));
+  assert.strictEqual(bon.corps.status, 'settled');
+  assert.ok(bon.corps.netCents > 0);
+  // La marque ne se repose pas : elle vaut « la première fois », et un résultat renvoyé ne modifie
+  // donc jamais la ligne. C'est ce qui garde l'idempotence de cette route totale.
+  assert.strictEqual(db.matches[0].first_result_at, marque);
+});
 await test('LE PAIEMENT SORT DE LA PARTIE REJOUÉE : un encaissement Resurgence, joué pour de bon', async () => {
   // Le seul chemin par lequel un net non nul entre encore en base : une partie réellement jouée qui
   // se termine sur un encaissement. Rien ici n'est déclaré — la sacoche est celle que le rejeu
@@ -969,6 +1117,44 @@ await test('LE PAIEMENT SORT DE LA PARTIE REJOUÉE : un encaissement Resurgence,
   assert.strictEqual(rep.corps.netCents, C.cashoutCents(rep.corps.purseCents).netCents);
   assert.strictEqual(db.matches[0].net_cents, rep.corps.netCents);
   assert.strictEqual(db.matches[0].cashed_out, true);
+});
+await test('LA SACOCHE PAYÉE N\'EST PAS LA MISE : un encaissement qui sort avec plus qu\'il n\'a engagé', async () => {
+  // LE TROU QUE CE TEST BOUCHE. Le seul règlement payant du fichier avait une sacoche exactement
+  // égale à la mise : rien n'y distinguait « la sacoche que le rejeu trouve dans la poche » de
+  // « la mise inscrite sur le billet ». Plafonner tout paiement à une mise — `min(purse, stake)` —
+  // ne cassait aucun test, alors que c'est précisément le premier des deux « contrôles évidents et
+  // faux » que `api/README.md` refuse d'écrire, et que LA promesse de la phase est que le montant
+  // sorte de la partie rejouée.
+  //
+  // La graine est forcée pour que la partie soit celle-là et pas une autre ; elle n'a rien de
+  // magique — c'est l'assertion `purseCents > stakeCents` qui porte la garantie, et c'est elle qui
+  // fera tomber le test avec un message clair le jour où un correctif de simulation changera la
+  // partie, au lieu de le laisser redevenir aveugle en silence.
+  const { db, app, horloge } = bancDeBillet({ randomSeed: () => 4 });
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const { partie, rep } = await jouerEtRendre(app, horloge, b, { encaisserSiRiche: true });
+  assert.strictEqual(partie.terminal, 'encaissement');
+  assert.ok(partie.rapport.purseCents > b.corps.stakeCents,
+    `la partie de ce test sort avec ${partie.rapport.purseCents} centimes pour ${b.corps.stakeCents} engagés : `
+    + 'le test ne distingue plus la sacoche de la mise, il faut lui retrouver une partie qui le fasse');
+
+  assert.strictEqual(rep.code, 200, JSON.stringify(rep.corps));
+  assert.strictEqual(rep.corps.issue, 'encaissement');
+  // LA ROUTE PAIE LA SACOCHE QUE LE REJEU A TROUVÉE, pas la mise inscrite sur le billet.
+  assert.strictEqual(rep.corps.purseCents, partie.rapport.purseCents);
+  assert.notStrictEqual(rep.corps.purseCents, b.corps.stakeCents);
+  assert.strictEqual(rep.corps.grossCents, rep.corps.purseCents);
+  assert.strictEqual(rep.corps.netCents, C.cashoutCents(rep.corps.purseCents).netCents);
+  assert.strictEqual(rep.corps.feeCents + rep.corps.netCents, rep.corps.grossCents);
+  // Et la ligne qui tue explicitement le plafonnement à une mise : payer `min(sacoche, mise)`
+  // rendrait exactement le net d'une mise, et ce test-là serait le seul à le voir.
+  assert.ok(rep.corps.netCents > C.cashoutCents(b.corps.stakeCents).netCents,
+    'le paiement ne dépasse pas une mise : la sacoche du rejeu n\'est pas ce qui décide');
+  assert.strictEqual(db.matches[0].net_cents, rep.corps.netCents);
+  assert.strictEqual(db.matches[0].purse_cents, partie.rapport.purseCents);
+  // La sacoche reste sous le plafond démontré par la conservation de l'argent : ce n'est pas parce
+  // qu'elle n'est plus la mise qu'elle n'est plus bornée.
+  assert.ok(rep.corps.purseCents <= C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents);
 });
 await test('le même billet réglé deux fois rend le PREMIER verdict, sans rien modifier', async () => {
   const { db, app, horloge } = bancDeBillet();
@@ -1570,7 +1756,11 @@ test('LE REJEU DU SERVEUR ET CELUI DU JEU RENDENT LA MÊME EMPREINTE — c\'est 
   const texte = traceDe(C, 4000, { actes: 137 }).texte();
   const serveur = empreinteDe(C, SIM, texte);
   const navigateur = empreinteDe(NAVIGATEUR.C, NAVIGATEUR.S, texte);
-  assert.strictEqual(serveur.pas, 4000);
+  // Le compte à rebours d'intro est posé par `newMatch` des DEUX côtés, et il consomme ses pas sans
+  // faire avancer `G.pas` : c'est exactement ce que le serveur doit reposer, sinon il rejouerait
+  // ces pas-là pour de vrai et jugerait une autre partie que celle qui s'est affichée.
+  assert.strictEqual(serveur.pas, 4000 - PAS_INTRO);
+  assert.ok(PAS_INTRO > 0, 'le décompte d\'intro a disparu de newMatch : le rejeu du serveur dérive');
   assert.deepStrictEqual(serveur, navigateur, 'les deux chargements ne rejouent pas la même partie');
   // Et la partie rejouée a VÉCU : sans ces bornes, deux parties vides rendraient aussi la même
   // empreinte, et le test passerait sur un bloc à moitié chargé.
@@ -1669,12 +1859,88 @@ await test('IDEMPOTENCE : le même segment deux fois n\'écrit qu\'une ligne, et
   assert.strictEqual(JSON.stringify(db.traces), lignes, 'la table a bougé au rejeu');
   // Et un segment DIFFÉRENT sous le même rang ne remplace rien : premier écrit gagne. Sans cela, un
   // client pourrait réécrire sa trace après coup, ce qui la viderait de toute valeur de preuve.
+  //
+  // IL EST DÉSORMAIS REFUSÉ, ET NOMMÉ, au lieu d'être avalé en silence. Avalé, il permettait de
+  // COUDRE deux parties bout à bout : le segment 0 d'une tentative et les segments suivants d'une
+  // autre se recollaient en une partie que personne n'a jouée, et le serveur écrivait un montant
+  // dessus. Le premier écrit gagne toujours — la ligne posée ne bouge pas d'un caractère — mais le
+  // client apprend enfin que son segment n'a pas été pris.
   const menteur = await envoyerTrace(app, b.corps.id, SEGMENT({ data: traceDe(C, 120, { graine: 9 }).texte() }));
-  assert.strictEqual(menteur.code, 200);
+  assert.strictEqual(menteur.code, 409, JSON.stringify(menteur.corps));
+  assert.strictEqual(menteur.corps.code, 'trace_divergente');
   assert.strictEqual(db.traces.length, 1);
   assert.strictEqual(db.traces[0].data, TEXTE, 'la première trace a été réécrite');
   assert.strictEqual(db.traces[0].steps, 400);
-  assert.deepStrictEqual(menteur.corps, un.corps);
+});
+await test('UN SEGMENT D\'ACTES SEULS EST ACCEPTÉ : sans lui, l\'acte terminal n\'arrive jamais', async () => {
+  // LE DÉFAUT. La route refusait tout segment dont le décompte de pas était nul (`!lu.pas`). Or le
+  // découpage coupe au JETON, et un jeton d'action ponctuelle ne compte aucun pas : quand la
+  // frontière des 24 000 caractères tombe juste avant le dernier geste, le segment de queue ne
+  // porte que l'abandon ou l'encaissement. L'envoi s'arrêtant au premier refus, l'acte terminal
+  // n'arrivait jamais, le rejeu s'arrêtait avant la fin et la route répondait `non_terminal` :
+  // aucun montant, billet laissé au veilleur, sur une partie parfaitement honnête.
+  const { db, app, horloge } = bancDeBillet();
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  // Une vraie partie qui se termine par un encaissement, découpée À LA MAIN sur la frontière : le
+  // dernier jeton part seul, exactement comme `segments()` le ferait si la coupe tombait là.
+  const p = partieDe(b, { encaisser: 300 });
+  const texte = p.segments.join('');
+  const coupe = texte.lastIndexOf('!');
+  assert.ok(coupe > 0, 'la partie du test ne finit pas sur un jeton d\'acte');
+  const plein = texte.slice(0, coupe), queue = texte.slice(coupe);
+  assert.strictEqual(C.traceDecode(queue).pas, 0, 'le segment de queue porte des pas : le cas n\'est pas celui-là');
+
+  const un = await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: plein });
+  assert.strictEqual(un.code, 200, JSON.stringify(un.corps));
+  const deux = await envoyerTrace(app, b.corps.id, { seq: 1, simVersion: SIM.SIM_VERSION, data: queue });
+  assert.strictEqual(deux.code, 200, JSON.stringify(deux.corps));
+  assert.strictEqual(db.traces[1].steps, 0, 'la ligne doit s\'écrire avec zéro pas, et la colonne l\'accepter');
+  assert.strictEqual(deux.corps.totalSteps, p.pas);
+
+  // ET LE RÈGLEMENT ATTEINT BIEN UN ÉTAT TERMINAL. C'est la conséquence, et c'est elle qui compte :
+  // sans le second segment, le rejeu s'arrêtait avant l'encaissement et refusait en `non_terminal`.
+  horloge.t = ARRIVEE(p.rapport);
+  const r = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/result`,
+                               token: 'ok:u1:Loic', body: p.rapport });
+  assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+  assert.strictEqual(r.corps.issue, 'encaissement');
+  assert.ok(r.corps.netCents > 0, 'la partie n\'a rien payé');
+  // La contre-épreuve : le même dossier SANS la queue ne se règle pas, et le refus se nomme.
+  const sans = bancDeBillet();
+  const b2 = await demander(sans.app, { ...DEMANDE, mode: 'resurgence' });
+  await envoyerTrace(sans.app, b2.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: plein });
+  sans.horloge.t = Date.parse(b2.corps.openedAt) + (C.LOBBY.wait + p.rapport.seconds + 3) * 1000;
+  const rr = await appel(sans.app, { method: 'POST', path: `/api/match/${b2.corps.id}/result`,
+                                     token: 'ok:u1:Loic', body: p.rapport });
+  assert.strictEqual(rr.code, 409, JSON.stringify(rr.corps));
+  assert.strictEqual(rr.corps.code, 'non_terminal');
+});
+await test('DEUX TENTATIVES NE SE COUSENT PAS : un rang déjà posé qui change de données est refusé', async () => {
+  // La seconde moitié du même défaut, et la plus vicieuse parce qu'elle arrive sans mauvaise
+  // volonté : le premier segment passe, le second échoue, la tentative suivante renvoie son seq 0
+  // que `on conflict do nothing` avalait en silence, et ses segments 1..n s'ajoutaient derrière le
+  // segment 0 de la tentative précédente. Le serveur rejouait alors une partie RECOLLÉE de deux
+  // parties différentes — soit `non_terminal` pour toujours, soit un montant écrit sur une partie
+  // que personne n'a jouée.
+  const { db, app } = bancDeBillet();
+  const b = await demander(app);
+  const A = [traceDe(C, 400).texte(), traceDe(C, 300, { graine: 11 }).texte()];
+  const B = [traceDe(C, 400, { graine: 22 }).texte(), traceDe(C, 300, { graine: 33 }).texte()];
+  assert.notStrictEqual(A[0], B[0]);
+  assert.strictEqual((await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: A[0] })).code, 200);
+  // La tentative suivante repart de son propre seq 0 : c'est là que la couture se ferait.
+  const collision = await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: B[0] });
+  assert.strictEqual(collision.code, 409, JSON.stringify(collision.corps));
+  assert.strictEqual(collision.corps.code, 'trace_divergente');
+  // Le premier écrit gagne toujours — la ligne posée n'a pas bougé d'un caractère — mais le client
+  // l'apprend, et son envoi s'arrête là au lieu de coudre la suite derrière.
+  assert.strictEqual(db.traces.length, 1);
+  assert.strictEqual(db.traces[0].data, A[0]);
+  // Renvoyer le MÊME segment reste parfaitement idempotent : c'est la même tentative.
+  assert.strictEqual((await envoyerTrace(app, b.corps.id, { seq: 0, simVersion: SIM.SIM_VERSION, data: A[0] })).code, 200);
+  assert.strictEqual(db.traces.length, 1);
+  // Et la trace refusée n'a rien touché du billet : cette route n'écrit jamais dans `matches`.
+  assert.strictEqual(db.matches[0].status, 'open');
 });
 await test('une partie complète tient en UN À TROIS segments, qui se recollent et s\'additionnent', async () => {
   const { db, app } = bancDeBillet();

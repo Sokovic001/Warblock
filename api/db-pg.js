@@ -7,7 +7,7 @@ const COLS = 'id, auth_id, email, name, name_key, avatar, country, created_at';
 // La graine secrète est LUE ici — c'est la seule colonne de cette liste qui ne doit jamais
 // traverser le réseau. C'est `app.js` qui la retire, par sa liste blanche `billet()`.
 const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret, ' +
-                   'sim_version, client_key, status, opened_at, expires_at, ' +
+                   'sim_version, client_key, status, first_result_at, opened_at, expires_at, ' +
                    // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
                    'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
                    'purse_cents, declared_net_cents, ecart_cents, ' +
@@ -184,21 +184,26 @@ function pgDb(connectionString) {
             [m.userId, m.clientKey]);
           if (rejeu.rows[0]) return { match: ligneMatch(rejeu.rows[0]), repris: true };
 
-          // Sinon c'est un billet déjà ouvert. Encore valable, on le rend : une déconnexion ou un
-          // onglet rouvert ne doit pas produire une seconde partie. La clé du client n'est alors
-          // écrite nulle part — c'est la limite connue, décrite dans le README : rejouée après
-          // l'expiration de ce billet-là, elle en ouvrira un nouveau.
+          // Sinon c'est un billet déjà ouvert. Encore valable ET JAMAIS JOUÉ, on le rend : une
+          // déconnexion ou un onglet rouvert ne doit pas produire une seconde partie. La clé du
+          // client n'est alors écrite nulle part — c'est la limite connue, décrite dans le README :
+          // rejouée après l'expiration de ce billet-là, elle en ouvrira un nouveau.
           const ouvert = await client.query(
             `select ${MATCH_COLS} from matches where user_id = $1 and status = 'open'`, [m.userId]);
           if (!ouvert.rows[0]) continue;
-          if (new Date(ouvert.rows[0].expires_at) > m.openedAt)
+          const vivant = new Date(ouvert.rows[0].expires_at) > m.openedAt;
+          // UN BILLET NE SERT QU'UNE TENTATIVE. Toute la partie est une fonction pure de
+          // `seed_public` : le resservir, c'est resservir le même monde à quelqu'un qui vient de
+          // l'explorer. Dès qu'un résultat a été rendu dessus — réglé ou refusé — il est clos sans
+          // montant et le joueur en reçoit un neuf, donc une graine neuve.
+          if (vivant && !ouvert.rows[0].first_result_at)
             return { match: ligneMatch(ouvert.rows[0]), repris: true };
 
-          // Périmé : on le clôt, et la place se libère pour le billet suivant. Le seul `update` de
-          // cette table, et il ne touche qu'un statut — jamais un montant.
+          // Périmé, ou déjà joué : on le clôt, et la place se libère pour le billet suivant. Ces
+          // `update` ne touchent qu'un statut — jamais un montant.
           await client.query(
-            `update matches set status = 'expired' where id = $1 and status = 'open'`,
-            [ouvert.rows[0].id]);
+            `update matches set status = $2 where id = $1 and status = 'open'`,
+            [ouvert.rows[0].id, vivant ? 'abandoned' : 'expired']);
         }
         throw new Error('impossible d\'ouvrir un billet : la place ne se libère pas');
       } finally {
@@ -214,6 +219,25 @@ function pgDb(connectionString) {
         const r = await client.query(
           `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [matchId, userId]);
         return ligneMatch(r.rows[0]) || null;
+      } finally {
+        client.release();
+      }
+    },
+
+    // MARQUER QU'UNE PARTIE A ÉTÉ JOUÉE SUR CE BILLET. Écriture de STATUT, jamais de montant : la
+    // clause porte `status = 'open'` comme toutes les autres écritures de cette table, plus
+    // `first_result_at is null` — la marque se pose UNE fois, donc un résultat renvoyé ne modifie
+    // pas la ligne et l'idempotence de la route reste totale. C'est elle qui interdit qu'un billet
+    // — donc une graine, donc un monde entier — resserve à une SECONDE partie.
+    async markPlayed({ matchId, userId, at }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `update matches set first_result_at = $3
+             where id = $1 and user_id = $2 and status = 'open' and first_result_at is null
+           returning first_result_at`,
+          [matchId, userId, at]);
+        return { marque: !!r.rows[0] };
       } finally {
         client.release();
       }
@@ -270,9 +294,17 @@ function pgDb(connectionString) {
       const client = await pool.connect();
       try {
         const vus = await client.query(
-          'select seq, steps from match_traces where match_id = $1', [matchId]);
-        const deja = vus.rows.some(r => Number(r.seq) === seq);
+          'select seq, steps, data from match_traces where match_id = $1', [matchId]);
+        const meme = vus.rows.find(r => Number(r.seq) === seq);
         const avant = vus.rows.reduce((s, r) => s + Number(r.steps), 0);
+        // UN RANG DÉJÀ POSÉ DONT LES DONNÉES DIFFÈRENT EST REFUSÉ, ET NOMMÉ. Le premier écrit gagne
+        // — c'est la doctrine de cette table et elle ne bouge pas — mais l'avaler en silence
+        // permettait de COUDRE deux parties bout à bout : le segment 0 d'une tentative et les
+        // segments suivants d'une autre se recollaient en une partie que personne n'a jouée. Un
+        // renvoi à l'identique, lui, reste parfaitement idempotent.
+        if (meme && meme.data !== data)
+          return { refuse: 'divergente', segments: vus.rows.length, totalSteps: avant };
+        const deja = !!meme;
         if (!deja && avant + steps > maxSteps)
           return { refuse: 'trop_de_pas', segments: vus.rows.length, totalSteps: avant };
         await client.query(

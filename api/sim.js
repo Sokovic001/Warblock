@@ -36,7 +36,12 @@ const ATTENDUS = ['SIM_VERSION', 'EMPREINTE_PAS', 'newMatch', 'step', 'drainer',
                   // comme faits, et l'argent qu'elle porte encore. Trois règles du jeu, chargées
                   // depuis le jeu — les recopier ici en ferait une seconde version, qui finirait
                   // par juger une autre partie que celle que le joueur a vue.
-                  'terminal', 'faits', 'argentCents'];
+                  'terminal', 'faits', 'argentCents',
+                  // L'abandon est une primitive de SIM et pas un geste de l'interface : le bouton
+                  // QUITTER se presse aussi pendant les cinq secondes de réapparition, où `kill`
+                  // sort sur `!alive`. Sans elle, le jeton `QUIT` de la trace ne reproduisait pas
+                  // l'abandon d'un mort, et le rejeu n'atteignait jamais d'état terminal.
+                  'abandon'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBSim n'exporte plus ${nom}.`);
 }

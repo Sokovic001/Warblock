@@ -50,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 365 tests sur le jeu (`node test.js`) et
-  128 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 369 tests sur le jeu (`node test.js`) et
+  134 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -183,7 +183,10 @@ porte : le reste a besoin d'un navigateur pour tourner.
   patron que `seats` et `team_size`, et même test — un corps qui la porte écrit une ligne strictement
   identique à celle d'un corps minimal.
 - **`match_traces` est en insertion seule** : clé primaire `(match_id, seq)`, `on conflict do
-  nothing`, premier écrit gagne, aucun `update`, aucun `delete`. `MAX_BODY` reste à 4 Ko sur toutes
+  nothing`, premier écrit gagne, aucun `update`, aucun `delete` — mais un rang déjà posé dont les
+  données diffèrent est **refusé et nommé**, jamais avalé. Un segment ne portant que des jetons
+  d'acte est **accepté** (`steps >= 0`) : le découpage coupe au jeton, et un acte ne compte aucun
+  pas — le refuser coupait l'envoi juste avant la fin de la partie. `MAX_BODY` reste à 4 Ko sur toutes
   les routes ; la borne large, `MAX_TRACE_BODY`, ne vaut que sur la route de trace, qui n'écrit
   jamais dans `matches` — c'est ce qui rend structurellement impossible qu'une trace refusée laisse
   un billet bloqué.
@@ -197,9 +200,26 @@ porte : le reste a besoin d'un navigateur pour tourner.
   au veilleur. Testé sur une trace terminale et chacun de ses préfixes : `net(préfixe) ≤
   net(complète)`, et `net = 0` sans fin. Sans cette règle, couper le réseau après un gros kill
   serait la meilleure stratégie du jeu.
-- **`terminal`, `faits` et `argentCents` vivent dans `WBSim`**, pas dans l'API : le jeu, le harnais
-  de test et le serveur doivent avoir exactement une idée de ce qu'est une partie finie et de ce
-  qu'elle rend. Trois copies auraient fini par juger une autre partie que celle que l'écran affiche.
+- **`terminal`, `faits`, `argentCents`, `abandon` et le compte à rebours d'intro vivent dans
+  `WBSim`**, pas dans le bloc `Game` ni dans l'API : le jeu, le harnais de test et le serveur
+  doivent avoir exactement une idée de ce qu'est une partie finie et de ce qu'elle rend. Le
+  décompte, lui, décide du **coup d'envoi** : il est posé par `newMatch`, et le bloc `Game` ne fait
+  plus que le lire pour la bannière. Écrit d'un seul côté, le serveur rejouait en pas RÉELS les
+  240 pas que le navigateur avait passés à décompter, et `digest_match` était faux sur toute partie
+  réellement jouée. `abandon(G)` existe pour la même raison : QUITTER se presse aussi pendant la
+  réapparition, et `kill` sort sur `!alive` — la partie n'atteignait alors aucun état terminal.
+- **Le harnais de `test.js` est une SECONDE OPINION, pas une récitation.** Ses faits se dérivent du
+  flux d'événements et de l'état, jamais des expressions de `WBSim.faits` : la comparaison sur les
+  cinquante parties était vraie par construction tant qu'elle recopiait `G.survivedT||G.time` et
+  `f.rang`. Une exception écrite : `damage` est plafonné à la vie restante de la cible, que
+  l'événement ne porte pas — le test compare alors ce qu'il peut, et le dit.
+- **Un billet ne sert qu'UNE tentative.** La partie est une fonction pure de la graine publique,
+  donc un billet resservi est le même monde ; bloquer l'envoi de sa trace suffisait à se le faire
+  resservir et à répéter la partie payante. `first_result_at` est posée au premier résultat, quelle
+  qu'en soit l'issue, et `POST /api/match` clôt alors le billet sans montant (`abandoned`) plutôt
+  que de le rendre. Renvoyer une trace perdue puis son résultat sur le **même** `match_id` reste
+  possible : c'est le but. Et deux tentatives ne se cousent pas — un `seq` déjà posé dont les
+  données diffèrent sort en 409 `trace_divergente` au lieu d'être avalé en silence.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Une divergence est mesurée, jamais punie.** La ligne est réglée et payée, marquée
