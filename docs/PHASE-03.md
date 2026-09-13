@@ -201,6 +201,15 @@ Le refus est un **`409` nommé `fonds`**, qui n'écrit ni billet ni écriture. P
 et `api/README.md` documentent huit refus nommés, « tous en 400 ou 409, aucun en 500 », et un `402`
 ouvrirait une neuvième famille pour rien — il parle par ailleurs de payer l'API, pas la table.
 
+*Ajout du module 3 : il y a un DIXIÈME refus, et il n'était pas nommé ici.* L'écrivain du grand livre
+n'a volontairement aucun `on conflict do nothing` — un doublon veut dire qu'on paie deux fois, donc
+l'appelant doit l'apprendre — et le module 2 a explicitement renvoyé au module 3 la traduction de ce
+`23505`. Laisser remonter l'exception aurait fait un 500 sur la route de l'argent, c'est-à-dire
+exactement ce que ce document interdit trois fois. Le refus s'appelle donc **`livre`**, il est en
+`409` comme les autres, il couvre aussi le découvert refusé, et il garantit la même chose que
+`fonds` : la transaction est annulée en entier, rien n'a été écrit, et la ligne repart dans l'état
+où elle était.
+
 Et la leçon du `22003` vaut ici plus qu'ailleurs : un joueur n'a qu'un billet ouvert à la fois, donc
 un 500 qui laisse une ligne à demi écrite l'enferme jusqu'à l'expiration, mise débitée.
 
@@ -315,6 +324,16 @@ connu. En crédits fictifs, retenir ne coûte rien à personne.
 
 `GET /api/me` rend les deux montants **séparément**, et aucun agrégat convergé n'en compte un
 centime.
+
+*Précision apportée par le module 3, parce que deux phrases de ce document ne disaient pas tout à
+fait la même chose.* Le règlement envoie le net en quarantaine dès que `digest_match` n'est pas
+**vrai** — donc faux **ou nul** — tandis que `ledgerReconcile` ne tient pour divergente qu'une ligne
+à `digest_match === false`. Les deux ne peuvent pas se contredire, et il faut écrire pourquoi plutôt
+que de compter dessus : `digest_match` ne vaut `NULL` que sur une ligne close **sans rejeu** — un
+billet périmé jugé sans être rejoué — et une telle ligne a toujours un net **nul**, donc aucune jambe
+ne touche un compte de joueur. Le jour où un chemin produirait un net non nul sans rejeu, ce serait
+ce chemin-là qu'il faudrait corriger, pas l'un des deux prédicats : payer sans avoir rejoué est
+précisément ce que la 02b existe pour interdire.
 
 ### Aucune correction par `update` ni par `delete` : la contre-passation
 

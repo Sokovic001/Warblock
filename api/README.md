@@ -14,11 +14,11 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | Route | Ce qu'elle fait |
 |---|---|
 | `GET /api/health` | Répond `{ ok: true }`. Pour la surveillance. |
-| `GET /api/me` | Rend le profil du joueur connecté, **statistiques agrégées** comprises. La première connexion crée le compte. |
+| `GET /api/me` | Rend le profil du joueur connecté, **statistiques agrégées** et **deux montants du grand livre** compris. La première connexion crée le compte, le **dote**, et le **recharge** s'il est sous le plancher. |
 | `PATCH /api/me` | Change le pseudo, l'avatar ou le pays. Rien d'autre n'est modifiable. |
-| `POST /api/match` | Émet le **billet** d'une partie : graines, mise en centimes, sièges, version de simulation, expiration. |
+| `POST /api/match` | Émet le **billet** d'une partie — graines, mise en centimes, sièges, version de simulation, expiration — **et débite la mise**, dans la même transaction. |
 | `POST /api/match/:id/trace` | Reçoit la **trace des entrées du joueur**, en segments, en insertion seule. |
-| `POST /api/match/:id/result` | **Rejoue la partie**, recalcule les faits, juge, et **clôt** la ligne. |
+| `POST /api/match/:id/result` | **Rejoue la partie**, recalcule les faits, juge, **clôt** la ligne et **écrit le gain**, dans la même transaction. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
 
@@ -29,7 +29,9 @@ son mode et son brawler, **et rien d'autre**.
 
 ```
 POST /api/match      { mode, stake, brawler, clientKey }
-→ 200                { id, mode, stakeCents, seats, teamSize, brawler, seed, status, openedAt, expiresAt }
+→ 200                { id, mode, stakeCents, seats, teamSize, brawler, seed, status, openedAt, expiresAt,
+                       balanceCents, quarantineCents }
+→ 409                { erreur, code: 'fonds', balanceCents, quarantineCents, requiredCents }
 ```
 
 - `mode` est une clé de `WBCore.MODES`, `stake` la mise **en dollars telle qu'elle est affichée** et
@@ -127,6 +129,9 @@ volontairement : on ne fait que les recopier.
 
 **Aucune colonne solde, ici comme ailleurs.** `stake_cents` est une mise engagée, pas de l'argent
 détenu. La ligne s'insère puis se règle **une fois**, par la route ci-dessous.
+
+**Depuis la phase 03, cette route DÉBITE.** Le détail est plus bas, avec le verrou, le refus
+`409 fonds` et les deux montants rendus avec le billet.
 
 ## `POST /api/match/:id/trace` — la trace des entrées du joueur
 
@@ -438,6 +443,12 @@ second rapport ment sur tout. Une garde textuelle vérifie que toute écriture d
 **Un résultat en retard est accepté tant que le billet n'a pas expiré.** Si couper le wifi
 effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
 
+**Depuis la phase 03, la même transaction écrit le GAIN.** La ligne et ses transferts naissent
+ensemble ou pas du tout, sous verrou de la ligne `matches`. Trois protections se recouvrent sur
+l'unicité du crédit, et c'est voulu — la première qui tombe n'ouvre rien : la clause `where`
+ci-dessus, la clé unique du grand livre, et le séquestre vidé qu'un second gain devrait débiter.
+Détail complet plus bas, avec la quarantaine et le refus `409 livre`.
+
 ### Ce qu'il faut écrire sans l'enrober
 
 - **Aucun euro n'entre au bout de cette phase.** Le vol de *temps* devient impossible, le vol de
@@ -457,7 +468,10 @@ effaçait une partie perdue, ce serait la meilleure stratégie du jeu.
 Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — resteraient
 ouverts pour toujours, et un joueur n'a qu'un billet ouvert à la fois. `app.veiller()` les clôt, et
 **eux seuls** : sa clause porte `status = 'open'` et l'expiration, il n'écrit aucun montant, et il
-prend son heure du même endroit que le reste du routeur. `main.js` l'appelle chaque minute. C'est
+prend son heure du même endroit que le reste du routeur. *Cette dernière phrase a une date de
+péremption écrite : la phase 03 la contredit, et c'est un revirement assumé — à l'expiration, le
+séquestre doit être vidé. Le module 4 réécrit le veilleur et ce paragraphe. Au module 3, un billet
+clos par `createMatch` vide bien son séquestre ; un billet clos par le veilleur, pas encore.* `main.js` l'appelle chaque minute. C'est
 du code qui manipulera de l'argent et que personne ne regarde tourner : il se teste comme le
 reste, horloge injectée, sans attendre.
 
@@ -575,6 +589,11 @@ rouvert la liste fermée pour rien.
 ensemble et les répartit. Une garde textuelle interdit à son texte de contenir `RAKE`, `0.2`,
 `Math.ceil`, `/ 100`, `toFixed` ou le moindre `require`.
 
+**Trois montants y vivent aussi**, et ils y sont pour la même raison que les motifs : ce ne sont pas
+des règles du **jeu**, mais ce sont bien des règles du grand livre. `DOTATION_CENTS` (5 000),
+`PLANCHER_CENTS` (500) et `RECHARGE_CENTS` (1 000) — leur raison est écrite plus bas, avec la route
+qui les dépense.
+
 **Le découvert est une règle uniforme**, et deux comptes seulement en sont exemptés :
 `COMPTES_EMETTEURS` = `maison:dotation` et `maison:contrepartie`, dont le solde négatif **est** la
 mesure qu'on cherche. Les séquestres n'en font pas partie, et c'est tout l'intérêt : un second gain
@@ -668,6 +687,172 @@ c'est un `bigint`, donc une chaîne, et un solde parti en texte ferait comparer 
 caractère par caractère — le refus de découvert laisserait passer exactement ce qu'il existe pour
 arrêter.
 
+## Le grand livre en ligne — dotation, débit, règlement, quarantaine
+
+Phase 03, module 3. Le livre cesse d'être une table que personne n'écrit : les routes l'écrivent.
+Trois moments, trois mouvements, et **aucun d'eux n'est déclenchable par le client**.
+
+### La dotation et la recharge, écrites par le serveur
+
+Un compte neuf reçoit `DOTATION_CENTS` — **5 000 centimes**, c'est-à-dire exactement le portefeuille
+de démonstration hors ligne, `WBCore.START_WALLET`. Cette phase fait apparaître **deux économies sur
+le même écran**, et les faire partir de deux nombres différents ferait prendre la première connexion
+pour un bug. `api/ledger.js` doit rester pur, donc il ne charge pas `WBCore` : le nombre y est écrit,
+et un test **confronte** les deux écritures au lieu de les faire se croire.
+
+Le mouvement est `maison:dotation → joueur:<id>:disponible`, idempotent sur `(dotation, <user_id>)`,
+écrit **dans la même transaction que la création du compte**. Les deux réussissent ou échouent
+ensemble : un compte sans dotation serait un joueur qui ne peut rien faire, et que rien ne
+réparerait puisqu'il ne sera plus jamais créé.
+
+**Une dotation unique laissait un cul-de-sac que la conception initiale ne nommait pas.** Le bouton
+« + reload demo credits » disparaît en ligne : un joueur qui épuise ses crédits ne peut donc **plus
+jamais jouer**, à vie, après une centaine de parties à 0,50 $. Ce n'est pas un détail de confort,
+c'est la fin de la boucle de jeu. La **recharge** referme cela sans créer la route de crédit gratuit
+qu'on refuse par ailleurs :
+
+- elle est idempotente sur `(recharge, <user_id>:<AAAA-MM-JJ>)` — une par joueur et par jour ;
+- le jour se compte **en UTC**, parce que deux instances déployées dans deux régions basculeraient
+  sinon à deux heures différentes, et « une par jour » deviendrait « une ou deux selon le serveur
+  qui répond ». L'heure vient de l'horloge **injectée** dans `createApp()`, donc la règle se teste
+  sans attendre minuit ;
+- elle ne s'écrit **que si le solde dépensable est au-dessous** de `PLANCHER_CENTS` (500 c, dix
+  parties de la table la moins chère). « Au-dessous », pas « au plus » : un test le tient ;
+- elle vaut `RECHARGE_CENTS` (1 000 c, vingt parties de cette même table). Assez pour que la boucle
+  ne se ferme jamais, trop peu pour être un revenu qu'on récolte ;
+- elle est écrite **au moment de la connexion**, par `findOrCreate`, et par personne d'autre.
+
+**Il n'existe aucune route `POST /api/credits`.** Une route de frappe de monnaie appelable par le
+client est exactement ce qu'on refuse, et une garde textuelle vérifie qu'aucune n'est apparue.
+
+Le contrôle « suis-je sous le plancher ? » est une **somme**, qu'aucune contrainte déclarative ne
+sait exprimer : `findOrCreate` prend donc le même verrou de ligne que l'ouverture d'un billet avant
+de lire puis d'écrire. Sans lui, deux onglets écriraient deux recharges. Avec lui, la relecture
+préalable est exacte au lieu d'être une fenêtre — et elle est nécessaire, parce que l'écrivain du
+livre **refuse** un doublon au lieu de l'avaler : un joueur qui repasse sous le plancher le même jour
+est un cas normal, et il ne doit pas faire échouer sa propre connexion.
+
+### La mise est débitée à l'OUVERTURE, sous verrou, dans une seule transaction
+
+Le seul instant que le serveur observe **sans dépendre du client** est celui où il émet le billet.
+Débiter au coup d'envoi laisserait jouer gratuitement qui ne l'annonce jamais ; compenser à la fin
+laisserait jouer gratuitement qui ne rend jamais de résultat. `createMatch` n'est donc plus la boucle
+en validation automatique de la 02a : **toute** la boucle est dans une transaction, chemin `repris`
+et libération du billet périmé compris.
+
+**Le verrou est pris en tête de transaction, avant que la somme ne soit calculée** :
+
+```sql
+select id from users where id = $1 for update
+```
+
+Il n'y a pas de table des comptes — c'est tout l'intérêt du grand livre — donc on ne peut pas
+verrouiller « la ligne du compte » : on verrouille la seule ligne qui existe par joueur. Sans lui,
+deux onglets qui ouvrent un billet en même temps lisent tous deux un solde de 50, débitent tous deux
+50, et **aucun `check` de colonne ne peut voir une somme d'autres lignes**.
+
+**C'est le premier verrou explicite du dépôt, et la doublure d'`api/test.js` ne peut pas le
+prouver.** Un mono-fil JavaScript sérialise gratuitement ce que Postgres ne sérialise que si on le
+lui demande bien : un verrou éprouvé en série ne prouve rien. Seul `api/db-check.js` l'éprouve, avec
+deux connexions réelles, en **observant l'attente** et avec un contrôle sur un autre joueur.
+
+Trois conséquences, toutes testées :
+
+- **Le chemin `repris` n'écrit jamais une seconde mise.** C'est le vol le plus facile de la phase —
+  un `POST` rejoué qui débite deux fois — et il vaut pour les deux formes de reprise : la même
+  `clientKey`, et une clé différente sur un billet déjà ouvert (l'index partiel refuse l'insertion).
+- **Un solde insuffisant sort en `409` avec le code nommé `fonds`**, et il ne laisse **ni billet ni
+  écriture** : la transaction est annulée, y compris la clôture du billet périmé qu'elle avait
+  entamée. Pas un `402` — la doctrine du dossier est « des refus nommés, tous en 400 ou 409, aucun
+  en 500 », et un `402` parle de payer l'API, pas la table. Le joueur peut redemander une partie
+  juste après : rien ne l'enferme, et c'est la leçon du `22003` transposée sur le chemin de l'argent.
+- **Un billet clos par `createMatch` vide son séquestre** vers `maison:contrepartie`, dans la même
+  transaction. Sans cela, l'invariant « `solde(enjeu:<match>) = 0` sur toute ligne close » tomberait
+  sur le chemin le plus banal de l'API. Le joueur n'est pas remboursé : la mise rentre chez la
+  maison. *Ce que ce module ne fait pas : le veilleur, qui clôt les billets que personne ne termine,
+  n'écrit toujours aucun montant — c'est le revirement du module 4.*
+
+### Le règlement écrit la ligne et le gain dans la même transaction
+
+`settleMatch` prend le verrou sur la ligne de la partie — `select id from matches where id = $1 for
+update` — puis écrit le règlement, puis les transferts. Les montants viennent de **la ligne qu'on
+vient d'écrire**, donc de `WBCore.cashoutCents` par `matchVerdict` : l'API ne recalcule jamais la
+commission, pas même « juste pour vérifier », et ce qui est crédité est exactement le `net_cents`
+que la base porte.
+
+Le mouvement est celui de `ledger.js`, reliquat compris, et le gain part sur
+`joueur:<id>:quarantaine` **si le rejeu a divergé** — seul `digest_match === true` est une
+convergence. Une ligne **refusée** ou **périmée** ne crédite rien et vide **quand même** son
+séquestre : c'est `mouvementGain` avec un brut nul, un seul transfert. Aucun séquestre ne reste
+habité.
+
+**Vider et régler sont la même opération comptable**, donc une seule fonction, `reglerSequestre`, et
+une seule entrée dans la liste des appelants autorisés de l'écrivain du livre. Elle passe au
+mouvement **ce que le séquestre porte**, pas ce que la ligne annonce : le mouvement est ainsi garanti
+de le vider jusqu'au dernier centime, et confronter les deux nombres est le travail de
+`ledgerReconcile`.
+
+**La frontière avec la 02a se constate ici, et elle n'est pas une phrase.** Un séquestre vide veut
+dire que le livre n'a jamais engagé cette partie — une ligne écrite avant qu'il n'existe. On n'écrit
+alors **rien** : une ligne sans écriture de mise n'a jamais d'écriture de gain. Un test sème une
+ligne 02a dans la doublure et prouve qu'aucune écriture ne la touche, ni au règlement ni à la
+clôture.
+
+### Le découvert, et les deux refus que le livre peut opposer
+
+**Aucun compte ne passe en négatif**, sauf `maison:dotation` et `maison:contrepartie`. La règle est
+vérifiée dans `ledgerWrite` — l'écrivain unique, dans la transaction, après le verrou — sur l'**effet
+net** du mouvement compte par compte, et pas jambe par jambe : un règlement crédite le séquestre du
+reliquat avant de le vider, et l'ordre des lignes à l'intérieur d'une transaction ne veut rien dire.
+La poser chez l'appelant aurait protégé le chemin qui l'appelle, pas la donnée.
+
+Deux échecs du livre sont donc possibles, et **ni l'un ni l'autre ne sort en 500** :
+
+| Cause | Ce que la route rend |
+|---|---|
+| solde du joueur insuffisant, constaté avant d'écrire | `409` `fonds`, avec `balanceCents` et `requiredCents` |
+| `23505` (une jambe déjà posée) ou découvert refusé par l'écrivain | `409` `livre` |
+
+Dans les deux cas la transaction est annulée en entier : **un règlement interrompu au milieu ne
+laisse aucune écriture partielle**, la ligne repart `open` sans montant, et le joueur peut renvoyer
+son résultat sur le **même** billet tant qu'il vit. L'écrivain n'a volontairement aucun `on conflict
+do nothing` — un doublon veut dire qu'on paie deux fois, et l'appelant doit l'apprendre — donc c'est
+bien à l'appelant de le traduire en refus nommé.
+
+### Les deux montants rendus, et pourquoi ils sont séparés
+
+`GET /api/me` et `PATCH /api/me` rendent la **même** forme, et `POST /api/match` rend les deux
+montants **avec le billet, après le débit** : un aller-retour de moins pour le jeu, et surtout la
+parole du serveur plutôt qu'une soustraction faite dans le navigateur.
+
+- `balanceCents` — le solde **dépensable**, `solde(joueur:<id>:disponible)` ;
+- `quarantineCents` — ce qui vient d'une ligne dont le rejeu a **divergé** : visible, chiffré,
+  jamais dépensable.
+
+Les deux sont **lus par somme**, jamais dans une colonne : il n'existe nulle part de case à écraser.
+Ils restent en **centimes entiers** jusqu'au bout du réseau — c'est `applyAccount`, côté jeu, qui les
+repasse en dollars, en un seul point de conversion. Les additionner ferait de la quarantaine un
+solde, c'est-à-dire exactement ce qu'elle n'est pas ; les taire ferait disparaître de l'argent aux
+yeux du joueur. Aucun agrégat convergé n'en compte un centime, et un test le vérifie sur une ligne
+divergente réglée et payée.
+
+### Ce que les tests prouvent ici, et ce qu'ils ne prouvent pas
+
+Ils prouvent, contre la doublure : la dotation écrite une fois sur vingt connexions ; la recharge au
+plus une par jour et jamais au-dessus du plancher ; le `POST` rejoué qui ne débite pas deux fois ; le
+refus `fonds` qui ne laisse rien et n'enferme personne ; le solde **resommé depuis les écritures**
+égal à ce que `GET /api/me` rend ; un corps chargé de montants qui écrit exactement les mêmes
+écritures qu'un corps minimal ; le règlement rejoué qui crédite une fois ; le net crédité égal au
+`net_cents` de la ligne ; la quarantaine d'une ligne divergente ; le règlement interrompu qui ne
+laisse aucune écriture partielle ; la frontière avec la 02a. Plus **cinquante parties de bout en
+bout** — cinq modes, quatre tables, cinq statuts — où la somme globale du livre est vérifiée à
+**chaque étape** et où `ledgerReconcile` est appelé à la **fin de chaque scénario** : le zéro global
+reste vrai quand un montant juste est posé sur le mauvais compte, et c'est exactement ce que la
+réconciliation attrape.
+
+Ils **ne prouvent pas** le verrou. Ils ne peuvent pas : seul `api/db-check.js` le peut, et il n'a
+jamais tourné contre une base. **Un test qui passe contre la doublure prouve la doublure.**
+
 ## `db-check.js` — la vraie Postgres, et ce qui est livré est la RECETTE
 
 **Livrer un script n'est pas l'avoir lancé.** Ce qui est livré ici, c'est la recette : un script, un
@@ -709,14 +894,14 @@ dette est soldée : il permet d'écrire qu'elle a maintenant une recette.
 app.js              le routeur. Rien hors du cœur de Node, tout le reste lui est injecté.
 core.js             charge WBCore depuis index.html
 sim.js              charge WBSim depuis index.html — même chargeur, même garde bruyante
-ledger.js           le grand livre : grammaire, motifs, mouvements. PUR, aucune dépendance.
+ledger.js           le grand livre : grammaire, motifs, mouvements, montants. PUR, sans dépendance.
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             164 tests sans rien installer, 173 avec jose
+test.js             179 tests sans rien installer, 188 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -819,8 +1004,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 164 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 173 : les 164, plus la chaîne complète de vérification
+node api/test.js          # 179 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 188 : les 179, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
@@ -965,7 +1150,10 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   **paiement** dépend. **Faire tourner une vraie Postgres au moins une fois — ne serait-ce qu'à la
   main, `psql -f schema.sql` puis une partie de bout en bout — est désormais un PRÉREQUIS de la
   phase 03**, et c'est écrit comme tel ici et dans `docs/PHASE-02B.md`.
-  *Où en est cette dette au module 2 de la phase 03* : elle a maintenant une **recette** —
+  *Où en est cette dette au module 3 de la phase 03* : inchangée, et elle porte désormais un
+  **verrou de ligne** dont dépend le fait qu'un joueur ne puisse pas dépenser deux fois le même
+  solde. C'est la seule propriété du module 3 que `npm test` ne peut structurellement pas éprouver.
+  *Où en était-elle au module 2* : elle a une **recette** —
   `api/db-check.js`, qui applique le schéma à une vraie base et éprouve nommément chacune de ces
   contraintes, plus le job `db` de `.github/workflows/test.yml` qui le lance sur un service
   `postgres:16`. **Ce job n'a jamais été vert**, et la machine où le module a été écrit n'avait ni
@@ -984,7 +1172,16 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   l'architecture, et il est payé les yeux ouverts : avec des adversaires tous robots, la seule
   victime en est la maison, à chaque partie. **À ne jamais diluer.**
 - **`match_traces` n'a AUCUNE politique de conservation.** Combien de temps garde-t-on la pièce qui
-  prouve une partie, et qui a le droit de la relire : renvoyé à la phase 03.
+  prouve une partie, et qui a le droit de la relire : renvoyé au module 4 de la phase 03.
+- **Le veilleur ne vide pas encore les séquestres.** Un billet clos par `createMatch` — périmé ou
+  déjà joué — vide le sien ; un billet clos par `app.veiller()` laisse le sien habité. L'invariant
+  « aucun séquestre ne reste habité » n'est donc pas encore vrai partout, et c'est le mandat écrit
+  du module 4. Le statut `'renounced'` existe dans le schéma et n'est écrit par personne, pour la
+  même raison.
+- **Personne n'est habilité à contre-passer.** C'est le seul chemin de correction du grand livre, et
+  ni journal d'audit ni rôle d'administration n'existent : le premier incident réel se réglera à la
+  main dans `psql`, un dimanche soir, et c'est ce jour-là que la règle « aucun `update` » tombera. À
+  nommer avant la phase 04.
 - **Pas encore de journal d'audit.** Chaque changement de pseudo devra être tracé avant que des
   comptes ne valent de l'argent.
 - **Pas de suppression de compte.** À ajouter, avec ce que la juridiction retenue impose de

@@ -89,6 +89,35 @@ function exigeMotif(motif) {
   return motif;
 }
 
+// ---------- La dotation, la recharge, et le plancher ----------
+//
+// Trois entiers de centimes. Ils vivent ici pour la même raison que les motifs : ce ne sont pas des
+// règles du JEU — rien dans le navigateur ne décide de ce que la maison émet — mais ce sont bien des
+// règles du grand livre, et elles doivent se lire à côté des mouvements qui les dépensent.
+//
+// LA DOTATION vaut exactement le portefeuille de démonstration hors ligne, `WBCore.START_WALLET`.
+// Cette phase fait apparaître DEUX ÉCONOMIES SUR LE MÊME ÉCRAN — le portefeuille de démonstration
+// hors ligne, le solde du serveur en ligne — et les faire partir de deux nombres différents ferait
+// prendre la première connexion pour un bug. Ce fichier ne charge pas `WBCore` : il doit rester
+// pur, donc le nombre est écrit ici et un test d'`api/test.js` confronte les deux. C'est le patron
+// déjà employé pour l'expression des comptes et le texte de `schema.sql` — deux écritures de la
+// même règle se confrontent, elles ne se font pas confiance.
+const DOTATION_CENTS = 5000;
+
+// LE PLANCHER, ET POURQUOI LA RECHARGE EXISTE. Une dotation unique laisse un cul-de-sac : le bouton
+// « + reload demo credits » disparaît en ligne, donc un joueur qui épuise ses crédits ne peut PLUS
+// JAMAIS jouer, à vie. Ce n'est pas un détail de confort, c'est la fin de la boucle de jeu, et cela
+// arrive après une centaine de parties à 0,50 $.
+//
+// Le plancher est fixé à dix parties de la table la moins chère : au-dessous, le joueur est à
+// quelques défaites du cul-de-sac, et la recharge doit arriver AVANT lui, pas après. La recharge
+// elle-même vaut vingt parties de cette même table, une fois par jour et par joueur : assez pour
+// que la boucle ne se ferme jamais, trop peu pour que la recharge devienne un revenu qu'on récolte.
+// Ce n'est pas un revenu, c'est un plancher de jeu en crédits fictifs, et le seul chemin qui
+// l'écrit est le serveur au moment de la connexion — jamais une route que le client appelle.
+const PLANCHER_CENTS = 500;
+const RECHARGE_CENTS = 1000;
+
 // ---------- Le découvert ----------
 //
 // Aucun compte ne passe en négatif, sauf ces deux-là : un compte d'ÉMISSION et un compte de
@@ -389,6 +418,7 @@ module.exports = {
   compteJoueur, compteQuarantaine, compteEnjeu,
   MAISON_DOTATION, MAISON_COMMISSION, MAISON_CONTREPARTIE,
   MOTIFS, exigeMotif,
+  DOTATION_CENTS, PLANCHER_CENTS, RECHARGE_CENTS,
   COMPTES_EMETTEURS, decouvertAutorise,
   transfert,
   mouvementDotation, mouvementRecharge, mouvementMise, mouvementGain,

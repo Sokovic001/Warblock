@@ -73,6 +73,13 @@ const REJEU_CODES = {
   conservation:  409,
 };
 
+// LES DEUX REFUS QUE LA PHASE 03 AJOUTE, ET ILS SONT EN 409 COMME LES AUTRES. `fonds` dit que la
+// table est trop chère pour le solde ; `livre` dit que l'écriture n'a pas pu être posée — une jambe
+// déjà là, ou un découvert — et que RIEN n'a été écrit. Aucun des deux n'est un `402` : la doctrine
+// du dossier est « des refus nommés, tous en 400 ou 409, aucun en 500 », et un `402` parle de payer
+// l'API, pas la table. Aucun des deux ne laisse un joueur enfermé dans un billet mort.
+const REFUS_LIVRE = 'Le grand livre a refusé cette écriture : rien n\'a été écrit, et la partie reste dans l\'état où elle était.';
+
 // ---------- limitation de débit ----------
 // Un seau par utilisateur, en mémoire. Volontairement simple : il freine le martèlement d'un pseudo
 // convoité, il ne prétend pas résister à une attaque distribuée. Le jour où l'API tournera sur
@@ -194,7 +201,7 @@ function graine128(source) {
 const nombre = v => (Number(v) || 0);
 // Liste blanche explicite. Un `select *` renvoyé tel quel finit toujours par exposer une colonne
 // ajoutée plus tard sans y penser.
-const moi = (u, s) => ({
+const moi = (u, s, argent) => ({
   id: String(u.id),
   name: u.name,
   avatar: u.avatar,
@@ -218,6 +225,16 @@ const moi = (u, s) => ({
   // taux se déduit des deux : ce dépôt ne transporte pas de flottant qu'il peut éviter.
   stats: { matches: nombre(s.matches), wins: nombre(s.wins), kills: nombre(s.kills), best: nombre(s.best),
            divergences: nombre(s.divergences) },
+  // LES DEUX MONTANTS DU GRAND LIVRE, LUS PAR SOMME ET JAMAIS DANS UNE COLONNE. Il n'existe nulle
+  // part de case à écraser : un compteur qu'on incrémente est une case, et un double envoi la
+  // fausse pour toujours. Ils restent en CENTIMES entiers jusqu'au bout du réseau — c'est
+  // `applyAccount`, côté jeu, qui les repasse en dollars, en un seul point de conversion.
+  //
+  // ET ILS SONT SÉPARÉS. Le second porte ce qui vient d'une ligne dont le rejeu a DIVERGÉ : visible,
+  // chiffré, jamais dépensable. Les additionner ferait de la quarantaine un solde, c'est-à-dire
+  // exactement ce qu'elle n'est pas ; les taire ferait disparaître de l'argent aux yeux du joueur.
+  balanceCents: nombre(argent && argent.balanceCents),
+  quarantineCents: nombre(argent && argent.quarantineCents),
 });
 
 // Le billet, tel qu'il part au client. Même liste blanche explicite que `moi`, et une raison de
@@ -333,6 +350,19 @@ function createApp({
     });
   }
 
+  // LE COMPTE, ET LE SEUL CHEMIN QUI LE CHARGE. Il naît d'un jeton vérifié, jamais d'un appel du
+  // client, et les quatre routes qui en ont besoin passent toutes par ici — sans quoi la quatrième
+  // finirait par oublier un argument. `at` est l'heure du serveur : c'est elle qui décide du JOUR
+  // d'une recharge, et l'injecter est ce qui permet de tester « une par jour » sans attendre
+  // minuit. Le client, lui, n'a aucun moyen d'écrire un crédit : il n'existe pas de route pour ça.
+  const chargerCompte = identite => db.findOrCreate({
+    authId: identite.authId,
+    email: identite.email || '',
+    name: C.nameOr(identite.name, C.NAME.fallback),
+    nameKey: C.nameKey,
+    at: new Date(now()),
+  });
+
   // ---------- POST /api/match ----------
   // Le serveur possède l'identité de la partie ; le client ne fait que la demander. Il choisit sa
   // table, son mode et son brawler, et rien de plus : les graines, les sièges, la mise en centimes,
@@ -355,12 +385,7 @@ function createApp({
 
     // Un billet appartient à quelqu'un. Le compte naît ici comme il naît sur `GET /api/me`, et pour
     // la même raison : d'un jeton vérifié, jamais d'un appel du client.
-    const { user } = await db.findOrCreate({
-      authId: identite.authId,
-      email: identite.email || '',
-      name: C.nameOr(identite.name, C.NAME.fallback),
-      nameKey: C.nameKey,
-    });
+    const { user } = await chargerCompte(identite);
 
     // Deux tirages, deux usages. La publique décide de la carte et du gaz, et part au client. La
     // secrète ne quitte jamais le serveur : elle ne sert à rien tant que rien n'est simulé, et
@@ -379,7 +404,7 @@ function createApp({
     // Aucun `select` préalable : ce sont les contraintes de la base qui arbitrent l'idempotence,
     // comme pour `name_key`. Une vérification préalable laisserait une fenêtre entre le « a-t-il
     // déjà un billet ? » et l'insertion, et deux onglets rapides passeraient tous les deux.
-    const { match } = await db.createMatch({
+    const ouverture = await db.createMatch({
       userId: user.id,
       mode: champs.mode.id,
       stakeCents: champs.stakeCents,
@@ -395,10 +420,35 @@ function createApp({
       clientKey: champs.clientKey,
       openedAt, expiresAt,
     });
+    // LE GRAND LIVRE A REFUSÉ L'ÉCRITURE, ET RIEN N'A ÉTÉ POSÉ. Une jambe déjà présente ou un
+    // découvert : dans les deux cas la transaction est annulée, il n'y a ni billet ni écriture, et
+    // ce n'est pas un 500 — c'est un refus nommé, comme tous les autres de cette API.
+    if (ouverture.refus === 'livre')
+      return envoyer(res, 409, { erreur: REFUS_LIVRE, code: 'livre', detail: ouverture.detail || null }, origin);
+    // LE SOLDE INSUFFISANT EST UN REFUS NOMMÉ, EN 409, ET IL N'A LAISSÉ NI BILLET NI ÉCRITURE.
+    // Pas un `402` : la doctrine du dossier est « des refus nommés, tous en 400 ou 409, aucun en
+    // 500 », et un `402` ouvrirait une famille de plus — il parle par ailleurs de payer l'API, pas
+    // la table. Le joueur peut redemander une partie juste après : rien ne l'enferme.
+    if (ouverture.refus === 'fonds')
+      return envoyer(res, 409, {
+        erreur: 'Pas assez de crédits pour cette table.',
+        code: 'fonds',
+        balanceCents: nombre(ouverture.balanceCents),
+        quarantineCents: nombre(ouverture.quarantineCents),
+        requiredCents: nombre(ouverture.requisCents),
+      }, origin);
     // 200 et jamais 201, y compris à la création : un code différent selon que le billet vient
     // d'être créé ou qu'il existait déjà rendrait le rejeu distinguable du premier appel, ce qui
     // est précisément ce que l'idempotence promet d'effacer.
-    return envoyer(res, 200, billet(match), origin);
+    //
+    // LES DEUX MONTANTS PARTENT AVEC LE BILLET, APRÈS LE DÉBIT. C'est un aller-retour de moins pour
+    // le jeu, et surtout c'est la parole du serveur : en ligne, l'écran ne décrémente plus son
+    // portefeuille lui-même, il affiche ce que le livre dit.
+    return envoyer(res, 200, {
+      ...billet(ouverture.match),
+      balanceCents: nombre(ouverture.balanceCents),
+      quarantineCents: nombre(ouverture.quarantineCents),
+    }, origin);
   }
 
   // ---------- POST /api/match/:id/trace ----------
@@ -423,12 +473,7 @@ function createApp({
     if (!corps || typeof corps !== 'object' || Array.isArray(corps))
       return envoyer(res, 400, { erreur: 'Trace illisible.', code: 'corps' }, origin);
 
-    const { user } = await db.findOrCreate({
-      authId: identite.authId,
-      email: identite.email || '',
-      name: C.nameOr(identite.name, C.NAME.fallback),
-      nameKey: C.nameKey,
-    });
+    const { user } = await chargerCompte(identite);
 
     // `user_id` fait partie de la recherche, comme pour le résultat : un identifiant deviné ne doit
     // rien apprendre sur la partie de quelqu'un d'autre, pas même qu'elle existe.
@@ -635,12 +680,7 @@ function createApp({
     if (erreurs.length)
       return envoyer(res, 400, { erreur: erreurs[0].message, erreurs }, origin);
 
-    const { user } = await db.findOrCreate({
-      authId: identite.authId,
-      email: identite.email || '',
-      name: C.nameOr(identite.name, C.NAME.fallback),
-      nameKey: C.nameKey,
-    });
+    const { user } = await chargerCompte(identite);
 
     // `user_id` fait partie de la recherche, il n'est pas vérifié après coup : un identifiant
     // deviné ne doit rien apprendre sur la partie de quelqu'un d'autre, pas même qu'elle existe.
@@ -671,7 +711,7 @@ function createApp({
                                   cashedOut: false, purseCents: 0,
                                   declaredNetCents: rapport.declaredNetCents, digests: rapport.digests });
       const p = C.matchVerdict(dossier, vide, now());
-      const { match } = await db.settleMatch({
+      const clos = await db.settleMatch({
         matchId, userId: user.id,
         status: p.statut, settledAt: new Date(now()),
         issue: p.issue, controle: p.controle, motif: p.motif,
@@ -681,8 +721,10 @@ function createApp({
         rank: vide.rank, cubes: vide.cubes, damage: vide.damage, cashedOut: vide.cashedOut,
         traceSteps: null, replayDigest: null, digestMatch: null, divergenceStep: null, replayMs: null,
       });
-      if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
-      return envoyer(res, 200, reglement(match), origin);
+      if (clos.refus === 'livre')
+        return envoyer(res, 409, { erreur: REFUS_LIVRE, code: 'livre', detail: clos.detail || null }, origin);
+      if (!clos.match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
+      return envoyer(res, 200, reglement(clos.match), origin);
     }
 
     // LE BILLET EST MARQUÉ JOUÉ AVANT MÊME D'ÊTRE JUGÉ, et c'est délibéré. Toute la partie est
@@ -719,7 +761,7 @@ function createApp({
     // faits RECALCULÉS au lieu de faits déclarés, et elle reste pour la raison exacte qui la rendait
     // insuffisante hier : si le rejeu se trompe, plus rien ne regarderait le montant avant de
     // l'écrire. L'enveloppe cesse d'être la seule protection, elle devient la seconde.
-    const { match } = await db.settleMatch({
+    const regle = await db.settleMatch({
       matchId, userId: user.id,
       status: v.statut, settledAt: new Date(now()),
       issue: v.issue, controle: v.controle, motif: v.motif,
@@ -734,8 +776,13 @@ function createApp({
       traceSteps: rj.traceSteps, replayDigest: rj.replayDigest,
       digestMatch: rj.digestMatch, divergenceStep: rj.divergenceStep, replayMs: rj.replayMs,
     });
-    if (!match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
-    return envoyer(res, 200, reglement(match), origin);
+    // LE GRAND LIVRE A REFUSÉ, DONC LA LIGNE N'A PAS BOUGÉ NON PLUS : le règlement et les
+    // transferts du gain sont une seule transaction, et elle est annulée en entier. La ligne reste
+    // ouverte, le joueur peut renvoyer son résultat sur le même billet, et rien ne sort en 500.
+    if (regle.refus === 'livre')
+      return envoyer(res, 409, { erreur: REFUS_LIVRE, code: 'livre', detail: regle.detail || null }, origin);
+    if (!regle.match) return envoyer(res, 404, { erreur: 'Billet introuvable.' }, origin);
+    return envoyer(res, 200, reglement(regle.match), origin);
   }
 
   // ---------- le veilleur ----------
@@ -800,15 +847,11 @@ function createApp({
 
       // ---------- lecture ----------
       if (req.method === 'GET') {
-        // La première connexion crée le compte. C'est le seul endroit où un compte naît, et il naît
-        // d'un jeton vérifié, jamais d'un appel du client.
-        const { user, stats } = await db.findOrCreate({
-          authId: identite.authId,
-          email: identite.email || '',
-          name: C.nameOr(identite.name, C.NAME.fallback),
-          nameKey: C.nameKey,
-        });
-        return envoyer(res, 200, moi(user, stats), origin);
+        // La première connexion crée le compte, LE DOTE, et le recharge s'il est au-dessous du
+        // plancher. Les trois se décident côté serveur, dans la même transaction, et le client
+        // n'a aucune route pour en déclencher une.
+        const c = await chargerCompte(identite);
+        return envoyer(res, 200, moi(c.user, c.stats, c), origin);
       }
 
       // ---------- modification ----------
@@ -827,7 +870,7 @@ function createApp({
       const r = await db.updateProfile(identite.authId, champs);
       if (r.conflit) return envoyer(res, 409, { erreur: 'Ce pseudo est déjà pris.' }, origin);
       if (!r.user) return envoyer(res, 404, { erreur: 'Compte introuvable.' }, origin);
-      return envoyer(res, 200, moi(r.user, r.stats), origin);
+      return envoyer(res, 200, moi(r.user, r.stats, r), origin);
 
     } catch (e) {
       // Le détail part dans les journaux du serveur, jamais dans la réponse.

@@ -51,7 +51,7 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 375 tests sur le jeu (`node test.js`) et
-  164 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  179 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -231,13 +231,25 @@ porte : le reste a besoin d'un navigateur pour tourner.
   découvert sur le séquestre et par la clause du règlement.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
+- **Le solde est une SOMME d'écritures, et les routes l'écrivent.** La dotation et la recharge sont
+  écrites par le **serveur** à la connexion — il n'existe aucune route `POST /api/credits`, et une
+  garde le vérifie. La mise est débitée à l'**ouverture** du billet, sous verrou de ligne
+  (`select id from users where id = $1 for update`, pris en tête de transaction) et dans la même
+  transaction que lui : pas de billet sans son écriture, pas d'écriture sans son billet. Le chemin
+  `repris` n'écrit **jamais** une seconde mise. Le règlement écrit la ligne et le gain ensemble. Un
+  billet clos vide son séquestre : `solde(enjeu:<match>)` vaut la mise sur une ligne ouverte et zéro
+  sur toute ligne close. `ledgerReconcile` est appelé à la fin de **chaque** scénario, et cinquante
+  parties de bout en bout vérifient la somme globale à **chaque étape**. Le verrou, lui, n'est
+  prouvé nulle part dans `npm test` : une doublure mono-fil sérialise gratuitement, et seul
+  `api/db-check.js` peut l'éprouver.
 - **Une divergence est mesurée, jamais punie.** La ligne est réglée et payée, marquée
   `digest_match = false`, avec `divergence_step` et `replay_ms`. Le grand livre de la phase 03 ne
   lira que des lignes convergées, et le **taux de divergence** est un agrégat exposé pour que ce
   filtre n'ait pas un rendement inconnu.
 - **Le rejeu a un budget**, `REPLAY_BUDGET_MS`, éprouvé avec une horloge injectée : `createApp`
-  reçoit `chrono` (une durée) en plus de `now` (une date). Huit refus nommés, tous en 400 ou 409,
-  aucun en 500, aucun ne laissant un joueur enfermé dans un billet mort.
+  reçoit `chrono` (une durée) en plus de `now` (une date). Dix refus nommés — les huit du rejeu, plus
+  `fonds` et `livre` arrivés avec le grand livre — tous en 400 ou 409, aucun en 500, aucun ne
+  laissant un joueur enfermé dans un billet mort.
 
 ## Argent des joueurs
 
@@ -292,8 +304,11 @@ tout solde y est modifiable depuis la console.
   fenêtre de dix secondes. *Module 2 livré* : la table `ledger_entries` en insertion seule et en
   lignes-transfert, l'écrivain unique `ledgerWrite` de `db-pg.js`, les gardes textuelles qui
   comparent l'expression des comptes et la liste des motifs au texte du schéma, `api/db-check.js` et
-  son job d'intégration continue. **Aucune route n'écrit encore une ligne du livre**, et le job
-  Postgres n'a jamais tourné : le module livre la RECETTE, pas le plat. Rien n'est fait tant que les
+  son job d'intégration continue. *Module 3 livré* : les routes écrivent enfin — dotation et recharge
+  à la connexion, mise débitée à l'ouverture sous verrou, règlement et gain dans la même transaction,
+  quarantaine pour les lignes divergentes, `balanceCents` et `quarantineCents` rendus par somme. Le
+  job Postgres n'a toujours jamais tourné : le module 2 livrait la RECETTE, pas le plat, et le
+  module 3 s'appuie dessus. Rien n'est fait tant que les
   cinq modules ne sont pas livrés et que ce job n'a pas été vert une fois — jusque-là, un test qui
   passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
