@@ -2364,6 +2364,494 @@ test('LA ROUTE DU RÉSULTAT NE LIT PLUS AUCUN FAIT DU CORPS : garde textuelle', 
     assert.ok(route.includes(`faits.${champ}`) || route.includes(`vide.${champ}`), champ);
 });
 
+// ------------------------------------------------------------------------------------------------
+// LE GRAND LIVRE (phase 03, module 1). Il est testé ICI et pas dans `test.js` parce qu'il est du
+// SERVEUR : le plan de comptes n'est pas une règle du jeu, et rien dans le navigateur n'exécutera
+// jamais une ligne de comptabilité. Ce qui est réellement partagé avec le sas — la fenêtre de
+// renoncement — vit dans `WBCore` et se teste dans `test.js`.
+//
+// À ce stade rien n'est écrit sur un disque : `api/ledger.js` est entièrement pur.
+console.log('Le grand livre : la grammaire, les transferts, les mouvements');
+const L = require('./ledger');
+// Les cinq modes avec leurs VRAIS sièges, et les quatre tables. Aucun échantillon : le domaine.
+const MODES_LEDGER = Object.keys(C.MODES).map(id => ({ id, seats: C.seatsOf(C.MODES[id]) }));
+const MISES_LEDGER = C.TIERS.map(t => C.toCents(t.stake));
+
+// Le contrôle que tout mouvement doit passer, et qui n'est PAS une fonction d'équilibre appelée
+// avant l'insertion : la partie double est structurelle, on ne fait ici que constater qu'elle l'est
+// bien restée sur chaque ligne produite.
+function verifierMouvement(transferts, quoi) {
+  assert.ok(Array.isArray(transferts) && transferts.length > 0, `${quoi} : mouvement vide`);
+  let signe = 0;
+  for (const t of transferts) {
+    assert.ok(Number.isSafeInteger(t.montantCents) && t.montantCents > 0,
+      `${quoi} : montant ${t.montantCents} — un transfert porte un entier de centimes strictement positif`);
+    assert.notStrictEqual(t.compteDebit, t.compteCredit, `${quoi} : un transfert vers soi-même`);
+    assert.ok(L.compteValide(t.compteDebit), `${quoi} : ${t.compteDebit} hors grammaire`);
+    assert.ok(L.compteValide(t.compteCredit), `${quoi} : ${t.compteCredit} hors grammaire`);
+    assert.ok(L.MOTIFS.includes(t.motif), `${quoi} : motif ${t.motif} hors liste`);
+    assert.strictEqual(t.motif, transferts[0].motif, `${quoi} : deux motifs dans un mouvement`);
+    assert.strictEqual(t.reference, transferts[0].reference, `${quoi} : deux références dans un mouvement`);
+    // La somme signée : `+m` quelque part, `−m` ailleurs, donc zéro. C'est vrai PAR CONSTRUCTION,
+    // et c'est très exactement pour cela que le test peut l'affirmer sans rien avoir à corriger.
+    signe += t.montantCents - t.montantCents;
+  }
+  const comptes = new Set();
+  for (const t of transferts) { comptes.add(t.compteDebit); comptes.add(t.compteCredit); }
+  let total = 0;
+  for (const c of comptes) total += L.soldeDe(transferts, c);
+  assert.strictEqual(total, 0, `${quoi} : la somme du mouvement n'est pas nulle`);
+  assert.strictEqual(signe, 0);
+  // Les paires de comptes d'un même mouvement sont distinctes deux à deux : c'est ce qui rend la
+  // clé d'idempotence `(motif, reference, compte_debit, compte_credit)` capable d'identifier UNE
+  // jambe. Deux jambes identiques et la seconde serait refusée par la base.
+  const paires = new Set(transferts.map(t => `${t.compteDebit}>${t.compteCredit}`));
+  assert.strictEqual(paires.size, transferts.length, `${quoi} : deux jambes de même paire de comptes`);
+}
+
+test('EXHAUSTIVEMENT : sur les cinq modes, les quatre tables et TOUTE sacoche, un mouvement est un ensemble de transferts positifs qui boucle', () => {
+  // Pas un échantillon : toute sacoche de 0 à `mise × sièges`, la borne que `purseBound` démontre.
+  // 280 500 règlements, chacun confronté à la grammaire, aux entiers et à la partie double.
+  let regles = 0;
+  for (const { id, seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const max = C.purseBound(miseCents, seats).maxCents;
+    const mise = L.mouvementMise({ userId: 1, matchId: 42, miseCents });
+    verifierMouvement(mise, `${id} $${miseCents / 100} mise`);
+    for (let sacoche = 0; sacoche <= max; sacoche++) {
+      // Le brut, la commission et le net viennent de `WBCore.cashoutCents` et de NULLE PART
+      // ailleurs. `api/ledger.js` les reçoit et les répartit ; il n'a pas le droit de les calculer,
+      // et une garde textuelle plus bas le vérifie sur son texte.
+      const p = C.cashoutCents(sacoche);
+      const gain = L.mouvementGain({ userId: 1, matchId: 42, miseCents,
+                                     grossCents: p.grossCents, feeCents: p.feeCents,
+                                     netCents: p.netCents, convergee: true });
+      verifierMouvement(gain, `${id} $${miseCents / 100} sacoche ${sacoche}`);
+      // Le séquestre est habité par la mise, puis vidé par le règlement. Exactement, au centime :
+      // c'est l'invariant fort et local que le séquestre par partie existe pour donner.
+      const livre = mise.concat(gain);
+      assert.strictEqual(L.soldeDe(mise, L.compteEnjeu(42)), miseCents);
+      assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(42)), 0,
+        `${id} $${miseCents / 100} sacoche ${sacoche} : séquestre non vidé`);
+      regles++;
+    }
+  }
+  assert.strictEqual(regles, MODES_LEDGER.reduce((a, m) =>
+    a + MISES_LEDGER.reduce((b, s) => b + s * m.seats + 1, 0), 0));
+  assert.ok(regles > 280000, `le domaine balayé est trop maigre : ${regles} règlements`);
+});
+
+test('fee + net = brut sur chaque règlement, et les trois montants viennent de cashoutCents', () => {
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    for (let sacoche = 0; sacoche <= C.purseBound(miseCents, seats).maxCents; sacoche++) {
+      const p = C.cashoutCents(sacoche);
+      assert.strictEqual(p.feeCents + p.netCents, p.grossCents);
+      // Et le grand livre REFUSE un triplet qui ne vient manifestement pas de là. Sans ce refus, le
+      // séquestre ne bouclerait plus et le trou n'apparaîtrait qu'au règlement suivant.
+      assert.throws(() => L.mouvementGain({ userId: 1, matchId: 3, miseCents,
+        grossCents: p.grossCents, feeCents: p.feeCents, netCents: p.netCents + 1, convergee: true }),
+        /cashoutCents/);
+    }
+  }
+});
+
+test('GARDE TEXTUELLE : api/ledger.js ne contient AUCUNE arithmétique de commission', () => {
+  // Elle est infiniment plus sûre sur un fichier dédié que sur une plage de marqueurs dans un
+  // fichier de six mille lignes, et c'est l'une des raisons pour lesquelles le grand livre vit dans
+  // `api/ledger.js` plutôt que dans `WBCore`.
+  const fs = require('node:fs'), path = require('node:path');
+  const brut = fs.readFileSync(path.join(__dirname, 'ledger.js'), 'utf8');
+  const src = brut.replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  for (const interdit of ['RAKE', '0.2', 'Math.ceil', '/ 100', 'toFixed'])
+    assert.ok(!src.includes(interdit), `api/ledger.js recalcule un montant : ${interdit}`);
+  // Et il ne recopie pas non plus une règle du jeu par la porte de derrière : il ne charge PAS
+  // WBCore. Il reçoit des montants déjà décidés, il ne va pas les chercher.
+  assert.ok(!src.includes('require('), 'api/ledger.js dépend de quelque chose : il doit rester pur');
+  assert.ok(src.includes('cashoutCents'), 'la raison de la garde doit rester écrite dans le fichier');
+});
+
+test('chaque montant est un entier SÛR : aucun flottant n\'entre', () => {
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const max = C.purseBound(miseCents, seats).maxCents;
+    for (let sacoche = 0; sacoche <= max; sacoche++) {
+      const p = C.cashoutCents(sacoche);
+      for (const t of L.mouvementGain({ userId: 9, matchId: 9, miseCents, grossCents: p.grossCents,
+                                        feeCents: p.feeCents, netCents: p.netCents, convergee: false }))
+        assert.ok(Number.isSafeInteger(t.montantCents), `${t.montantCents}`);
+    }
+  }
+  // Et ce qui n'est pas un entier sûr est REFUSÉ, jamais arrondi en silence : un centime perdu à
+  // l'arrondi est un livre qui ne boucle plus.
+  for (const mauvais of [0, -1, 1.5, NaN, Infinity, '100', null, undefined, 2 ** 53])
+    assert.throws(() => L.mouvementMise({ userId: 1, matchId: 1, miseCents: mauvais }), /montant invalide/,
+      `${String(mauvais)} a été accepté comme montant`);
+});
+
+test('un compte hors grammaire LANCE, au lieu de rendre une écriture boiteuse', () => {
+  // Une écriture boiteuse s'insérerait, et elle BOUCLERAIT — un transfert boucle toujours. Le solde
+  // qu'elle fausse ne se verrait qu'au moment de payer quelqu'un.
+  for (const bon of ['joueur:1:disponible', 'joueur:987654321:quarantaine', 'enjeu:7',
+                     L.MAISON_DOTATION, L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE])
+    assert.ok(L.compteValide(bon), bon);
+  for (const mauvais of ['joueur:1', 'joueur:1:autre', 'joueur:0:disponible', 'joueur:01:disponible',
+                         'joueur:-1:disponible', 'joueur:a:disponible', 'enjeu:', 'enjeu:0',
+                         'maison', 'maison:autre', 'maison:dotation:1', '', ' enjeu:1',
+                         'enjeu:1\nmaison:dotation', 42, null, undefined]) {
+    assert.ok(!L.compteValide(mauvais), `${String(mauvais)} est passé pour un compte`);
+    assert.throws(() => L.exigeCompte(mauvais), /hors grammaire/, String(mauvais));
+    assert.throws(() => L.soldeDe([], mauvais), /hors grammaire/, String(mauvais));
+  }
+  // Les zéros de tête sont refusés PAR LES FABRICANTS aussi : `joueur:007:disponible` et
+  // `joueur:7:disponible` seraient deux comptes pour un seul joueur, et le solde du second ne
+  // verrait jamais l'argent du premier.
+  for (const mauvais of ['007', '0', -3, 1.5, '', 'sept', null, NaN])
+    for (const fab of [L.compteJoueur, L.compteQuarantaine, L.compteEnjeu])
+      assert.throws(() => fab(mauvais), /identifiant/, `${fab.name}(${String(mauvais)})`);
+  // Les trois formes qu'un pilote Postgres peut rendre pour un `bigserial` donnent le MÊME compte.
+  assert.strictEqual(L.compteJoueur(12), 'joueur:12:disponible');
+  assert.strictEqual(L.compteJoueur('12'), 'joueur:12:disponible');
+  assert.strictEqual(L.compteJoueur(12n), 'joueur:12:disponible');
+  // Un transfert d'un compte vers lui-même n'est pas représentable non plus.
+  assert.throws(() => L.transfert('mise', '1', 'enjeu:1', 'enjeu:1', 10), /vers lui-même/);
+});
+
+test('un motif hors liste LANCE, et la liste est fermée à SIX', () => {
+  assert.deepStrictEqual(L.MOTIFS.slice(),
+    ['dotation', 'recharge', 'mise', 'gain', 'remboursement', 'contrepassation']);
+  // Six, et pas sept : la spécification renvoie explicitement à la phase 06 le motif de libération
+  // de quarantaine, parce qu'un membre de liste fermée que personne n'écrit est une case en attente
+  // d'être créée de travers. Le test tombera le jour où quelqu'un l'ajoutera sans lire la raison.
+  for (const absent of ['liberation', 'quarantaine', 'depot', 'retrait', 'ajustement', 'correction'])
+    assert.ok(!L.MOTIFS.includes(absent), `${absent} est entré dans la liste des motifs`);
+  for (const mauvais of ['', 'MISE', 'gains', 'transfert', null, undefined, 0])
+    assert.throws(() => L.exigeMotif(mauvais), /motif hors liste/, String(mauvais));
+  for (const mauvais of ['', 'MISE', 'transfert', null])
+    assert.throws(() => L.transfert(mauvais, '1', 'enjeu:1', L.MAISON_COMMISSION, 10), /motif hors liste/);
+});
+
+test('la grammaire est une EXPRESSION, exportée en source pour que le schéma la recopie', () => {
+  // Ne jamais l'écrire « liste fermée » : trois des six comptes sont des familles paramétrées, et
+  // un `check (compte in (...))` serait refusé au premier joueur inscrit. Le module suivant recopie
+  // `COMPTE_RE_SQL` caractère pour caractère dans `api/schema.sql`, et un test l'y comparera.
+  assert.strictEqual(typeof L.COMPTE_RE_SQL, 'string');
+  assert.ok(L.COMPTE_RE_SQL.startsWith('^') && L.COMPTE_RE_SQL.endsWith('$'),
+    'la contrainte doit être ancrée des deux côtés, sinon elle laisse passer n\'importe quel préfixe');
+  assert.ok(!L.COMPTE_RE_SQL.includes("'"), 'une apostrophe casserait le littéral SQL du schéma');
+  // Le RegExp en DÉRIVE : il n'existe pas deux écritures de la même règle.
+  assert.strictEqual(L.COMPTE_RE.source, L.COMPTE_RE_SQL);
+  for (const c of ['joueur:1:disponible', 'joueur:1:quarantaine', 'enjeu:1',
+                   L.MAISON_DOTATION, L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE])
+    assert.ok(new RegExp(L.COMPTE_RE_SQL).test(c), c);
+});
+
+test('SEULS le compte d\'émission et la contrepartie ont le droit de passer en négatif', () => {
+  assert.deepStrictEqual(L.COMPTES_EMETTEURS.slice(), [L.MAISON_DOTATION, L.MAISON_CONTREPARTIE]);
+  assert.ok(L.decouvertAutorise(L.MAISON_DOTATION));
+  assert.ok(L.decouvertAutorise(L.MAISON_CONTREPARTIE));
+  // La commission n'est pas un compte d'émission : elle encaisse, elle n'avance rien.
+  assert.ok(!L.decouvertAutorise(L.MAISON_COMMISSION));
+  assert.ok(!L.decouvertAutorise(L.compteJoueur(1)));
+  assert.ok(!L.decouvertAutorise(L.compteQuarantaine(1)));
+  // ET SURTOUT PAS LES SÉQUESTRES, et c'est tout l'intérêt de l'uniformité de la règle : un second
+  // gain sur un même billet devrait débiter un séquestre déjà vide, et se fait donc refuser.
+  // « Un billet a au plus un gain » ne repose alors pas uniquement sur un index.
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    assert.ok(!L.decouvertAutorise(L.compteEnjeu(seats * miseCents)));
+  }
+  assert.throws(() => L.decouvertAutorise('maison:tresorerie'), /hors grammaire/);
+});
+
+test('LA MESURE QUE docs/HISTORIQUE.md RÉCLAME AVANT LA PHASE 04 : ce que la maison paie, au centime', () => {
+  // Ce chiffre existait déjà ; il n'était écrit nulle part, et le risque n'est pas le chiffre —
+  // c'est de le voir apparaître un jour et de le prendre pour un bug. Il tombe ici, avant qu'une
+  // base ne le calcule.
+  for (const { id, seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const mise = L.mouvementMise({ userId: 4, matchId: 4, miseCents });
+
+    // 1. LE JOUEUR QUI PERD : sa sacoche est vide, le séquestre part entier chez la contrepartie.
+    //    Un seul transfert, parce qu'une jambe nulle n'est pas représentable.
+    const perdu = C.cashoutCents(0);
+    const perte = L.mouvementGain({ userId: 4, matchId: 4, miseCents, grossCents: perdu.grossCents,
+                                    feeCents: perdu.feeCents, netCents: perdu.netCents, convergee: true });
+    assert.strictEqual(perte.length, 1, `${id} : un brut nul doit produire UN seul transfert`);
+    assert.deepStrictEqual({ ...perte[0] }, { motif: 'gain', reference: '4', compteDebit: 'enjeu:4',
+                                              compteCredit: L.MAISON_CONTREPARTIE, montantCents: miseCents });
+    let livre = mise.concat(perte);
+    assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(4)), 0);
+    assert.strictEqual(L.soldeDe(livre, L.MAISON_CONTREPARTIE), miseCents, 'enjeu −mise, contrepartie +mise');
+    assert.strictEqual(L.soldeDe(livre, L.MAISON_COMMISSION), 0, 'un brut nul ne rapporte aucune commission');
+    assert.strictEqual(L.soldeDe(livre, L.compteJoueur(4)), -miseCents);
+
+    // 2. LE JOUEUR QUI RAFLE LA TABLE : la maison paie les mises que personne n'a versées.
+    const rafle = C.cashoutCents(miseCents * seats);
+    const gain = L.mouvementGain({ userId: 4, matchId: 4, miseCents, grossCents: rafle.grossCents,
+                                   feeCents: rafle.feeCents, netCents: rafle.netCents, convergee: true });
+    livre = mise.concat(gain);
+    assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(4)), 0, 'le séquestre doit être vidé');
+    // La contrepartie verse `(sièges − 1)` mises en BRUT — le pot moins la seule mise réelle.
+    const verse = -L.soldeDe(livre, L.MAISON_CONTREPARTIE);
+    assert.strictEqual(verse, miseCents * (seats - 1), `${id} $${miseCents / 100} : brut versé`);
+    // Et le COÛT NET de la maison est ce versement moins ce que la commission rattrape :
+    // `brut − fee − mise`. C'est le chiffre qu'il fallait écrire avant qu'il ne surprenne quelqu'un.
+    const encaisse = L.soldeDe(livre, L.MAISON_COMMISSION);
+    assert.strictEqual(encaisse, rafle.feeCents);
+    assert.strictEqual(verse - encaisse, rafle.grossCents - rafle.feeCents - miseCents,
+      `${id} $${miseCents / 100} : coût net de la maison`);
+    assert.strictEqual(L.soldeDe(livre, L.compteJoueur(4)), rafle.netCents - miseCents);
+  }
+  // Et le cas nommé dans la spécification, en chiffres : une table à 10 $ en resurgence.
+  const mise = 1000, seats = C.seatsOf(C.MODES.resurgence);
+  assert.strictEqual(seats, 50);
+  const p = C.cashoutCents(mise * seats);
+  assert.deepStrictEqual(p, { grossCents: 50000, feeCents: 10000, netCents: 40000 });
+  const livre = L.mouvementMise({ userId: 4, matchId: 4, miseCents: mise })
+    .concat(L.mouvementGain({ userId: 4, matchId: 4, miseCents: mise, grossCents: p.grossCents,
+                              feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  assert.strictEqual(-L.soldeDe(livre, L.MAISON_CONTREPARTIE), 49000, 'la contrepartie verse 49 000 centimes');
+  assert.strictEqual(L.soldeDe(livre, L.MAISON_COMMISSION), 10000, 'la maison encaisse 10 000 centimes');
+  assert.strictEqual(-L.soldeDe(livre, L.MAISON_CONTREPARTIE) - L.soldeDe(livre, L.MAISON_COMMISSION),
+    39000, '390 $ de coût net sur UNE partie');
+});
+
+test('le gain d\'une ligne DIVERGENTE va en quarantaine, et le solde dépensable n\'en voit pas un centime', () => {
+  const p = C.cashoutCents(2500);
+  const commun = { userId: 8, matchId: 8, miseCents: 100, grossCents: p.grossCents,
+                   feeCents: p.feeCents, netCents: p.netCents };
+  const droit = L.mouvementGain({ ...commun, convergee: true });
+  const retenu = L.mouvementGain({ ...commun, convergee: false });
+  assert.strictEqual(L.soldeDe(droit, L.compteJoueur(8)), p.netCents);
+  assert.strictEqual(L.soldeDe(droit, L.compteQuarantaine(8)), 0);
+  assert.strictEqual(L.soldeDe(retenu, L.compteQuarantaine(8)), p.netCents);
+  assert.strictEqual(L.soldeDe(retenu, L.compteJoueur(8)), 0);
+  // Le livre boucle dans les deux cas : c'est tout l'intérêt de la quarantaine face aux trois
+  // autres réponses possibles — ne rien créditer punirait un joueur qui n'a rien fait, créditer le
+  // dépensable romprait une garantie écrite quatre fois, et ne rien écrire laisserait `net_cents`
+  // sans contrepartie.
+  for (const m of [droit, retenu]) verifierMouvement(m, 'gain');
+  // Un `convergee` oublié enverrait silencieusement le gain en quarantaine. Il est donc exigé.
+  assert.throws(() => L.mouvementGain({ ...commun }), /convergee/);
+  assert.throws(() => L.mouvementGain({ ...commun, convergee: 'oui' }), /convergee/);
+  // Sauf quand le net est nul : aucune jambe ne touche alors un compte de joueur, et le veilleur,
+  // qui ne connaît que le billet, n'a rien à en dire.
+  assert.doesNotThrow(() => L.mouvementGain({ matchId: 8, miseCents: 100, grossCents: 0, feeCents: 0, netCents: 0 }));
+});
+
+test('LE VIDAGE D\'UN SÉQUESTRE À L\'EXPIRATION est un règlement à net nul, pas un motif de plus', () => {
+  // `remboursement` mentirait — personne n'est remboursé. `contrepassation` mentirait aussi — on ne
+  // corrige aucune écriture fausse, le débit de la mise était juste. Un septième motif rouvrirait la
+  // liste fermée pour rien. Le vidage EST le règlement d'une partie qui n'a rien rapporté, donc
+  // motif `gain`, net nul — c'est-à-dire `mouvementGain` avec un brut nul, et pas une fonction de
+  // plus dont la seule différence aurait été le chemin qui l'appelle.
+  assert.strictEqual(L.mouvementExpiration, undefined,
+    'une fonction d\'expiration a été ajoutée : le vidage se lit comme un règlement à net nul');
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const vidage = L.mouvementGain({ matchId: 5, miseCents, grossCents: 0, feeCents: 0, netCents: 0 });
+    assert.strictEqual(vidage.length, 1);
+    assert.deepStrictEqual({ ...vidage[0] }, { motif: 'gain', reference: '5', compteDebit: 'enjeu:5',
+                                               compteCredit: L.MAISON_CONTREPARTIE, montantCents: miseCents });
+    // Et il produit EXACTEMENT le même mouvement que le règlement d'un joueur qui perd. C'est la
+    // vérité comptable : les deux billets ont rapporté zéro.
+    const perdu = C.cashoutCents(0);
+    assert.deepStrictEqual(vidage.map(t => ({ ...t })),
+      L.mouvementGain({ userId: 6, matchId: 5, miseCents, grossCents: perdu.grossCents,
+                        feeCents: perdu.feeCents, netCents: perdu.netCents, convergee: true })
+        .map(t => ({ ...t })));
+    assert.strictEqual(L.soldeDe(L.mouvementMise({ userId: 6, matchId: 5, miseCents }).concat(vidage),
+                                 L.compteEnjeu(5)), 0, 'aucun séquestre ne reste habité');
+    assert.ok(seats > 0);
+  }
+});
+
+test('la dotation, la recharge et le remboursement portent la référence qui les rend idempotents', () => {
+  const d = L.mouvementDotation({ userId: 3, montantCents: 5000 });
+  verifierMouvement(d, 'dotation');
+  assert.deepStrictEqual({ ...d[0] }, { motif: 'dotation', reference: '3',
+    compteDebit: L.MAISON_DOTATION, compteCredit: 'joueur:3:disponible', montantCents: 5000 });
+  // La recharge est idempotente PAR JOUR : une par joueur et par jour, écrite par le serveur à la
+  // connexion, jamais par une route de crédit gratuit que le client pourrait marteler.
+  const r = L.mouvementRecharge({ userId: 3, jour: '2026-09-14', montantCents: 500 });
+  verifierMouvement(r, 'recharge');
+  assert.strictEqual(r[0].reference, '3:2026-09-14');
+  assert.strictEqual(r[0].compteDebit, L.MAISON_DOTATION);
+  assert.notStrictEqual(r[0].reference, d[0].reference, 'dotation et recharge se distingueraient mal');
+  for (const mauvais of ['14/09/2026', '2026-9-14', '', '2026-09-14T00:00:00Z', null, 20260914])
+    assert.throws(() => L.mouvementRecharge({ userId: 3, jour: mauvais, montantCents: 500 }),
+      /jour de recharge/, String(mauvais));
+  // Le remboursement rend la mise et vide le séquestre : le seul chemin qui rende une mise.
+  const mise = L.mouvementMise({ userId: 3, matchId: 11, miseCents: 100 });
+  const rb = L.mouvementRemboursement({ userId: 3, matchId: 11, miseCents: 100 });
+  verifierMouvement(rb, 'remboursement');
+  assert.strictEqual(rb[0].reference, '11');
+  assert.strictEqual(L.soldeDe(mise.concat(rb), L.compteEnjeu(11)), 0);
+  assert.strictEqual(L.soldeDe(mise.concat(rb), L.compteJoueur(3)), 0, 'le joueur retrouve sa mise');
+});
+
+test('la contre-passation est l\'inverse EXACT, et laisse les deux mouvements visibles', () => {
+  // Une écriture modifiée est une preuve détruite : on ne peut plus dire ce qui a été payé ni
+  // quand. Le seul chemin de correction est un mouvement inverse, daté et motivé.
+  const p = C.cashoutCents(3000);
+  const gain = L.mouvementGain({ userId: 2, matchId: 77, miseCents: 500, grossCents: p.grossCents,
+                                 feeCents: p.feeCents, netCents: p.netCents, convergee: true });
+  const contre = L.mouvementContrepassation({ transferts: gain });
+  verifierMouvement(contre, 'contrepassation');
+  assert.strictEqual(contre.length, gain.length);
+  for (let i = 0; i < gain.length; i++) {
+    assert.strictEqual(contre[i].compteDebit, gain[i].compteCredit);
+    assert.strictEqual(contre[i].compteCredit, gain[i].compteDebit);
+    assert.strictEqual(contre[i].montantCents, gain[i].montantCents);
+    assert.strictEqual(contre[i].motif, 'contrepassation');
+  }
+  // La référence dit CE QUI a été contre-passé, sans jointure, et reste distincte de l'original :
+  // la clé d'idempotence `(motif, reference, débit, crédit)` ne collisionne donc jamais.
+  assert.strictEqual(contre[0].reference, 'gain:77');
+  // Et le livre revient exactement à ce qu'il était avant le mouvement corrigé.
+  const tout = gain.concat(contre);
+  for (const c of ['enjeu:77', 'joueur:2:disponible', L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE])
+    assert.strictEqual(L.soldeDe(tout, c), 0, c);
+  // Un paquet hétéroclite n'est pas un mouvement : son inverse ne correspondrait à rien de nommable.
+  assert.throws(() => L.mouvementContrepassation({
+    transferts: gain.concat(L.mouvementMise({ userId: 2, matchId: 77, miseCents: 500 })) }),
+    /même mouvement/);
+  assert.throws(() => L.mouvementContrepassation({ transferts: [] }), /non vide/);
+});
+
+test('soldeDe rend ZÉRO sur une liste vide, et un ENTIER partout', () => {
+  // Jamais `null`, jamais `undefined` : un solde absent qui se propage en `NaN` dans une somme est
+  // exactement le genre de panne qu'on découvre au moment de payer quelqu'un.
+  for (const c of [L.compteJoueur(1), L.compteQuarantaine(1), L.compteEnjeu(1),
+                   L.MAISON_DOTATION, L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE]) {
+    assert.strictEqual(L.soldeDe([], c), 0);
+    assert.ok(Number.isInteger(L.soldeDe([], c)));
+    assert.strictEqual(L.soldeDe(undefined, c), 0);
+  }
+  const livre = L.mouvementDotation({ userId: 1, montantCents: 5000 })
+    .concat(L.mouvementMise({ userId: 1, matchId: 1, miseCents: 50 }));
+  assert.strictEqual(L.soldeDe(livre, L.compteJoueur(1)), 4950);
+  assert.strictEqual(L.soldeDe(livre, L.MAISON_DOTATION), -5000);
+  assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(1)), 50);
+  // Un compte que le livre n'a jamais touché vaut zéro, il n'est pas « inconnu ».
+  assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(999)), 0);
+});
+
+console.log('Le grand livre : la réconciliation');
+// Un scénario minimal : un billet réglé, sa mise et son gain. C'est cette forme-là que
+// `ledgerReconcile` devra retrouver à la fin de chaque scénario d'`api/test.js` dans les modules
+// suivants.
+function scenarioRegle({ id = 1, userId = 1, miseCents = 100, sacoche = 400, digest_match = true } = {}) {
+  const p = C.cashoutCents(sacoche);
+  const ligne = { id, user_id: userId, status: 'settled', stake_cents: miseCents,
+                  gross_cents: p.grossCents, fee_cents: p.feeCents, net_cents: p.netCents, digest_match };
+  const livre = L.mouvementMise({ userId, matchId: id, miseCents })
+    .concat(L.mouvementGain({ userId, matchId: id, miseCents, grossCents: p.grossCents,
+                              feeCents: p.feeCents, netCents: p.netCents, convergee: digest_match }));
+  return { ligne, livre };
+}
+
+test('ledgerReconcile ne se plaint de rien quand tout s\'apparie, sur les cinq issues', () => {
+  const { ligne, livre } = scenarioRegle();
+  assert.deepStrictEqual(L.ledgerReconcile(ligne, livre), []);
+  assert.deepStrictEqual(L.ledgerReconcile([ligne], livre), []);
+  // Une ligne OUVERTE : le séquestre porte la mise, et rien d'autre.
+  const ouvert = { id: 2, user_id: 1, status: 'open', stake_cents: 50, net_cents: null };
+  assert.deepStrictEqual(L.ledgerReconcile(ouvert, L.mouvementMise({ userId: 1, matchId: 2, miseCents: 50 })), []);
+  // Les quatre autres clôtures, séquestre vidé et aucun montant à retrouver.
+  for (const status of ['expired', 'rejected', 'abandoned', 'renounced']) {
+    const clos = { id: 3, user_id: 1, status, stake_cents: 50, net_cents: null };
+    const vide = L.mouvementMise({ userId: 1, matchId: 3, miseCents: 50 })
+      .concat(L.mouvementGain({ matchId: 3, miseCents: 50, grossCents: 0, feeCents: 0, netCents: 0 }));
+    assert.deepStrictEqual(L.ledgerReconcile(clos, vide), [], status);
+  }
+  // Une ligne renoncée dont la mise est rendue boucle aussi.
+  const rendu = { id: 4, user_id: 1, status: 'renounced', stake_cents: 50, net_cents: null };
+  assert.deepStrictEqual(L.ledgerReconcile(rendu,
+    L.mouvementMise({ userId: 1, matchId: 4, miseCents: 50 })
+      .concat(L.mouvementRemboursement({ userId: 1, matchId: 4, miseCents: 50 }))), []);
+  // Une ligne DIVERGENTE : le net est en quarantaine, et c'est là qu'il doit être retrouvé.
+  const d = scenarioRegle({ id: 5, digest_match: false });
+  assert.deepStrictEqual(L.ledgerReconcile(d.ligne, d.livre), []);
+});
+
+test('ledgerReconcile attrape un montant JUSTE posé sur le MAUVAIS compte', () => {
+  // Le zéro global ne dit RIEN sur cet appariement : il est vrai même si un montant juste est posé
+  // sur le mauvais compte. C'est exactement, et seulement, ce que ce prédicat existe pour attraper.
+  const { ligne, livre } = scenarioRegle();
+  const totalDe = l => { const s = new Set(); for (const t of l) { s.add(t.compteDebit); s.add(t.compteCredit); }
+                         let n = 0; for (const c of s) n += L.soldeDe(l, c); return n; };
+
+  // 1. Le net d'une ligne CONVERGÉE posé en quarantaine : le livre boucle, le joueur est volé.
+  const egare = livre.map(t => t.compteCredit === L.compteJoueur(1)
+    ? L.transfert(t.motif, t.reference, t.compteDebit, L.compteQuarantaine(1), t.montantCents) : t);
+  assert.strictEqual(totalDe(egare), 0, 'le livre boucle quand même : c\'est le piège');
+  const g1 = L.ledgerReconcile(ligne, egare);
+  assert.ok(g1.some(x => /joueur:1:disponible/.test(x)), g1.join(' | '));
+  assert.ok(g1.some(x => /quarantaine/.test(x)), g1.join(' | '));
+
+  // 2. Le net d'une ligne DIVERGENTE posé sur le solde dépensable : la garantie « le solde
+  //    dépensable ne compte que des lignes convergées » tombe, et rien d'autre ne le verrait.
+  const d = scenarioRegle({ id: 6, digest_match: false });
+  const dépensé = d.livre.map(t => t.compteCredit === L.compteQuarantaine(1)
+    ? L.transfert(t.motif, t.reference, t.compteDebit, L.compteJoueur(1), t.montantCents) : t);
+  assert.strictEqual(totalDe(dépensé), 0);
+  assert.ok(L.ledgerReconcile(d.ligne, dépensé).length > 0);
+
+  // 3. La commission versée à la contrepartie : boucle encore, et fausse la mesure de la phase.
+  const detourne = livre.map(t => t.compteCredit === L.MAISON_COMMISSION
+    ? L.transfert(t.motif, t.reference, t.compteDebit, L.MAISON_CONTREPARTIE, t.montantCents) : t);
+  assert.strictEqual(totalDe(detourne), 0);
+  const g3 = L.ledgerReconcile(ligne, detourne);
+  assert.ok(g3.some(x => /maison:commission/.test(x)), g3.join(' | '));
+
+  // 4. Le bon compte, le mauvais montant : le net d'une AUTRE partie.
+  const faux = { ...ligne, net_cents: ligne.net_cents + 1, fee_cents: ligne.fee_cents - 1 };
+  assert.strictEqual(L.ledgerReconcile(faux, livre).length, 2);
+});
+
+test('ledgerReconcile attrape un billet sans engagement et un engagement sans billet', () => {
+  const { ligne, livre } = scenarioRegle();
+  // Un billet sans son engagement : c'est aussi la frontière avec la 02a, qu'un module suivant
+  // constatera sur une ligne à `trace_steps` nul — une ligne sans mise n'a jamais de gain.
+  const sansMise = livre.filter(t => t.motif !== 'mise');
+  const g1 = L.ledgerReconcile(ligne, sansMise);
+  assert.ok(g1.some(x => /aucun engagement/.test(x)), g1.join(' | '));
+
+  // Un engagement sans son billet : un séquestre habité par une partie que `matches` ne connaît
+  // pas, donc de l'argent que rien ne soldera jamais.
+  const intrus = livre.concat(L.mouvementMise({ userId: 1, matchId: 4242, miseCents: 100 }));
+  const g2 = L.ledgerReconcile(ligne, intrus);
+  assert.ok(g2.some(x => /enjeu:4242.*sans billet/.test(x)), g2.join(' | '));
+  // Et il disparaît dès que le billet correspondant est présenté, séquestre vidé.
+  const autre = scenarioRegle({ id: 4242 });
+  assert.deepStrictEqual(L.ledgerReconcile([ligne, autre.ligne], livre.concat(autre.livre)), []);
+
+  // Une mise écrite DEUX FOIS sur le même billet — le POST rejoué qui débite deux fois, le vol le
+  // plus facile de la phase.
+  const double = livre.concat(L.mouvementMise({ userId: 1, matchId: 1, miseCents: 100 }));
+  const g3 = L.ledgerReconcile(ligne, double);
+  assert.ok(g3.some(x => /2 écritures de mise/.test(x)), g3.join(' | '));
+  // Et une mise du mauvais montant.
+  const g4 = L.ledgerReconcile({ ...ligne, stake_cents: 999 }, livre);
+  assert.ok(g4.some(x => /mise engagée/.test(x)), g4.join(' | '));
+});
+
+test('ledgerReconcile attrape un séquestre NON VIDÉ sur une ligne close', () => {
+  // « Aucun séquestre ne reste habité » est l'invariant que le veilleur devenu écrivain d'argent
+  // doit tenir. Sans lui, de l'argent reste dans un compte que rien ne solde.
+  for (const status of ['settled', 'expired', 'rejected', 'abandoned', 'renounced']) {
+    const clos = { id: 9, user_id: 1, status, stake_cents: 75, net_cents: null };
+    const habite = L.mouvementMise({ userId: 1, matchId: 9, miseCents: 75 });
+    const g = L.ledgerReconcile(clos, habite);
+    assert.ok(g.some(x => /séquestre n'est pas vidé.*75/.test(x)), `${status} : ${g.join(' | ')}`);
+  }
+  // Et l'inverse : une ligne OUVERTE dont le séquestre a déjà été vidé, ou n'a jamais été rempli.
+  const ouvert = { id: 9, user_id: 1, status: 'open', stake_cents: 75, net_cents: null };
+  const vide = L.mouvementMise({ userId: 1, matchId: 9, miseCents: 75 })
+    .concat(L.mouvementGain({ matchId: 9, miseCents: 75, grossCents: 0, feeCents: 0, netCents: 0 }));
+  const g = L.ledgerReconcile(ouvert, vide);
+  assert.ok(g.some(x => /ouvert.*séquestre porte 0/.test(x)), g.join(' | '));
+  // Un statut que le grand livre ne connaît pas ne passe pas en silence.
+  assert.ok(L.ledgerReconcile({ id: 9, user_id: 1, status: 'zombie', stake_cents: 75 }, vide)
+    .some(x => /statut inconnu/.test(x)));
+});
+
 console.log('Lecture de la clé d\'API Crossmint');
 test('le base58 fait l\'aller-retour, zéros de tête compris', () => {
   for (let essai = 0; essai < 200; essai++) {

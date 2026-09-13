@@ -50,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 369 tests sur le jeu (`node test.js`) et
-  134 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 375 tests sur le jeu (`node test.js`) et
+  152 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -277,7 +277,10 @@ tout solde y est modifiable depuis la console.
   règle du **jeu** et n'a rien à faire dans les 465 Ko que chaque joueur télécharge — seul
   `renonciationOuverte`, réellement partagé avec le sas, y descend ; la mise est débitée à
   l'**ouverture** du billet, dans la même transaction, sous verrou de ligne ; le gain d'une ligne
-  divergente va en **quarantaine**, mesuré et jamais dépensable. Rien n'est fait tant que les cinq
+  divergente va en **quarantaine**, mesuré et jamais dépensable. *Module 1 livré* : `api/ledger.js`
+  existe, entièrement pur — grammaire, motifs, mouvements, `soldeDe`, `ledgerReconcile` — et
+  `WBCore` a reçu la seule règle réellement partagée avec le sas, `renonciationOuverte` et sa
+  fenêtre de dix secondes. Rien n'est encore écrit sur un disque. Rien n'est fait tant que les cinq
   modules ne sont pas livrés et que le job Postgres n'a pas été vert une fois — jusque-là, un test
   qui passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**

@@ -524,18 +524,99 @@ net_cents is null` qui arbitre l'unicité du règlement, n'a jamais été éprou
 Un test qui passe contre la doublure prouve la doublure, pas Postgres. C'est la dette la plus
 silencieuse de la phase, et elle se solde le jour où une base tournera — pas avant.
 
+## `ledger.js` — le grand livre, et rien d'autre
+
+Phase 03, module 1. Un fichier **entièrement pur** : la grammaire des comptes, la liste fermée des
+motifs, une fonction par mouvement, `soldeDe` et `ledgerReconcile`. Aucune base, aucun réseau,
+aucune route, aucune dépendance — pas même `core.js`. **À ce stade le grand livre existe entièrement
+et personne ne l'a encore écrit sur un disque** ; c'est ce qui rend les modules suivants ennuyeux.
+
+**Une écriture est un TRANSFERT, pas une jambe signée** : `{ motif, reference, compteDebit,
+compteCredit, montantCents }`, montant strictement positif, comptes différents. La somme du livre est
+donc nulle **par construction**, et il n'y a rien à asserter. Il n'existe volontairement aucune
+fonction `equilibre()` à appeler avant l'insertion : elle protégerait le chemin qui l'appelle, pas la
+donnée, et le jour où quelqu'un ouvrira un second chemin d'écriture, la contrainte de colonne le
+suivra là où la fonction ne l'aurait pas suivi. Un mouvement est un **ensemble de transferts
+partageant `(motif, reference)`**, et les paires de comptes d'un mouvement sont distinctes deux à
+deux — c'est ce qui permet à la clé d'idempotence `(motif, reference, compte_debit, compte_credit)`
+d'identifier exactement une jambe.
+
+**Le plan de comptes est une GRAMMAIRE, pas une liste fermée.** Trois des six comptes sont des
+familles paramétrées, et l'écrire en énumération aurait produit un `check (compte in (...))` que
+Postgres refuse au premier joueur inscrit. `COMPTE_RE_SQL` est exportée **en chaîne source**, pour
+être recopiée caractère pour caractère dans la contrainte de `schema.sql` ; le `RegExp` en dérive. Un
+compte ou un motif hors grammaire **lance** — une écriture boiteuse s'insérerait et bouclerait, et le
+solde qu'elle fausse ne se verrait qu'au moment de payer quelqu'un. Les identifiants sont refusés
+avec un zéro de tête : `joueur:007:disponible` et `joueur:7:disponible` seraient deux comptes pour un
+seul joueur, et le solde du second ne verrait jamais l'argent du premier.
+
+**Les motifs sont six** : `dotation`, `recharge`, `mise`, `gain`, `remboursement`, `contrepassation`.
+Pas sept. Le motif de libération de quarantaine est explicitement renvoyé à la phase 06 : un membre
+de liste fermée que personne n'écrit est une case en attente d'être créée de travers.
+
+**La direction du reliquat se décide dans la fonction pure, jamais au point d'insertion** — c'est le
+coût nommé de la ligne-transfert, et c'est là qu'une erreur se cacherait. `mouvementGain` décompose :
+`contrepartie → enjeu` du reliquat si le brut dépasse la mise, puis `enjeu → commission`, puis
+`enjeu → joueur` (ou `enjeu → quarantaine` si le rejeu a divergé), puis `enjeu → contrepartie` du
+reste si le brut est inférieur à la mise. **Une jambe de montant nul n'est pas représentable, donc
+elle est omise** : un brut nul ne produit qu'un seul transfert, `enjeu → contrepartie` de toute la
+mise. Il n'y a **pas** de `mouvementExpiration` : vider un séquestre à l'expiration est le RÈGLEMENT
+d'une partie qui n'a rien rapporté, donc `mouvementGain` avec un brut nul, qui produit exactement le
+même mouvement que le règlement d'un joueur qui perd. C'est la vérité comptable — les deux billets
+ont rapporté zéro. `remboursement` aurait menti, `contrepassation` aussi, et un septième motif aurait
+rouvert la liste fermée pour rien.
+
+**Aucun montant ne se recalcule ici.** `grossCents`, `feeCents` et `netCents` viennent de
+`WBCore.cashoutCents` et de nulle part ailleurs ; `ledger.js` les reçoit, vérifie qu'ils tiennent
+ensemble et les répartit. Une garde textuelle interdit à son texte de contenir `RAKE`, `0.2`,
+`Math.ceil`, `/ 100`, `toFixed` ou le moindre `require`.
+
+**Le découvert est une règle uniforme**, et deux comptes seulement en sont exemptés :
+`COMPTES_EMETTEURS` = `maison:dotation` et `maison:contrepartie`, dont le solde négatif **est** la
+mesure qu'on cherche. Les séquestres n'en font pas partie, et c'est tout l'intérêt : un second gain
+sur un même billet devrait débiter un séquestre déjà vide, donc « un billet a au plus un gain » ne
+repose pas uniquement sur un index.
+
+**`ledgerReconcile(ligneMatch, transferts)`** rend une liste de griefs — vide quand tout s'apparie. Le
+zéro global ne dit rien de l'appariement : il reste vrai quand un montant **juste** est posé sur le
+**mauvais** compte. Elle attrape exactement cela, plus le billet sans engagement, l'engagement sans
+billet et le séquestre non vidé sur une ligne close. Elle accepte une ligne ou une liste de lignes ;
+avec une liste elle voit tous les billets, ce qui est la seule façon de tenir « aucun engagement sans
+son billet ». Les modules suivants l'appelleront à la fin de **chaque** scénario d'`api/test.js`.
+
+**La mesure que `docs/HISTORIQUE.md` réclame avant la phase 04 tombe déjà ici**, avant qu'une base ne
+la calcule : sur une table à 10 $ en resurgence, un joueur qui rafle les cinquante sièges fait verser
+49 000 centimes à `maison:contrepartie` pendant que la maison en encaisse 10 000, soit **390 $ de
+coût net sur une seule partie**. Ce chiffre existait déjà ; il n'était écrit nulle part. Le risque
+n'est pas le chiffre, c'est de le voir apparaître un jour et de le prendre pour un bug.
+
+Ce qui n'est pas ici et qui est dans `WBCore` : **`renonciationOuverte` et `renonceFenetreS`**, la
+seule règle du grand livre réellement partagée avec le sas d'attente — l'écran doit dire au joueur ce
+que partir va lui coûter, le serveur doit l'arbitrer, et deux définitions seraient la troisième copie
+du patron déjà condamné pour `terminal`, `faits` et `argentCents`. La fenêtre vaut **dix secondes** :
+`plancher(LOBBY.wait / LOBBY.pressureMax + LOBBY.dropIn) − 3`, c'est-à-dire le coup d'envoi le plus
+**précoce** possible moins une marge de latence, et pas `LOBBY.wait`. `pressureMax` est le plafond
+2,4 jusqu'ici écrit en littéral dans `joinRate` : il a reçu un nom pour que la fenêtre en dérive au
+lieu de le recopier. La marge existe parce que l'erreur va dans le mauvais sens — `opened_at` est
+postérieur au `t = 0` du client, donc `maintenant − opened_at` **sous-estime** le temps passé au sas.
+La fonction est pure : elle ne lit aucune horloge, elle la reçoit. Le test qui la tient ne compare
+pas deux constantes, il **confronte** la fenêtre au vrai code du lobby — `joinRate`, `seatsAt` et la
+règle de `waitTick` — sur les cinq modes, les quatre tables, toute la plage de files d'attente et les
+vingt-quatre heures d'`onlineTotal` : le coup d'envoi le plus précoce y vaut 13,42 s.
+
 ## Les fichiers
 
 ```
 app.js              le routeur. Rien hors du cœur de Node, tout le reste lui est injecté.
 core.js             charge WBCore depuis index.html
 sim.js              charge WBSim depuis index.html — même chargeur, même garde bruyante
+ledger.js           le grand livre : grammaire, motifs, mouvements. PUR, aucune dépendance.
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 main.js             assemble les trois et écoute
 schema.sql          le schéma : users, matches, match_traces. Aucune colonne « solde ».
-test.js             134 tests sans rien installer, 143 avec jose
+test.js             152 tests sans rien installer, 161 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -638,8 +719,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 134 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 143 : les 134, plus la chaîne complète de vérification
+node api/test.js          # 152 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 161 : les 152, plus la chaîne complète de vérification
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans

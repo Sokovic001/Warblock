@@ -477,7 +477,7 @@ sans le dire est très exactement l'écart que la recette de la 02b a trouvé.
 
 ### Le prédicat de réconciliation, à la fin de chaque scénario
 
-`ledgerReconcile(ligneMatch, jambes)` est une fonction pure d'`api/ledger.js`, appelée à la **fin de
+`ledgerReconcile(ligneMatch, transferts)` est une fonction pure d'`api/ledger.js`, appelée à la **fin de
 chaque scénario** d'`api/test.js`. Elle vérifie l'appariement ligne à ligne avec `matches` :
 
 - aucun billet sans son engagement, aucun engagement sans son billet ;
@@ -487,6 +487,13 @@ chaque scénario** d'`api/test.js`. Elle vérifie l'appariement ligne à ligne a
 
 Le zéro global ne dit rien sur cet appariement : il est vrai même si un montant juste est posé sur
 le mauvais compte. La réconciliation ne coûte presque rien et attrape exactement cela.
+
+*Précision apportée par le module 1, parce qu'une des trois promesses ci-dessus ne tenait pas avec la
+signature écrite.* « Aucun engagement sans son billet » n'est pas décidable sur **une** ligne : un
+séquestre habité par une partie que `matches` ne connaît pas ne se voit qu'en regardant tous les
+billets à la fois. `ledgerReconcile` accepte donc **une ligne ou une liste de lignes**, et ne rend ce
+grief-là que dans le second cas. Elle rend une liste de griefs en français, vide quand tout
+s'apparie — un prédicat qui rendrait `false` ne dirait pas lequel des quatre contrôles a cédé.
 
 ### La vraie Postgres : ce qui est livré est la RECETTE
 

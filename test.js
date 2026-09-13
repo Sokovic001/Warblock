@@ -5089,4 +5089,176 @@ test('le jeu ENREGISTRE ce qu\'il joue : un seul écrivain, et rien pendant l\'i
     'le traducteur de l\'événement « fin » doit rester le seul appelant d\'endMatch');
 });
 
+// ---------------------------------------------------------------------------------------------
+// LA FENÊTRE DE RENONCEMENT (phase 03, module 1).
+//
+// Elle vit dans `WBCore` et pas dans `api/ledger.js` parce qu'elle est la seule règle du grand
+// livre réellement PARTAGÉE : le sas d'attente doit dire au joueur ce que partir va lui coûter, et
+// le serveur doit l'arbitrer. Ses tests sont donc ici, avec les règles du jeu.
+//
+// Ils sont en fin de fichier et non dans la section « Waiting room » pour une raison mécanique :
+// ils lisent le TEXTE du fichier, et `corpsDe`, `corpsDansBloc` et `sansCommentaires` sont déclarés
+// plus haut en `const`, donc hors de portée d'un test qui s'exécuterait avant eux.
+console.log('La fenêtre de renoncement');
+
+test('joinRate rend exactement les mêmes valeurs qu\'avant l\'extraction de LOBBY.pressureMax', () => {
+  // Le plafond 2,4 était un littéral dans `joinRate` ; il a reçu un nom pour que la fenêtre en
+  // DÉRIVE au lieu de le recopier. Nommer une constante ne doit rien changer, et « ne rien
+  // changer » se prouve : la référence ci-dessous est l'ANCIENNE fonction, littéral compris, et les
+  // deux sont confrontées sur toute la plage de files d'attente que le lobby peut produire.
+  const avant = (queue, seats) => (seats - 1) / C.LOBBY.wait * Math.max(0.55, Math.min(2.4, queue / (seats * 3)));
+  assert.strictEqual(C.LOBBY.pressureMax, 2.4);
+  for (const id of Object.keys(C.MODES)) {
+    const seats = C.seatsOf(C.MODES[id]);
+    for (let q = 0; q <= 20000; q++)
+      assert.strictEqual(C.joinRate(q, seats), avant(q, seats), `${id} file=${q}`);
+    // Et les entrées que le lobby ne produit pas mais qu'un appelant pourrait lui donner : le
+    // plancher et le plafond doivent se comporter comme avant, eux aussi.
+    for (const q of [-1, 0, 0.5, 1e9, Infinity])
+      assert.strictEqual(C.joinRate(q, seats), avant(q, seats), `${id} file=${q}`);
+  }
+});
+
+test('la fenêtre vaut dix secondes, et elle DÉRIVE du lobby au lieu d\'en recopier les nombres', () => {
+  assert.strictEqual(C.RENONCE_MARGE_S, 3);
+  assert.strictEqual(C.renonceFenetreS(), 10);
+  // La dérivation ne se prouve pas en récitant la formule — ce serait la recopier une troisième
+  // fois. On BOUGE le lobby et on regarde si la fenêtre suit. Une fenêtre qui aurait gardé « 10 »
+  // en dur, ou recopié « 2.4 », ne bougerait pas.
+  const pression = C.LOBBY.pressureMax, attente = C.LOBBY.wait;
+  try {
+    C.LOBBY.pressureMax = 1;                    // salle pleine à 25 s, coup d'envoi à 28 s
+    assert.strictEqual(C.renonceFenetreS(), 25);
+    C.LOBBY.wait = 50;                          // salle pleine à 50 s, coup d'envoi à 53 s
+    assert.strictEqual(C.renonceFenetreS(), 50);
+  } finally { C.LOBBY.pressureMax = pression; C.LOBBY.wait = attente; }
+  assert.strictEqual(C.renonceFenetreS(), 10, 'le lobby n\'a pas été remis dans son état');
+});
+
+test('renonciationOuverte est vraie pendant toute la fenêtre, bornes comprises, et fausse ensuite', () => {
+  const F = C.renonceFenetreS() * 1000, t0 = 1700000000000;
+  const billet = { openedAt: t0 };
+  assert.strictEqual(C.renonciationOuverte(billet, t0), true, 'à l\'instant de l\'ouverture');
+  assert.strictEqual(C.renonciationOuverte(billet, t0 + 1), true);
+  assert.strictEqual(C.renonciationOuverte(billet, t0 + F - 1), true);
+  assert.strictEqual(C.renonciationOuverte(billet, t0 + F), true, 'la borne haute est COMPRISE');
+  assert.strictEqual(C.renonciationOuverte(billet, t0 + F + 1), false,
+    'une milliseconde de plus et la fenêtre est close');
+  assert.strictEqual(C.renonciationOuverte(billet, t0 + 3600000), false);
+  // Postgres rend `opened_at` en `Date`, le sas compte en millisecondes. La FORME de l'horodatage
+  // ne doit pas décider d'un remboursement : les deux écritures donnent la même réponse.
+  assert.strictEqual(C.renonciationOuverte({ openedAt: new Date(t0) }, new Date(t0 + F)), true);
+  assert.strictEqual(C.renonciationOuverte({ openedAt: new Date(t0) }, new Date(t0 + F + 1)), false);
+  // Rien d'illisible ne doit rendre « ouvert » : un billet sans heure d'ouverture rembourserait
+  // tout le monde pour toujours.
+  for (const mauvais of [undefined, null, {}, { openedAt: null }, { openedAt: 'hier' }, { openedAt: NaN }])
+    assert.strictEqual(C.renonciationOuverte(mauvais, t0), false, JSON.stringify(mauvais));
+  assert.strictEqual(C.renonciationOuverte(billet, undefined), false);
+});
+
+test('renonciationOuverte ne lit AUCUNE horloge : elle la reçoit', () => {
+  // C'est ce qui permet au sas de l'appeler avec son chronomètre et au serveur avec le sien, sans
+  // que l'un ait à deviner l'autre. Une horloge lue à l'intérieur rendrait la fonction intestable
+  // et, pire, donnerait deux réponses différentes des deux côtés du réseau.
+  // `corpsDansBloc` ne sait lire que les déclarations de premier niveau des blocs SIM et `Game` ;
+  // celles de `WBCore` vivent dans une fermeture et sont indentées. On les découpe donc ici.
+  const corpsCore = nom => {
+    const d = core.indexOf(`function ${nom}(`);
+    assert.ok(d >= 0, `${nom} n'a pas été retrouvée dans WBCore`);
+    const f = core.indexOf('\n  }', d);
+    assert.ok(f > d, `la fin de ${nom} n'a pas été retrouvée`);
+    return core.slice(d, f);
+  };
+  const texte = sansCommentaires(corpsCore('renonciationOuverte') + '\n' + corpsCore('renonceFenetreS'));
+  for (const interdit of ['Date.now', 'new Date', 'performance', 'Math.random'])
+    assert.ok(!texte.includes(interdit), `la fenêtre de renoncement lit ${interdit}`);
+  // Et à l'exécution : mêmes arguments, même réponse, quel que soit le moment de l'appel.
+  const billet = { openedAt: 0 };
+  const a = C.renonciationOuverte(billet, 5000);
+  for (let i = 0; i < 1000; i++) assert.strictEqual(C.renonciationOuverte(billet, 5000), a);
+});
+
+test('LE TEST QUI COMPTE : la fenêtre est strictement plus courte que le coup d\'envoi le plus précoce, sur TOUT le domaine', () => {
+  // Deux règles décident du même nombre : le serveur dira « on peut encore renoncer », le lobby dit
+  // « c'est parti ». On les confronte donc sur tout leur domaine et pas sur un exemple — c'est la
+  // leçon du pot forfaitaire ressuscité, où deux calculs du même montant avaient cohabité des mois.
+  //
+  // La règle du sas, reprise du code et gardée textuellement par le test suivant : `W.drop` part de
+  // `LOBBY.wait` et descend à `W.t + LOBBY.dropIn` dès que `seatsAt(t, seats, rate) >= seats`.
+  // L'instant où la salle se remplit n'est pas déduit d'une formule recopiée : il est CHERCHÉ en
+  // interrogeant `seatsAt`, la fonction que `waitTick` appelle réellement.
+  const premierPlein = (seats, rate) => {
+    let lo = 0, hi = 1;
+    while (C.seatsAt(hi, seats, rate) < seats) { hi *= 2; assert.ok(hi < 1e9, 'la salle ne se remplit jamais'); }
+    for (let i = 0; i < 60; i++) {
+      const mid = (lo + hi) / 2;
+      if (C.seatsAt(mid, seats, rate) >= seats) hi = mid; else lo = mid;
+    }
+    return hi;
+  };
+  const fenetreMs = C.renonceFenetreS() * 1000;
+  let plusPrecoce = Infinity, ou = '', combinaisons = 0;
+  const eprouver = (etiquette, seats, queue) => {
+    const rate = C.joinRate(queue, seats);
+    // Le coup d'envoi CONTINU : une borne inférieure de ce que le sas fera vraiment, puisque
+    // `waitTick` n'observe la salle que tous les dixièmes de seconde et ne peut donc que décoller
+    // plus tard. Confronter la fenêtre à la borne la plus basse est la comparaison la plus dure.
+    const envoiS = Math.min(C.LOBBY.wait, premierPlein(seats, rate) + C.LOBBY.dropIn);
+    combinaisons++;
+    if (envoiS < plusPrecoce) { plusPrecoce = envoiS; ou = etiquette; }
+    assert.ok(fenetreMs < envoiS * 1000,
+      `${etiquette} : la fenêtre de ${fenetreMs} ms rembourserait une partie lancée depuis ${envoiS * 1000} ms`);
+  };
+  // 1. Toute la plage de files d'attente, entier par entier, sur les cinq modes. Le plafond est
+  //    pris au-dessus de ce que `queueFor` peut rendre à l'heure de pointe d'un samedi soir, et une
+  //    assertion plus bas vérifie qu'il l'est resté.
+  for (const id of Object.keys(C.MODES)) {
+    const seats = C.seatsOf(C.MODES[id]);
+    for (let q = 0; q <= 6000; q++) eprouver(`${id} file=${q}`, seats, q);
+  }
+  // 2. Et le domaine que le jeu produit vraiment : les vingt-quatre heures d'`onlineTotal`, semaine
+  //    et week-end, croisées avec les cinq modes et les quatre tables. C'est ce croisement qui
+  //    répond à « la borne exacte n'est pas calculable côté serveur » : elle dépend du fuseau
+  //    horaire du client, donc on les essaie tous.
+  let fileMax = 0;
+  for (const jour of ['2026-01-07', '2026-01-10']) {            // un mercredi, un samedi
+    for (let h = 0; h < 24; h++) for (const min of [0, 17, 31, 46, 59]) {
+      const quand = new Date(`${jour}T${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}:00`);
+      const total = C.onlineTotal(quand);
+      for (const id of Object.keys(C.MODES)) {
+        const seats = C.seatsOf(C.MODES[id]);
+        for (const t of C.TIERS) {
+          const q = C.queueFor(total, id, t.stake);
+          if (q > fileMax) fileMax = q;
+          eprouver(`${id} $${t.stake} ${jour} ${h}h${min}`, seats, q);
+        }
+      }
+    }
+  }
+  assert.ok(combinaisons > 30000, `le domaine balayé est trop maigre : ${combinaisons} combinaisons`);
+  assert.ok(fileMax <= 6000, `queueFor monte à ${fileMax}, au-delà du balayage entier par entier`);
+  // Le coup d'envoi le plus précoce du jeu, et il n'est PAS de 25 secondes : `LOBBY.wait` divisé par
+  // la pression maximale, plus `dropIn`. C'est exactement ce que la fenêtre doit éviter, et l'écart
+  // qu'elle garde est la marge de latence.
+  assert.ok(Math.abs(plusPrecoce - (C.LOBBY.wait / C.LOBBY.pressureMax + C.LOBBY.dropIn)) < 1e-6,
+    `le coup d'envoi le plus précoce vaut ${plusPrecoce} s (${ou})`);
+  assert.ok(plusPrecoce > 13.4 && plusPrecoce < 13.5, `${plusPrecoce} s`);
+  assert.strictEqual(C.renonceFenetreS(), 10);
+});
+
+test('la règle du sas est toujours celle que la fenêtre suppose', () => {
+  // La confrontation ci-dessus rejoue la règle du sas ; elle n'aurait plus aucune valeur si le sas
+  // changeait de règle sans que rien ne le dise. Même patron que les gardes textuelles du bloc SIM.
+  const depart = sansCommentaires(corpsDe('enterWaiting'));
+  assert.ok(depart.includes('drop:C.LOBBY.wait'),
+    'le compte à rebours du sas ne part plus de LOBBY.wait');
+  assert.ok(depart.includes('C.joinRate(queue,seats)') && depart.includes('C.queueFor('),
+    'le sas ne tire plus sa cadence de joinRate/queueFor');
+  const tick = sansCommentaires(corpsDe('waitTick'));
+  assert.ok(tick.includes('C.seatsAt(W.t,W.seats,W.rate)'),
+    'le sas ne compte plus les sièges avec seatsAt');
+  assert.ok(tick.includes('W.drop=Math.min(W.drop,W.t+C.LOBBY.dropIn)'),
+    'la règle « salle pleine → coup d\'envoi dans dropIn » a changé de forme, et la fenêtre de renoncement la suppose');
+});
+
 Promise.all(enVol).then(() => console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`));

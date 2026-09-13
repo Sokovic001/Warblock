@@ -1242,9 +1242,13 @@ const WBCore = (function(){
   function preset(tier){ return QUALITY.presets[tier] || QUALITY.presets.medium; }
   // ---- Pre-match waiting room. A match is sealed once it drops: nobody joins in progress, so the
   // lobby has to fill first. How fast it fills depends on how deep the queue for that table is.
-  const LOBBY = { wait: 25, dropIn: 3, minFill: 6 };
+  // `pressureMax` est le plafond de pression, jusqu'ici écrit en littéral dans `joinRate`. Il
+  // reçoit un nom parce que la fenêtre de renoncement ci-dessous en DÉRIVE : recopié, il aurait été
+  // la troisième copie du patron déjà condamné pour `terminal`, `faits` et `argentCents`. La valeur
+  // ne bouge pas, le comportement de `joinRate` non plus.
+  const LOBBY = { wait: 25, dropIn: 3, minFill: 6, pressureMax: 2.4 };
   function joinRate(queue, seats){            // players per second walking into the room
-    const pressure = Math.max(0.55, Math.min(2.4, queue / (seats * 3)));
+    const pressure = Math.max(0.55, Math.min(LOBBY.pressureMax, queue / (seats * 3)));
     return (seats - 1) / LOBBY.wait * pressure;
   }
   function seatsAt(elapsed, seats, rate){     // you are seat 1, the rest trickle in
@@ -1252,6 +1256,42 @@ const WBCore = (function(){
   }
   function fillTime(seats, rate){             // when the room is expected to be full
     return Math.max(LOBBY.minFill, Math.min(LOBBY.wait, (seats - 1) / rate));
+  }
+  // ---- LA FENÊTRE DE RENONCEMENT, et pourquoi elle vit ici plutôt que dans `api/ledger.js`.
+  //
+  // La comptabilité n'est pas une règle du jeu et n'a rien à faire dans les 465 Ko que chaque
+  // joueur télécharge : le plan de comptes est donc côté serveur. CETTE fenêtre-ci est l'exception,
+  // et pour une raison précise — elle est réellement PARTAGÉE. L'écran du sas doit dire au joueur
+  // ce que partir va lui coûter, et le serveur doit l'arbitrer. Deux définitions seraient la
+  // troisième copie du patron déjà condamné pour `terminal`, `faits` et `argentCents`.
+  //
+  // La borne évidente — `LOBBY.wait` — est FAUSSE. Le jeu décolle plus tôt : `waitTick` pose
+  // `W.drop = min(W.drop, W.t + LOBBY.dropIn)` dès que la salle est pleine, et la salle est pleine
+  // à `LOBBY.wait / pression`. Une fenêtre de 25 secondes rembourserait donc une partie commencée
+  // depuis une douzaine de secondes de jeu réel, et le vol qu'on se donne le mal de fermer se
+  // rouvrirait par la porte d'à côté. La borne EXACTE, elle, n'est pas calculable côté serveur : la
+  // pression vient de `queueFor`, qui lit `onlineTotal`, qui lit l'heure locale du CLIENT.
+  //
+  // Le seul bord sûr est donc le coup d'envoi le plus PRÉCOCE possible, moins une marge.
+  //
+  // La marge existe parce que l'erreur va dans le mauvais sens : `opened_at` est POSTÉRIEUR au
+  // `t = 0` du client — il faut une requête pour l'obtenir — donc `maintenant − opened_at`
+  // SOUS-ESTIME le temps déjà passé au sas. Sans elle, le serveur croirait la fenêtre encore
+  // ouverte alors que la partie a commencé.
+  const RENONCE_MARGE_S = 3;
+  function renonceFenetreS(){
+    return Math.floor(LOBBY.wait / LOBBY.pressureMax + LOBBY.dropIn) - RENONCE_MARGE_S;
+  }
+  // PURE : elle ne lit aucune horloge, elle la REÇOIT. C'est ce qui permet au sas de l'appeler avec
+  // son propre chronomètre et au serveur avec le sien, sans que l'un ait à deviner l'autre. Le
+  // chronomètre du client est en AVANCE sur celui du serveur, donc l'écran ferme la promesse un peu
+  // avant que le serveur ne la ferme : il ne promet jamais un remboursement qui sera refusé.
+  function renonciationOuverte(billet, maintenant){
+    const t0 = billet && billet.openedAt;
+    const ouvert = (t0 instanceof Date) ? t0.getTime() : Number(t0);
+    const t = (maintenant instanceof Date) ? maintenant.getTime() : Number(maintenant);
+    if (!Number.isFinite(ouvert) || !Number.isFinite(t)) return false;
+    return t - ouvert <= renonceFenetreS() * 1000;
   }
   // ---- Simulated player population (there are no real players yet — every opponent is a bot).
   // A diurnal curve peaking at 21:00 local, a weekend bump, and smooth minute-level drift, so the
@@ -2738,7 +2778,7 @@ const WBCore = (function(){
   }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
-           authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, HOLD_REPEAT, BRAWLERS, BRAWLER_IDS,
+           authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, RENONCE_MARGE_S, renonceFenetreS, renonciationOuverte, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, HOLD_REPEAT, BRAWLERS, BRAWLER_IDS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,

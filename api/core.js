@@ -32,7 +32,13 @@ const ATTENDUS = ['sanitizeName', 'validName', 'nameKey', 'nameOr', 'NAME', 'MOD
                   'TRACE', 'traceMaxSteps', 'traceDecode',
                   // Le rejeu du module 7 : le rapport qu'il reconstruit depuis la partie rejouée,
                   // et la comparaison des empreintes qui dit si son rejeu a convergé.
-                  'reportFrom', 'digestsDecode', 'digestsDiff', 'PG_INT4_MAX'];
+                  'reportFrom', 'digestsDecode', 'digestsDiff', 'PG_INT4_MAX',
+                  // Phase 03. La SEULE règle du grand livre qui descende dans WBCore, parce
+                  // qu'elle est réellement partagée : le sas d'attente dit au joueur ce que partir
+                  // va lui coûter, le serveur l'arbitre. Tout le reste — plan de comptes, motifs,
+                  // mouvements — vit dans api/ledger.js et n'a rien à faire dans les 465 Ko que
+                  // chaque joueur télécharge.
+                  'renonciationOuverte', 'renonceFenetreS'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBCore n'exporte plus ${nom}.`);
 }
