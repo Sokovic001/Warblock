@@ -24,3 +24,43 @@ jobs:
       - run: npm install --no-audit --no-fund
         working-directory: api
       - run: node api/test.js
+
+  # LA VRAIE POSTGRES, ET POURQUOI C'EST UN JOB À PART.
+  #
+  # Le job `test` ci-dessus ne change pas d'une ligne, et c'est le point : `npm test` tourne sans
+  # base et sans réseau, tout est injecté dans `createApp()`, et un contributeur doit pouvoir tout
+  # lancer sans rien installer. Mais sa doublure IMITE les contraintes de Postgres au lieu de les
+  # subir, et « un test qui passe contre la doublure prouve la doublure » est écrit trois fois dans
+  # le dossier. Ce job-ci est la seule façon de solder cette dette au lieu de la promettre : sans
+  # lui, le module se clôt sur une intention.
+  #
+  # Le `DATABASE_URL` désigne le service de ce job et rien d'autre : une base jetable, créée et
+  # détruite avec l'exécution. Ce n'est pas un secret, et aucun secret n'entre dans le dépôt.
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: warblock_check
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # `pg` est déjà une dépendance déclarée de l'API, avec sa raison écrite : aucune dépendance
+      # nouvelle n'entre par ce job.
+      - run: npm install --no-audit --no-fund
+        working-directory: api
+      - run: node api/db-check.js
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/warblock_check

@@ -51,7 +51,7 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 375 tests sur le jeu (`node test.js`) et
-  152 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  164 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -220,6 +220,15 @@ porte : le reste a besoin d'un navigateur pour tourner.
   que de le rendre. Renvoyer une trace perdue puis son résultat sur le **même** `match_id` reste
   possible : c'est le but. Et deux tentatives ne se cousent pas — un `seq` déjà posé dont les
   données diffèrent sort en 409 `trace_divergente` au lieu d'être avalé en silence.
+- **`ledger_entries` est en insertion seule et en LIGNES-TRANSFERT** : montant strictement positif,
+  compte débité différent du compte crédité, donc la partie double est structurelle et la somme du
+  livre est nulle par construction. Aucun `update`, aucun `delete` : une correction est une
+  **contre-passation**. Les comptes portent une **grammaire** — trois des six sont des familles
+  paramétrées — recopiée caractère pour caractère depuis `api/ledger.js`, et les motifs une liste
+  fermée de six ; deux gardes comparent le schéma au code. La clé
+  `(motif, reference, compte_debit, compte_credit)` prouve qu'une jambe s'écrit au plus une fois,
+  et ne prouve **pas** l'unicité d'une décomposition — ce trou-là est refermé par l'interdiction du
+  découvert sur le séquestre et par la clause du règlement.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Une divergence est mesurée, jamais punie.** La ligne est réglée et payée, marquée
@@ -280,9 +289,13 @@ tout solde y est modifiable depuis la console.
   divergente va en **quarantaine**, mesuré et jamais dépensable. *Module 1 livré* : `api/ledger.js`
   existe, entièrement pur — grammaire, motifs, mouvements, `soldeDe`, `ledgerReconcile` — et
   `WBCore` a reçu la seule règle réellement partagée avec le sas, `renonciationOuverte` et sa
-  fenêtre de dix secondes. Rien n'est encore écrit sur un disque. Rien n'est fait tant que les cinq
-  modules ne sont pas livrés et que le job Postgres n'a pas été vert une fois — jusque-là, un test
-  qui passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
+  fenêtre de dix secondes. *Module 2 livré* : la table `ledger_entries` en insertion seule et en
+  lignes-transfert, l'écrivain unique `ledgerWrite` de `db-pg.js`, les gardes textuelles qui
+  comparent l'expression des comptes et la liste des motifs au texte du schéma, `api/db-check.js` et
+  son job d'intégration continue. **Aucune route n'écrit encore une ligne du livre**, et le job
+  Postgres n'a jamais tourné : le module livre la RECETTE, pas le plat. Rien n'est fait tant que les
+  cinq modules ne sont pas livrés et que ce job n'a pas été vert une fois — jusque-là, un test qui
+  passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre

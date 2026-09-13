@@ -1,4 +1,4 @@
-# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b)
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b), grand livre (phase 03, en cours)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
 ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
@@ -524,6 +524,10 @@ net_cents is null` qui arbitre l'unicité du règlement, n'a jamais été éprou
 Un test qui passe contre la doublure prouve la doublure, pas Postgres. C'est la dette la plus
 silencieuse de la phase, et elle se solde le jour où une base tournera — pas avant.
 
+Depuis la phase 03 elle a une **recette** : `api/db-check.js` et son job d'intégration continue,
+décrits plus bas. Une recette n'est pas un plat : tant que ce job n'a pas été vert une fois, la
+phrase ci-dessus reste vraie mot pour mot.
+
 ## `ledger.js` — le grand livre, et rien d'autre
 
 Phase 03, module 1. Un fichier **entièrement pur** : la grammaire des comptes, la liste fermée des
@@ -604,6 +608,101 @@ pas deux constantes, il **confronte** la fenêtre au vrai code du lobby — `joi
 règle de `waitTick` — sur les cinq modes, les quatre tables, toute la plage de files d'attente et les
 vingt-quatre heures d'`onlineTotal` : le coup d'envoi le plus précoce y vaut 13,42 s.
 
+## `ledger_entries` — la table, et ce que sa clé prouve
+
+Phase 03, module 2. Le grand livre cesse d'être un objet en mémoire : il a une table, et rien de ce
+qu'`api/ledger.js` construit ne s'écrit ailleurs.
+
+**Insertion seule, et sans exception.** Aucun `update`, aucun `delete`, nulle part, jamais. Une
+écriture modifiée est une **preuve détruite** : on ne peut plus dire ce qui a été payé ni quand. Une
+écriture fausse se corrige par une **contre-passation** — un mouvement inverse, daté, motivé, qui
+laisse les deux visibles. Deux gardes textuelles le tiennent : aucun `update` ni `delete` de
+`db-pg.js` ne vise cette table, et la doublure d'`api/test.js` n'expose aucun chemin de modification
+(les lignes qu'elle pose sont gelées).
+
+**Une ligne est un TRANSFERT** : `montant_cents integer not null check (montant_cents > 0)`,
+`compte_debit`, `compte_credit`, et `check (compte_debit <> compte_credit)`. La somme du livre est
+donc nulle **par construction**, et la partie double est structurelle plutôt qu'assertée avant
+l'insertion. Strictement positif, pas « positif ou nul » : c'est cette contrainte-là qui oblige
+`api/ledger.js` à **omettre** une jambe nulle au lieu de la poser.
+
+**Les comptes portent une GRAMMAIRE, pas une liste fermée.** Trois des six comptes sont des familles
+paramétrées, et un `check (compte in (...))` aurait été refusé au premier joueur inscrit. Les deux
+colonnes portent donc `check (compte ~ '…')`, où l'expression est celle qu'exporte `api/ledger.js`
+sous le nom `COMPTE_RE_SQL`, **recopiée caractère pour caractère**. Un test compare les deux textes ;
+une expression qui diverge du code est le patron du `respawn()` défini deux fois. Les **motifs**,
+eux, sont une vraie liste fermée : un `check (motif in (…))` à six valeurs, comparé lui aussi à
+`MOTIFS`.
+
+**La clé d'idempotence est `(motif, reference, compte_debit, compte_credit)`**, et il faut dire les
+deux moitiés :
+
+- **Ce qu'elle prouve** : une jambe s'écrit au plus une fois, donc un mouvement rejoué en bloc
+  n'écrit rien — les paires de comptes d'un même mouvement sont distinctes deux à deux, garanti et
+  testé dans `api/ledger.js`, donc la clé identifie exactement une jambe. C'est l'insertion
+  **refusée** qui apprend ce qui existait déjà, jamais un `select` préalable : la fenêtre entre le
+  « existe-t-il ? » et l'écriture vaut ici un crédit en double. Et l'écrivain ne porte **pas** de
+  `on conflict do nothing` : sur `match_traces` avaler le doublon est le bon comportement, ici un
+  doublon veut dire qu'on paie deux fois et l'appelant doit l'apprendre.
+- **Ce qu'elle ne prouve pas** : elle n'interdit pas deux **décompositions différentes** sur la même
+  référence. Ce trou-là est refermé ailleurs — l'interdiction du découvert sur le séquestre (un
+  second gain devrait débiter un séquestre déjà vide) et la clause `where status = 'open' and
+  net_cents is null` du règlement de `matches`. Trois protections qui se recouvrent, et c'est voulu.
+
+Deux index de lecture, `(compte_debit)` et `(compte_credit)` : le solde est une **somme** sur ces
+lignes, et c'est cette somme qui remplace la case qu'on ne crée pas. L'échappatoire nommée, le jour
+où elle coûtera trop cher, est l'instantané de clôture — jamais une colonne mise à jour.
+
+`matches.status` reçoit au passage sa **sixième** valeur, `'renounced'`. Elle entre ici et pas au
+module qui l'écrira, parce que `ledgerReconcile` la connaît déjà : un statut que le code reconnaît
+et que la base refuse ne se verrait qu'au premier renoncement réel, en 500, mise débitée. Un test
+compare la liste du `check` à `ledger.STATUTS_CLOS`.
+
+Côté pilote, trois fonctions dans `db-pg.js`, et elles prennent toutes un **client déjà en
+transaction** : `ledgerWrite`, l'écrivain **unique** ; `ledgerSolde`, la somme des crédits moins la
+somme des débits ; `ledgerDe`, la relecture par référence. Ce ne sont pas des méthodes du `db` injecté
+dans `createApp()` — le routeur ne les voit jamais. Une écriture du livre n'a de sens qu'avec ce
+qu'elle accompagne, et les deux doivent échouer ou réussir ensemble ; une méthode qui ouvrirait sa
+propre connexion rendrait cette atomicité impossible. `ledgerSolde` **convertit** ce que `sum()` rend :
+c'est un `bigint`, donc une chaîne, et un solde parti en texte ferait comparer « 9 » et « 10 »
+caractère par caractère — le refus de découvert laisserait passer exactement ce qu'il existe pour
+arrêter.
+
+## `db-check.js` — la vraie Postgres, et ce qui est livré est la RECETTE
+
+**Livrer un script n'est pas l'avoir lancé.** Ce qui est livré ici, c'est la recette : un script, un
+job d'intégration continue, et une liste de scénarios qui citent nommément les contraintes que la
+doublure se contente d'imiter.
+
+- **Sans `DATABASE_URL`, `node api/db-check.js` sort 0 en le disant.** Le contrôle est avant tout
+  `require('pg')`, pour que le script n'échoue pas non plus sur une machine sans dépendances.
+- **Il n'entre pas dans `npm test`**, qui continue de tourner sans base et sans réseau — règle non
+  négociable du dépôt, tout est injecté dans `createApp()`. Un test le lance avec un environnement
+  vidé pour le vérifier, et un autre vérifie que le job existant n'a reçu ni service ni base.
+- Il **écrit et efface** dans la base qu'on lui donne : une base jetable, celle du service du job.
+- Ce qu'il éprouve, nommément : `name_key` ; l'index **partiel** « un seul billet ouvert », et la
+  place qui se libère au billet clos ; `on conflict do nothing` sur `(match_id, seq)` ; la clause
+  `where status = 'open' and net_cents is null` ; la clé du grand livre, **refusée et non avalée** ;
+  la grammaire des comptes, les comptes distincts, le montant strictement positif, la liste fermée
+  des motifs ; les largeurs `integer` (un entier « valide » à 3 000 000 000 lève bien `22003`) ; la
+  somme globale du livre à zéro ; le fait que `ledgerSolde` rende un **nombre** ; et que l'expression
+  des comptes se comporte pareil dans le moteur POSIX de Postgres et dans celui de JavaScript — deux
+  textes identiques ne sont pas deux moteurs d'accord.
+- **Le seul test qui ne peut exister nulle part ailleurs** : deux transactions **concurrentes** qui
+  débitent le même compte se sérialisent. Deux connexions réelles, `select id from users where id =
+  $1 for update` dans les deux, et on **observe l'attente** — avec un contrôle sur un autre joueur,
+  sans lequel une connexion morte se lirait comme un verrou qui marche. Puis deux débits simultanés
+  du même solde : un seul aboutit, l'autre est refusé, et le solde ne passe jamais en négatif. Un
+  verrou éprouvé en série ne prouve rien : une doublure JavaScript mono-fil sérialise gratuitement
+  ce que Postgres ne sérialise que si on le lui demande correctement.
+
+Le job `db` de `.github/workflows/test.yml` monte un service `postgres:16` et le lance. Le job
+existant ne change pas d'une ligne, et un test compare ses étapes une à une.
+
+**Tant que ce job n'a pas été vert une fois, un test qui passe contre la doublure prouve la
+doublure.** Cette phrase reste vraie et reste écrite. Rien de ce module ne permet d'écrire que la
+dette est soldée : il permet d'écrire qu'elle a maintenant une recette.
+
 ## Les fichiers
 
 ```
@@ -614,9 +713,10 @@ ledger.js           le grand livre : grammaire, motifs, mouvements. PUR, aucune 
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
+db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
-schema.sql          le schéma : users, matches, match_traces. Aucune colonne « solde ».
-test.js             152 tests sans rien installer, 161 avec jose
+schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
+test.js             164 tests sans rien installer, 173 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -719,8 +819,10 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 152 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 161 : les 152, plus la chaîne complète de vérification
+node api/test.js          # 164 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 173 : les 164, plus la chaîne complète de vérification
+
+DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans
@@ -863,6 +965,12 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   **paiement** dépend. **Faire tourner une vraie Postgres au moins une fois — ne serait-ce qu'à la
   main, `psql -f schema.sql` puis une partie de bout en bout — est désormais un PRÉREQUIS de la
   phase 03**, et c'est écrit comme tel ici et dans `docs/PHASE-02B.md`.
+  *Où en est cette dette au module 2 de la phase 03* : elle a maintenant une **recette** —
+  `api/db-check.js`, qui applique le schéma à une vraie base et éprouve nommément chacune de ces
+  contraintes, plus le job `db` de `.github/workflows/test.yml` qui le lance sur un service
+  `postgres:16`. **Ce job n'a jamais été vert**, et la machine où le module a été écrit n'avait ni
+  Postgres ni Docker : le script n'a donc **jamais tourné contre une base**. Livrer un script n'est
+  pas l'avoir lancé, et la dette n'est pas soldée — elle est outillée.
 - **Un déploiement se DRAINE, il n'écrase pas les billets ouverts** — au plus une quinzaine de
   minutes, la durée de vie d'un billet. Ce n'est pas de l'architecture, c'est une décision
   d'exploitation, à ranger à côté de « la maison est la contrepartie de chaque pot ». Ce qui arrive

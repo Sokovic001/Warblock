@@ -8,6 +8,11 @@ const { createApp, checkProfile, checkMatch, makeLimiter, MATCH_MARGE_S } = requ
 const { parseApiKey, base58Encode, base58Decode, jwksUri } = require('./crossmint-key');
 const { identityFromClaims } = require('./auth-crossmint');
 const C = require('./core');
+// Le grand livre. Il est requis ICI, en tête, parce que la DOUBLURE de base s'en sert : elle imite
+// les contraintes de `ledger_entries`, et la grammaire des comptes comme la liste des motifs n'ont
+// qu'une source. Une doublure qui recopierait ces deux listes serait le patron du `respawn()` défini
+// deux fois, et elle mentirait dans le mauvais sens — en acceptant ce que la base refuse.
+const L = require('./ledger');
 // Le bloc de simulation du jeu, chargé par le serveur depuis index.html. Il est requis ICI, en tête
 // de fichier, parce que depuis le module 7 les tests de la route de résultat doivent JOUER de
 // vraies parties : le serveur ne croit plus aucun fait déclaré, donc un rapport écrit à la main ne
@@ -35,6 +40,10 @@ const COLONNES_INT4 = ['stake_cents', 'seats', 'team_size', 'gross_cents', 'fee_
                        'purse_cents', 'declared_net_cents', 'ecart_cents',
                        'seconds', 'kills', 'deaths', 'rank', 'cubes', 'damage',
                        'sim_version', 'seq', 'steps',
+                       // Phase 03 : le montant d'une écriture du grand livre est un `integer`
+                       // comme tous les autres montants, et il porte la même leçon — un entier
+                       // « valide » à 3 000 000 000 lève `22003`.
+                       'montant_cents',
                        // Phase 02b. `replay_digest` n'est PAS ici : c'est un `bigint`, comme la
                        // graine publique et pour la même raison — un entier 32 bits non signé ne
                        // tient pas dans l'`integer` signé de Postgres.
@@ -73,7 +82,24 @@ function fakeDb(seed = []) {
   // `match_traces`, EN INSERTION SEULE : la doublure n'expose aucun moyen de modifier ni de
   // supprimer une ligne, exactement comme db-pg.js n'écrit aucun `update` ni `delete` sur elle.
   const traces = [];
-  let next = users.length + 1, nextMatch = 1;
+  // `ledger_entries`, EN INSERTION SEULE ELLE AUSSI, et plus strictement encore : aucune méthode de
+  // cette doublure ne modifie ni ne supprime une écriture, et les lignes posées sont GELÉES — la
+  // règle « aucun `update`, aucun `delete` » commence par l'objet en mémoire. Le seul chemin de
+  // correction est une contre-passation, c'est-à-dire une insertion de plus.
+  const ledger = [];
+  let next = users.length + 1, nextMatch = 1, nextEcriture = 1;
+  // Les contraintes de `ledger_entries`, imitées une par une pour que la doublure MENTE COMME LE
+  // VRAI PILOTE. Sans elles un test verrait passer ce que Postgres refuse, et la classe de panne la
+  // plus coûteuse du dossier — une écriture d'argent qui échoue en plein milieu — resterait
+  // invisible. La grammaire et la liste des motifs ne sont pas recopiées ici : elles viennent de
+  // `api/ledger.js`, qui est aussi ce que `schema.sql` recopie.
+  // La clé d'idempotence, telle que l'index unique la définit : quatre colonnes, dans cet ordre.
+  const cleLedger = l => [l.motif, l.reference, l.compte_debit, l.compte_credit].join(' | ');
+  const refuseLedger = (code, contrainte) => {
+    const e = new Error(`new row for relation "ledger_entries" violates constraint "${contrainte}"`);
+    e.code = code; e.constraint = contrainte;
+    return e;
+  };
   // Les statistiques sont la SOMME des parties réglées, exactement comme l'agrégat SQL de
   // db-pg.js. Aucun compteur n'existe nulle part : il n'y a rien à incrémenter, donc rien qu'un
   // double envoi puisse fausser. Une partie refusée, périmée ou encore ouverte ne compte pour
@@ -202,6 +228,65 @@ function fakeDb(seed = []) {
       for (const m of matches)
         if (m.status === 'open' && new Date(m.expires_at) <= avant) { m.status = 'expired'; closes++; }
       return { closes };
+    },
+    // ---- LE GRAND LIVRE. Trois méthodes, une seule écrit, et il n'en existe pas de quatrième.
+    //
+    // Ce que cette doublure NE PROUVE PAS, et qu'il faut dire : le vrai écrivain prend un client
+    // déjà en transaction, celui-ci n'en a pas — un mono-fil JavaScript sérialise gratuitement ce
+    // que Postgres ne sérialise que si on le lui demande bien. La concurrence et l'atomicité
+    // s'éprouvent dans `api/db-check.js`, contre une vraie base, et là seulement.
+    ledger,
+    async ledgerWrite(transferts) {
+      if (!Array.isArray(transferts) || transferts.length === 0) {
+        throw new Error('grand livre : rien à écrire — un mouvement porte au moins un transfert');
+      }
+      // Tout est validé AVANT que la première ligne ne soit posée : la vraie écriture est dans une
+      // transaction, donc un mouvement s'écrit en entier ou pas du tout. Une doublure qui laisserait
+      // deux jambes sur trois raconterait une histoire que la base ne peut pas produire.
+      const nouvelles = [];
+      for (const t of transferts) {
+        if (!L.compteValide(t.compteDebit)) throw refuseLedger('23514', 'ledger_compte_debit_grammaire');
+        if (!L.compteValide(t.compteCredit)) throw refuseLedger('23514', 'ledger_compte_credit_grammaire');
+        if (t.compteDebit === t.compteCredit) throw refuseLedger('23514', 'ledger_comptes_distincts');
+        if (!L.MOTIFS.includes(t.motif)) throw refuseLedger('23514', 'ledger_entries_motif_check');
+        if (typeof t.reference !== 'string' || t.reference.length < 1 || t.reference.length > 128) {
+          throw refuseLedger('23514', 'ledger_entries_reference_check');
+        }
+        if (!Number.isInteger(t.montantCents) || t.montantCents <= 0) {
+          throw refuseLedger('23514', 'ledger_entries_montant_cents_check');
+        }
+        // La largeur de la colonne, la même que partout ailleurs : `22003` et pas un arrondi.
+        verifierColonnes({ montant_cents: t.montantCents });
+        const cle = cleLedger({ motif: t.motif, reference: t.reference,
+                                compte_debit: t.compteDebit, compte_credit: t.compteCredit });
+        // LA CLÉ D'IDEMPOTENCE, ET ELLE REFUSE — elle n'avale pas. Sur `match_traces`, `on conflict
+        // do nothing` est le bon comportement ; ici, un doublon veut dire qu'on paie deux fois, et
+        // l'appelant doit l'apprendre.
+        if (ledger.some(l => cleLedger(l) === cle) || nouvelles.some(l => cleLedger(l) === cle)) {
+          throw refuseLedger('23505', 'ledger_entries_mouvement_uniq');
+        }
+        // La ligne posée est GELÉE : la règle « aucun `update`, aucun `delete` » commence par
+        // l'objet en mémoire, et `db.ledger` est exposé aux tests pour être observé, pas retouché.
+        nouvelles.push(Object.freeze({
+          id: String(nextEcriture++), motif: t.motif, reference: t.reference,
+          compte_debit: t.compteDebit, compte_credit: t.compteCredit,
+          montant_cents: t.montantCents, cree_le: '2026-01-01T00:00:00Z' }));
+      }
+      for (const n of nouvelles) ledger.push(n);
+      return { ecrites: nouvelles.length };
+    },
+    // La somme des crédits moins la somme des débits, et un NOMBRE : le vrai pilote convertit ce que
+    // `sum()` lui rend en chaîne, la doublure rend donc ce qu'il rend une fois converti.
+    async ledgerSolde(compte) {
+      L.exigeCompte(compte);
+      return ledger.reduce((s, l) => s + (l.compte_credit === compte ? l.montant_cents : 0)
+                                       - (l.compte_debit === compte ? l.montant_cents : 0), 0);
+    },
+    async ledgerDe({ reference }) {
+      return ledger.filter(l => l.reference === reference)
+                   .map(l => ({ id: l.id, motif: l.motif, reference: l.reference,
+                                compte_debit: l.compte_debit, compte_credit: l.compte_credit,
+                                montant_cents: l.montant_cents, cree_le: l.cree_le }));
     },
     async findOrCreate({ authId, email, name, nameKey }) {
       let u = users.find(x => x.auth_id === authId);
@@ -1630,8 +1715,8 @@ test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées
       `${f} parle encore d'une table de compteurs`);
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   assert.deepStrictEqual((sql.match(/create table if not exists (\w+)/g) || []).sort(),
-    ['create table if not exists match_traces', 'create table if not exists matches',
-     'create table if not exists users']);
+    ['create table if not exists ledger_entries', 'create table if not exists match_traces',
+     'create table if not exists matches', 'create table if not exists users']);
   // « Une partie refusée ou restée ouverte ne compte pour rien » se prouve plus haut contre la
   // doublure ; la vraie requête, elle, n'est jamais exécutée par un test. On relit donc son texte.
   // Les commentaires sont retirés d'abord : ils citent `count()` et `sum()` entre accents graves,
@@ -2372,7 +2457,7 @@ test('LA ROUTE DU RÉSULTAT NE LIT PLUS AUCUN FAIT DU CORPS : garde textuelle', 
 //
 // À ce stade rien n'est écrit sur un disque : `api/ledger.js` est entièrement pur.
 console.log('Le grand livre : la grammaire, les transferts, les mouvements');
-const L = require('./ledger');
+// `L` est requis en tête de fichier : la doublure de base s'en sert déjà.
 // Les cinq modes avec leurs VRAIS sièges, et les quatre tables. Aucun échantillon : le domaine.
 const MODES_LEDGER = Object.keys(C.MODES).map(id => ({ id, seats: C.seatsOf(C.MODES[id]) }));
 const MISES_LEDGER = C.TIERS.map(t => C.toCents(t.stake));
@@ -2850,6 +2935,356 @@ test('ledgerReconcile attrape un séquestre NON VIDÉ sur une ligne close', () =
   // Un statut que le grand livre ne connaît pas ne passe pas en silence.
   assert.ok(L.ledgerReconcile({ id: 9, user_id: 1, status: 'zombie', stake_cents: 75 }, vide)
     .some(x => /statut inconnu/.test(x)));
+});
+
+console.log('Le grand livre : le schéma, les gardes textuelles, et la vraie Postgres');
+// Tout ce qui suit lit du TEXTE. Il faut le dire une fois de plus, parce que c'est la limite exacte
+// de ce module : aucune base ne tourne ici, et un test qui passe contre la doublure prouve la
+// doublure. Ce que ces gardes attrapent, c'est la DÉRIVE entre deux écritures de la même règle —
+// l'expression des comptes, la liste des motifs, une colonne dont le pilote parle et que le schéma
+// n'a plus. C'est `api/db-check.js` qui éprouve la base, et il ne tourne pas ici.
+const lireApi = f => require('node:fs').readFileSync(require('node:path').join(__dirname, f), 'utf8');
+// Le schéma sans ses commentaires, et le bloc du grand livre à l'intérieur : les commentaires
+// citent justement les expressions qu'on vérifie, et un commentaire est toujours d'accord avec ce
+// qu'on veut lui faire dire. C'est arrivé deux fois en écrivant les gardes des modules précédents.
+const SQL_NU = () => lireApi('schema.sql').replace(/--[^\n]*/g, '');
+const BLOC_LEDGER = () => {
+  const sql = SQL_NU(), i = sql.indexOf('create table if not exists ledger_entries');
+  assert.ok(i > 0, 'la table du grand livre a disparu de schema.sql');
+  return sql.slice(i);
+};
+const PG_NU = () => lireApi('db-pg.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+
+const COLONNES_LEDGER = ['id', 'motif', 'reference', 'compte_debit', 'compte_credit',
+                         'montant_cents', 'cree_le'];
+
+test('toute colonne du grand livre dont db-pg.js parle existe dans schema.sql', () => {
+  // L'extension de la garde qui existe déjà pour `matches` et `match_traces`, resserrée d'un cran :
+  // ici on n'exige pas seulement que le mot figure quelque part dans le schéma, mais qu'il soit
+  // déclaré DANS LA TABLE DU GRAND LIVRE. Une colonne d'une autre table porterait le même nom sans
+  // rien prouver — `motif` existe déjà sur `matches`, et il n'y a aucun rapport entre les deux.
+  const bloc = BLOC_LEDGER();
+  for (const col of COLONNES_LEDGER)
+    assert.match(bloc, new RegExp(`^\\s*${col}\\s`, 'm'), `la colonne ${col} manque à ledger_entries`);
+  const pg = PG_NU();
+  const listes = (pg.match(/^const LEDGER_\w+ =[^;]*;/gm) || []).join(' ').replace(/'/g, ' ');
+  const requetes = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q));
+  assert.ok(requetes.length >= 3, `seulement ${requetes.length} requêtes du grand livre dans db-pg.js`);
+  const MOTS_SQL = new Set(['const', 'select', 'from', 'where', 'and', 'or', 'is', 'not', 'null',
+    'insert', 'into', 'values', 'returning', 'order', 'by', 'sum', 'coalesce', 'filter', 'as',
+    'ledger_entries']);
+  const texte = (listes + ' ' + requetes.join(' '))
+    .replace(/\$\{[^}]*\}/g, ' ').replace(/'[^']*'/g, ' ').replace(/\bas\s+\w+/g, ' ');
+  const vus = new Set(texte.match(/\b[a-z_][a-z0-9_]*\b/g) || []);
+  assert.ok(vus.size > 8, `seulement ${vus.size} identifiants retrouvés dans les requêtes du livre`);
+  for (const mot of vus)
+    if (!MOTS_SQL.has(mot))
+      assert.ok(COLONNES_LEDGER.includes(mot),
+        `db-pg.js parle de « ${mot} » sur ledger_entries, qui n'est pas une colonne de cette table`);
+});
+
+test('ledger_entries est en INSERTION SEULE : aucun update, aucun delete, nulle part', () => {
+  // Une écriture modifiée est une PREUVE DÉTRUITE : on ne peut plus dire ce qui a été payé ni
+  // quand. Le seul chemin de correction est la contre-passation, c'est-à-dire une insertion de plus.
+  // Même garde que celle de `match_traces`, et pour une raison plus chère.
+  // La doctrine se lit dans les COMMENTAIRES du schéma, donc sur le texte brut : ailleurs, elle
+  // serait une intention que rien ne rappelle à celui qui ajoutera la prochaine requête.
+  const commente = lireApi('schema.sql');
+  const entete = commente.slice(commente.lastIndexOf('Phase 03'),
+                                commente.indexOf('create table if not exists ledger_entries'));
+  assert.match(entete, /INSERTION SEULE/, 'la doctrine a disparu de l\'en-tête de la table');
+  assert.match(entete, /contre-passation/i, 'le seul chemin de correction n\'est plus nommé');
+  assert.ok(/aucun `update`/i.test(entete) && /aucun `delete`/i.test(entete), entete);
+  for (const q of (PG_NU().match(/`[^`]*`/g) || [])) {
+    if (!/ledger_entries/.test(q)) continue;
+    assert.ok(!/\bupdate\s+ledger_entries\b/i.test(q), 'un update vise ledger_entries : ' + q);
+    assert.ok(!/\bdelete\s+from\s+ledger_entries\b/i.test(q), 'un delete vise ledger_entries : ' + q);
+  }
+  // Et l'insertion N'AVALE PAS le doublon : pas de `on conflict do nothing` ici. Sur `match_traces`
+  // c'était le bon comportement — premier écrit gagne, segment identique. Sur le grand livre, un
+  // doublon veut dire qu'on paie deux fois, et l'appelant doit l'apprendre.
+  const inserts = (PG_NU().match(/`[^`]*`/g) || []).filter(q => /insert into ledger_entries/i.test(q));
+  assert.strictEqual(inserts.length, 1, 'une seule insertion dans le grand livre');
+  assert.ok(!/on conflict/i.test(inserts[0]),
+    'l\'écriture du grand livre avale un doublon au lieu de le refuser : ' + inserts[0]);
+  // LE PIÈGE DU PILOTE, GARDÉ SUR LE TEXTE parce que `db-pg.js` n'est JAMAIS exécuté par les tests :
+  // `sum()` rend un `bigint`, donc une CHAÎNE. Un solde parti en texte ferait comparer « 9 » et
+  // « 10 » caractère par caractère, et le refus de découvert laisserait passer exactement ce qu'il
+  // existe pour arrêter. `api/db-check.js` l'éprouve pour de bon, contre une vraie base.
+  const pg = PG_NU();
+  const lecteur = pg.slice(pg.indexOf('async function ledgerSolde'), pg.indexOf('async function ledgerDe'));
+  assert.ok(lecteur.length > 200, 'le lecteur de solde n\'a pas été retrouvé');
+  assert.match(lecteur, /\bsum\s*\(/, 'le solde doit rester une SOMME, jamais une colonne');
+  assert.match(lecteur, /return\s+Number\(/, 'le solde repart en chaîne : sum() rend un bigint');
+  // La DOUBLURE n'expose aucun chemin de modification non plus : trois méthodes, une seule écrit.
+  const db = fakeDb();
+  assert.deepStrictEqual(Object.keys(db).filter(k => typeof db[k] === 'function' && /^ledger/.test(k)).sort(),
+    ['ledgerDe', 'ledgerSolde', 'ledgerWrite']);
+  // `db.ledger` est la table elle-même, exposée comme `db.matches` et `db.traces` pour être
+  // OBSERVÉE par les tests. Les lignes y sont gelées : même par ce chemin-là, rien ne se modifie.
+  assert.ok(Array.isArray(db.ledger) && db.ledger.length === 0);
+});
+
+await test('la doublure du grand livre REFUSE ce que la colonne refuserait, et un mouvement s\'écrit en entier ou pas du tout', async () => {
+  const db = fakeDb();
+  const mise = L.mouvementMise({ userId: 1, matchId: 1, miseCents: 50 });
+  await db.ledgerWrite(mise);
+  assert.strictEqual(db.ledger.length, 1);
+  // La ligne posée porte les colonnes du schéma, et rien d'autre — pas un champ interne de la
+  // doublure qu'un module suivant prendrait pour une colonne.
+  assert.deepStrictEqual(Object.keys(db.ledger[0]).sort(),
+    ['compte_credit', 'compte_debit', 'cree_le', 'id', 'montant_cents', 'motif', 'reference']);
+  // Et elle est GELÉE : la règle « aucun update, aucun delete » commence par l'objet en mémoire.
+  assert.ok(Object.isFrozen(db.ledger[0]));
+  assert.throws(() => { db.ledger[0].montant_cents = 1; }, TypeError);
+  // La clé (motif, reference, compte_debit, compte_credit) REFUSE la seconde, elle ne l'avale pas.
+  await assert.rejects(() => db.ledgerWrite(mise),
+    e => e.code === '23505' && e.constraint === 'ledger_entries_mouvement_uniq');
+  assert.strictEqual(db.ledger.length, 1, 'une écriture refusée ne doit rien laisser derrière');
+  // La largeur de la colonne : le `22003` déjà payé une fois.
+  await assert.rejects(() => db.ledgerWrite([{ motif: 'dotation', reference: 'x',
+    compteDebit: L.MAISON_DOTATION, compteCredit: L.compteJoueur(1), montantCents: 3_000_000_000 }]),
+    e => e.code === '22003');
+  // Et les contraintes de fond, chacune nommée comme la base la nomme.
+  const mauvais = [
+    [{ motif: 'depot', reference: 'x', compteDebit: L.MAISON_DOTATION, compteCredit: L.compteJoueur(1), montantCents: 1 }, 'ledger_entries_motif_check'],
+    [{ motif: 'mise', reference: 'x', compteDebit: 'maison:tresorerie', compteCredit: L.compteJoueur(1), montantCents: 1 }, 'ledger_compte_debit_grammaire'],
+    [{ motif: 'mise', reference: 'x', compteDebit: L.compteJoueur(1), compteCredit: 'joueur:007:disponible', montantCents: 1 }, 'ledger_compte_credit_grammaire'],
+    [{ motif: 'mise', reference: 'x', compteDebit: L.compteJoueur(1), compteCredit: L.compteJoueur(1), montantCents: 1 }, 'ledger_comptes_distincts'],
+    [{ motif: 'mise', reference: 'x', compteDebit: L.MAISON_DOTATION, compteCredit: L.compteJoueur(1), montantCents: 0 }, 'ledger_entries_montant_cents_check'],
+  ];
+  for (const [ligne, contrainte] of mauvais)
+    await assert.rejects(() => db.ledgerWrite([ligne]),
+      e => e.code === '23514' && e.constraint === contrainte, contrainte);
+  // UN MOUVEMENT S'ÉCRIT EN ENTIER OU PAS DU TOUT. La vraie écriture est dans une transaction ; une
+  // doublure qui laisserait deux jambes sur trois raconterait une histoire que la base ne peut pas
+  // produire, et le test d'atomicité passerait sur une doublure complaisante.
+  const p = C.cashoutCents(400);
+  const gain = L.mouvementGain({ userId: 1, matchId: 1, miseCents: 50, grossCents: p.grossCents,
+                                 feeCents: p.feeCents, netCents: p.netCents, convergee: true });
+  assert.ok(gain.length >= 3);
+  const boiteux = gain.slice(0, -1).concat([{ ...gain[gain.length - 1], montantCents: -1 }]);
+  await assert.rejects(() => db.ledgerWrite(boiteux), e => e.code === '23514');
+  assert.strictEqual(db.ledger.length, 1, 'un mouvement refusé a laissé des jambes derrière lui');
+  // Et le solde est un NOMBRE, jamais la chaîne que `sum()` rend — la conversion vit dans le vrai
+  // pilote, donc la doublure rend ce qu'il rend une fois converti.
+  const solde = await db.ledgerSolde(L.compteEnjeu(1));
+  assert.strictEqual(typeof solde, 'number');
+  assert.strictEqual(solde, 50);
+  assert.strictEqual(await db.ledgerSolde(L.compteJoueur(1)), -50);
+  assert.strictEqual((await db.ledgerDe({ reference: '1' })).length, 1);
+});
+
+test('les montants du grand livre sont integer et STRICTEMENT positifs', () => {
+  const bloc = BLOC_LEDGER();
+  const decl = (bloc.match(/^[ \t]*montant_cents\b.*$/m) || [])[0];
+  assert.ok(decl, 'la colonne des montants a disparu');
+  assert.match(decl, /\binteger\b/, decl);
+  // Strictement positif, et pas « positif ou nul » : une jambe de montant nul n'est pas
+  // représentable, et c'est ce qui oblige `api/ledger.js` à l'omettre plutôt qu'à la poser.
+  assert.match(decl, /check\s*\(\s*montant_cents\s*>\s*0\s*\)/, decl);
+  assert.ok(!/>=\s*0/.test(decl), 'un montant nul redeviendrait représentable : ' + decl);
+  // Et la partie double est STRUCTURELLE : deux comptes distincts sur la même ligne.
+  assert.match(bloc, /check\s*\(compte_debit\s*<>\s*compte_credit\)/,
+    'sans cette contrainte, une ligne peut ne rien déplacer et compter quand même');
+});
+
+test('le motif est contraint EXACTEMENT à la liste de api/ledger.js, comparée au TEXTE du schéma', () => {
+  // Une liste qui diverge du code est le patron du `respawn()` défini deux fois. Ici la divergence
+  // se paierait au premier motif refusé par la base sur un chemin d'argent, en 500.
+  const m = BLOC_LEDGER().match(/check\s*\(\s*motif in \(([^)]*)\)\s*\)/);
+  assert.ok(m, 'la contrainte des motifs a disparu de ledger_entries');
+  const dans = (m[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1));
+  assert.deepStrictEqual(dans, L.MOTIFS.slice(),
+    'la liste du schéma et celle d\'api/ledger.js ont divergé');
+  assert.strictEqual(dans.length, 6, 'six motifs, pas sept : le septième est une affaire de phase 06');
+});
+
+test('l\'expression des comptes du schéma est IDENTIQUE, caractère pour caractère, à COMPTE_RE_SQL', () => {
+  // Ce n'est PAS une énumération, et c'est justement pour cela que la comparaison peut être exacte :
+  // trois des six comptes sont des familles paramétrées, et un `check (compte in (...))` aurait été
+  // refusé au premier joueur inscrit. Le test compare une grammaire à une grammaire.
+  const bloc = BLOC_LEDGER();
+  const expressions = [];
+  for (const colonne of ['compte_debit', 'compte_credit']) {
+    const m = bloc.match(new RegExp(`check\\s*\\(${colonne}\\s*~\\s*'([^']*)'\\)`));
+    assert.ok(m, `la contrainte de grammaire de ${colonne} a disparu`);
+    assert.strictEqual(m[1], L.COMPTE_RE_SQL,
+      `${colonne} : le schéma et api/ledger.js ne portent pas la MÊME expression`);
+    expressions.push(m[1]);
+  }
+  assert.strictEqual(expressions.length, 2, 'les deux comptes doivent porter la contrainte');
+  // Et la grammaire n'a pas été « simplifiée » en liste fermée par quelqu'un de bien intentionné.
+  assert.ok(!/compte_(debit|credit)\s+in\s*\(/i.test(bloc),
+    'un `check (compte in (...))` est apparu : il serait refusé au premier joueur inscrit');
+  // `[1-9][0-9]*` et pas `[0-9]+` : les zéros de tête feraient de `joueur:007:disponible` et
+  // `joueur:7:disponible` deux comptes pour un seul joueur.
+  assert.ok(L.COMPTE_RE_SQL.includes('[1-9][0-9]*'), L.COMPTE_RE_SQL);
+});
+
+test('la clé du grand livre, et les deux index qui remplacent la case', () => {
+  const bloc = BLOC_LEDGER();
+  assert.match(bloc, /create unique index[^\n]*\n?[^\n]*on ledger_entries \(motif, reference, compte_debit, compte_credit\)/,
+    'la clé d\'idempotence du grand livre a disparu ou a changé de colonnes');
+  // Elle identifie UNE jambe, et c'est `api/ledger.js` qui le rend vrai : les paires de comptes d'un
+  // même mouvement sont distinctes deux à deux. On le reconstate ici sur le mouvement le plus
+  // fourni, celui qui a quatre jambes.
+  const p = C.cashoutCents(5000);
+  const gain = L.mouvementGain({ userId: 1, matchId: 1, miseCents: 100, grossCents: p.grossCents,
+                                 feeCents: p.feeCents, netCents: p.netCents, convergee: true });
+  const cles = new Set(gain.map(t => [t.motif, t.reference, t.compteDebit, t.compteCredit].join(' ')));
+  assert.strictEqual(cles.size, gain.length, 'deux jambes du même mouvement partagent la clé');
+  // Le solde est une SOMME sur ces lignes, jamais une colonne : les deux index de lecture sont ce
+  // qui rend cette somme tenable, et l'échappatoire nommée reste l'instantané, jamais une case.
+  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_debit\)/);
+  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_credit\)/);
+  // Et ce que la clé NE prouve pas doit rester écrit à côté d'elle : deux décompositions
+  // différentes sur la même référence passeraient, et c'est ailleurs que ce trou est refermé.
+  const commente = lireApi('schema.sql');
+  const i = commente.indexOf('create unique index if not exists ledger_entries_mouvement_uniq');
+  assert.ok(i > 0);
+  const raison = commente.slice(commente.lastIndexOf('-- LA CLÉ D\'IDEMPOTENCE', i), i);
+  assert.match(raison, /NE PROUVE PAS/, 'la limite de la clé n\'est plus écrite à côté d\'elle');
+  assert.match(raison, /découvert|séquestre/i);
+  assert.match(raison, /net_cents is null/);
+});
+
+test('les statuts clos du grand livre et le `check` de matches.status sont la MÊME liste', () => {
+  // `ledgerReconcile` exige un séquestre vide sur cinq statuts clos, dont `renounced` — la sixième
+  // valeur, arrivée avec la fenêtre de renoncement. Un statut que le code reconnaît et que la base
+  // refuse ne se verrait qu'au premier renoncement réel, en 500, avec une mise débitée et un billet
+  // qui ne se ferme pas. Deux listes qui décident de la même chose se confrontent.
+  const m = SQL_NU().match(/check\s*\(status in \(([^)]*)\)\)/);
+  assert.ok(m, 'la contrainte de statut a disparu de matches');
+  const dans = (m[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1));
+  assert.deepStrictEqual(dans.slice().sort(), ['open', ...L.STATUTS_CLOS].slice().sort(),
+    'le schéma et api/ledger.js ne connaissent pas les mêmes statuts');
+  assert.ok(dans.includes('renounced'), 'la fenêtre de renoncement n\'aurait aucun statut où se poser');
+});
+
+test('aucune colonne solde, balance ou wallet n\'est apparue avec le grand livre', () => {
+  // La garde existante lit tout `schema.sql` ; celle-ci vise le nouveau bloc, pour que la phrase
+  // « un solde est une SOMME, jamais une colonne » soit vérifiée là où elle est le plus tentante à
+  // trahir. Une somme fausse se refait ; une case fausse ne se répare pas.
+  assert.ok(!/\b(solde|balance|wallet)\b/i.test(BLOC_LEDGER()),
+    'une case de solde est apparue dans la table du grand livre');
+  for (const interdit of ['solde_cents', 'balance_cents', 'wallet_cents'])
+    assert.ok(!lireApi('schema.sql').includes(interdit), interdit);
+});
+
+test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis les méthodes NOMMÉES de db-pg.js', () => {
+  // Le patron déjà en place pour `match_traces` et pour le lecteur unique des tables annexes du bloc
+  // `Game`. Sans lui, le veilleur — qui devient un écrivain d'argent au module 4 — deviendrait un
+  // écrivain SILENCIEUX. Un écrivain d'argent doit être nommé.
+  //
+  // LA LISTE DES APPELANTS AUTORISÉS. Elle est vide au module 2 : le schéma et l'écrivain existent,
+  // et personne ne les appelle encore. Les modules 3 et 4 y ajouteront les leurs — `createMatch` et
+  // le règlement pour l'un, le veilleur et le remboursement pour l'autre — et devront le faire
+  // EXPRÈS, ce qui est tout l'objet de cette garde.
+  const APPELANTS_LEDGER = [];
+  const pg = PG_NU();
+  assert.strictEqual((pg.match(/^async function ledgerWrite\s*\(/gm) || []).length, 1,
+    'l\'écrivain du grand livre doit être défini une fois et une seule');
+
+  // Le détecteur de fonction englobante. Il est ÉPROUVÉ sur un cas connu avant de servir : une
+  // garde dont le mécanisme ne marche pas passe verte sur tout, ce qui est pire que pas de garde.
+  // `for`, `if`, `while` et compagnie ouvrent eux aussi une parenthèse puis une accolade en début de
+  // ligne : sans cette exclusion, le détecteur nommerait « for » la fonction englobante.
+  const MOTS_CLES = new Set(['for', 'if', 'while', 'switch', 'catch', 'do', 'else', 'function',
+                             'return', 'await', 'typeof', 'new']);
+  const entetes = [...pg.matchAll(/^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/gm)]
+    .map(m => ({ nom: m[1], i: m.index })).filter(e => !MOTS_CLES.has(e.nom));
+  assert.ok(entetes.length > 8, `seulement ${entetes.length} fonctions retrouvées dans db-pg.js`);
+  const englobante = i => (entetes.filter(e => e.i < i).pop() || { nom: '(hors fonction)' }).nom;
+  const sites = nom => {
+    const trouves = [];
+    const re = new RegExp(`\\b${nom}\\s*\\(`, 'g');
+    let m;
+    while ((m = re.exec(pg))) {
+      // La définition elle-même n'est pas un appel.
+      if (/(?:async\s+)?function\s+$/.test(pg.slice(Math.max(0, m.index - 20), m.index))) continue;
+      trouves.push(m.index);
+    }
+    return trouves;
+  };
+  // Le cas connu : `ligneMatch` est appelé depuis des méthodes nommées, et le détecteur doit les
+  // nommer. S'il rendait « (hors fonction) » partout, la garde ci-dessous ne vaudrait rien.
+  const temoins = sites('ligneMatch').map(englobante);
+  assert.ok(temoins.length >= 4, `seulement ${temoins.length} appels témoins`);
+  for (const t of temoins)
+    assert.ok(/^(createMatch|findMatch|settleMatch|markPlayed|expireMatches)$/.test(t),
+      `le détecteur de fonction englobante rend « ${t} » : il ne marche plus`);
+
+  for (const appel of sites('ledgerWrite')) {
+    const qui = englobante(appel);
+    assert.ok(APPELANTS_LEDGER.includes(qui),
+      `l'écrivain du grand livre est appelé depuis « ${qui} », qui n'est pas dans la liste des appelants autorisés`);
+  }
+  // Et le routeur ne touche JAMAIS le grand livre directement : il ne connaît que les méthodes
+  // qu'on lui injecte, et `ledgerWrite` n'en est pas une.
+  const app = lireApi('app.js');
+  for (const interdit of ['ledgerWrite', 'ledger_entries'])
+    assert.ok(!app.includes(interdit), `app.js parle de ${interdit} : le routeur écrirait de l'argent`);
+});
+
+await test('db-check.js sans DATABASE_URL SORT 0, et il le dit', () => {
+  // La sémantique exacte, et elle n'est pas négociable : `npm test` tourne sans base et sans réseau,
+  // donc ce script ne doit bloquer personne. On le LANCE, avec un environnement vidé, plutôt que de
+  // relire son texte — une garde textuelle sur un `process.exit(0)` ne dit pas ce que le processus
+  // fait vraiment, et le piège ici est un `require('pg')` en tête de fichier, qui ferait échouer le
+  // lancement avec un code 1 sur une machine parfaitement saine.
+  const { spawnSync } = require('node:child_process');
+  const chemin = require('node:path').join(__dirname, 'db-check.js');
+  const r = spawnSync(process.execPath, [chemin],
+    { env: { PATH: process.env.PATH || '' }, encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, `db-check.js sort ${r.status} : ${r.stderr || r.stdout}`);
+  assert.match(r.stdout, /DATABASE_URL/, 'il sort 0 sans dire pourquoi');
+  assert.match(r.stdout, /doublure/, 'il doit redire ce que son absence laisse non prouvé');
+  assert.strictEqual(r.stderr, '', r.stderr);
+  // Et le lancement ci-dessus ne prouve cela que sur CETTE machine, où `pg` est peut-être installé.
+  // L'intégration continue lance `node api/test.js` AVANT `npm install` : un `require('pg')` en tête
+  // de fichier ferait alors échouer le test par « module introuvable », c'est-à-dire un code 1 sur
+  // une machine parfaitement saine. Le contrôle de `DATABASE_URL` doit donc précéder le `require`.
+  // Les commentaires sont retirés d'abord : celui qui explique ce piège le cite, et une garde qui
+  // prend un commentaire pour du code ne garde rien. Le même piège pour la troisième fois.
+  const src = lireApi('db-check.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const sortie = src.indexOf('process.exit(0)'), pilote = src.indexOf('require(\'pg\')');
+  assert.ok(sortie > 0 && pilote > 0, 'db-check.js a changé de forme');
+  assert.ok(sortie < pilote,
+    'db-check.js charge `pg` AVANT de constater l\'absence de DATABASE_URL : il échouerait sans dépendances');
+});
+
+test('db-check.js n\'entre pas dans npm test, et le job existant reste sans base ni réseau', () => {
+  // C'est la seule façon de SOLDER la dette au lieu de la promettre : un job à part, avec son
+  // service Postgres, pendant que celui qui existe ne change pas d'une ligne. Sinon le module se
+  // clôt sur une intention, et c'est exactement l'écart que la recette de la 02b a trouvé.
+  const fs = require('node:fs'), path = require('node:path');
+  const racine = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  for (const p of [racine('package.json'), lireApi('package.json')])
+    assert.ok(!/db-check/.test(p), 'db-check est entré dans les scripts npm : les tests exigeraient une base');
+  const yml = racine('.github/workflows/test.yml');
+  const iDb = yml.indexOf('\n  db:');
+  assert.ok(iDb > 0, 'le job Postgres n\'existe pas dans l\'intégration continue');
+  // Les commentaires du job Postgres sont écrits AVANT lui, donc dans cette tranche-là : sans les
+  // retirer, la garde prendrait la phrase qui explique `DATABASE_URL` pour un `DATABASE_URL`. Le
+  // même piège que sur `schema.sql` et `db-pg.js`, une troisième fois.
+  const existant = yml.slice(yml.indexOf('\n  test:'), iDb).replace(/^[ \t]*#[^\n]*$/gm, '');
+  // LE JOB EXISTANT NE CHANGE PAS D'UNE LIGNE, et on le vérifie ligne à ligne : ses quatre étapes,
+  // dans cet ordre, et rien d'autre. Une garde qui se contenterait de « il contient encore node
+  // test.js » laisserait passer une étape ajoutée à côté — c'est-à-dire exactement la façon dont
+  // une base finirait par entrer dans le job qui doit tourner sans base.
+  assert.deepStrictEqual((existant.match(/^\s*- run: [^\n]*/gm) || []).map(s => s.trim()),
+    ['- run: node test.js', '- run: node api/test.js',
+     '- run: npm install --no-audit --no-fund', '- run: node api/test.js']);
+  assert.ok(!/services:/.test(existant), 'le job existant a reçu un service : il ne tourne plus sans base');
+  assert.ok(!/DATABASE_URL/.test(existant), 'le job existant a reçu une base');
+  const job = yml.slice(iDb);
+  for (const attendu of ['services:', 'postgres:16', 'pg_isready', 'node api/db-check.js', 'DATABASE_URL'])
+    assert.ok(job.includes(attendu), `le job Postgres ne porte pas « ${attendu} »`);
+  // Aucun secret dans le dépôt : l'adresse est celle du service du job, une base jetable créée et
+  // détruite avec l'exécution.
+  assert.match(job, /DATABASE_URL:\s*postgres:\/\/[^\n]*127\.0\.0\.1/);
+  assert.ok(!/secrets\./.test(job), 'le job va chercher un secret : la base doit rester jetable');
 });
 
 console.log('Lecture de la clé d\'API Crossmint');

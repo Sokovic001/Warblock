@@ -300,7 +300,13 @@ function soldeDe(transferts, compte) {
 // voit alors tous les billets que le livre a le droit de connaître.
 //
 // Il rend une LISTE DE GRIEFS, en français, vide quand tout s'apparie.
-const CLOS = ['settled', 'expired', 'rejected', 'abandoned', 'renounced'];
+// Les statuts sur lesquels un billet est CLOS, donc ceux sur lesquels le séquestre doit être vide.
+// Exportée depuis le module 2 : le `check` de `matches.status` porte ces cinq valeurs plus `open`,
+// et un test compare les deux listes. Un statut que ce fichier reconnaît et que la base refuse ne
+// se verrait qu'au premier renoncement réel — et une valeur de statut qui ment est du même genre
+// qu'une colonne qui ment.
+const STATUTS_CLOS = Object.freeze(['settled', 'expired', 'rejected', 'abandoned', 'renounced']);
+const CLOS = STATUTS_CLOS;
 
 function ledgerReconcile(ligneMatch, transferts) {
   const lignes = Array.isArray(ligneMatch) ? ligneMatch : [ligneMatch];
@@ -387,5 +393,5 @@ module.exports = {
   transfert,
   mouvementDotation, mouvementRecharge, mouvementMise, mouvementGain,
   mouvementRemboursement, mouvementContrepassation,
-  soldeDe, ledgerReconcile,
+  soldeDe, ledgerReconcile, STATUTS_CLOS,
 };

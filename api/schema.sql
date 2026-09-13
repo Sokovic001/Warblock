@@ -87,14 +87,21 @@ create table if not exists matches (
   -- la clé d'idempotence tirée par le client. Sans elle, un POST dont la réponse se perd est
   -- indistinguable d'un POST jamais arrivé.
   client_key   text         not null check (char_length(client_key) between 1 and 64),
-  -- Cinq états. Le quatrième, 'rejected', est arrivé exprès avec le module du verdict, comme la
+  -- Six états. Le quatrième, 'rejected', est arrivé exprès avec le module du verdict, comme la
   -- contrainte étroite le demandait : une partie dont le rapport est refusé est CLOSE, avec son
   -- motif, et ne comptera dans aucune statistique.
   -- Le cinquième, 'abandoned', est arrivé avec `first_result_at` ci-dessous : un billet
   -- sur lequel une partie a déjà été jouée et qui n'a pas pu être réglé est CLOS sans montant
   -- quand le joueur en redemande un, exactement comme le veilleur le ferait à l'expiration.
+  -- Le sixième, 'renounced', est arrivé avec la fenêtre de renoncement de la phase 03. Aucune des
+  -- cinq autres ne convenait : 'abandoned' porte déjà un sens précis — « un résultat a été rendu,
+  -- on ouvre un billet neuf » — et une valeur de statut qui ment est du même genre qu'une colonne
+  -- qui ment. Elle entre ici avec le grand livre plutôt qu'avec le module qui l'écrira, parce que
+  -- `ledgerReconcile` la connaît déjà : un statut qu'elle ne reconnaît pas produit un grief, et le
+  -- schéma et le code se seraient contredits entre les deux modules.
   status       text         not null default 'open'
-               check (status in ('open', 'settled', 'expired', 'rejected', 'abandoned')),
+               check (status in ('open', 'settled', 'expired', 'rejected', 'abandoned',
+                                 'renounced')),
   -- L'HEURE DU PREMIER RÉSULTAT RENDU SUR CE BILLET, ET POURQUOI ELLE EXISTE. Toute la partie est
   -- une fonction pure de `seed_public` : la carte, les caisses, les vingt bots et le plan de gaz.
   -- Un billet resservi est donc le MÊME monde. Sans cette marque, un joueur qui bloque l'envoi de
@@ -262,3 +269,100 @@ create table if not exists match_traces (
 
   constraint match_traces_pk primary key (match_id, seq)
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- Phase 03 — LE GRAND LIVRE.
+--
+-- LA DOCTRINE, ET ELLE N'A PAS D'EXCEPTION : CETTE TABLE EST EN INSERTION SEULE. Aucun `update`,
+-- aucun `delete`, nulle part, jamais. Une écriture modifiée est une PREUVE DÉTRUITE : on ne peut
+-- plus dire ce qui a été payé ni quand. Une écriture fausse se corrige par un mouvement INVERSE,
+-- daté et motivé `contrepassation`, qui laisse les deux visibles. Le besoin d'une correction
+-- « administrative » arrive toujours, un dimanche soir, et c'est ce jour-là que la garde tombe :
+-- le coût de la contre-passation est deux lignes de plus, le coût de l'autre choix est un livre
+-- auquel personne ne peut plus se fier.
+--
+-- UNE LIGNE EST UN TRANSFERT, jamais une jambe signée. Elle porte un montant strictement positif,
+-- un compte débité et un compte crédité différents l'un de l'autre. La somme globale du livre, tous
+-- comptes confondus, est alors nulle PAR CONSTRUCTION — chaque ligne pose exactement `+m` quelque
+-- part et `−m` ailleurs — et la partie double est donc STRUCTURELLE au lieu d'être assertée en
+-- JavaScript avant l'insertion. Une contrainte suit la donnée ; une fonction suit le code, et le
+-- jour où quelqu'un ouvrira un second chemin d'écriture, la fonction ne l'aurait pas suivi.
+--
+-- Et toujours AUCUNE COLONNE « solde », ni ici ni ailleurs : un solde est la SOMME de ces lignes.
+-- Une somme fausse se refait, une case fausse ne se répare pas.
+--
+-- Un mouvement est un ENSEMBLE de lignes partageant `(motif, reference)`. C'est `api/ledger.js` qui
+-- les construit, et lui seul ; cette table ne fait que les subir.
+create table if not exists ledger_entries (
+  id             bigserial    primary key,
+  -- LA LISTE FERMÉE, recopiée de `MOTIFS` dans `api/ledger.js` : six valeurs, pas sept. Le motif de
+  -- libération de quarantaine est explicitement renvoyé à la phase 06 — un membre de liste fermée
+  -- que personne n'écrit est une case en attente d'être créée de travers. Un test compare cette
+  -- liste au TEXTE de `api/ledger.js` : deux listes qui divergent, c'est le patron du `respawn()`
+  -- défini deux fois.
+  motif          text         not null
+                 check (motif in ('dotation', 'recharge', 'mise', 'gain', 'remboursement',
+                                  'contrepassation')),
+  -- Ce qui identifie le MOUVEMENT à l'intérieur de son motif : `<user_id>` pour une dotation,
+  -- `<user_id>:<AAAA-MM-JJ>` pour une recharge, `<match_id>` pour une mise, un gain ou un
+  -- remboursement, `<motif>:<référence d'origine>` pour une contre-passation. Du texte, et pas une
+  -- clé étrangère : trois de ces formes ne désignent aucune ligne d'aucune table.
+  reference      text         not null check (char_length(reference) between 1 and 128),
+  -- LES DEUX COMPTES, ET POURQUOI CE N'EST PAS UNE LISTE FERMÉE. Trois des six comptes sont des
+  -- FAMILLES PARAMÉTRÉES — `joueur:<id>:disponible`, `joueur:<id>:quarantaine`, `enjeu:<match_id>` —
+  -- et un `check (compte in (...))` aurait été refusé au premier joueur inscrit. La validation est
+  -- donc une GRAMMAIRE, et c'est justement ce qui permet à un test d'être exact : l'expression
+  -- ci-dessous est celle qu'exporte `api/ledger.js` sous le nom `COMPTE_RE_SQL`, recopiée CARACTÈRE
+  -- POUR CARACTÈRE, et un test compare les deux textes. Une expression qui diverge du code est le
+  -- patron du `respawn()` défini deux fois.
+  --
+  -- `[1-9][0-9]*` et non `[0-9]+` : les identifiants viennent de colonnes `bigserial`, qui ne
+  -- produisent jamais de zéro de tête. Les accepter ferait de `joueur:007:disponible` et
+  -- `joueur:7:disponible` deux comptes pour un seul joueur.
+  compte_debit   text         not null,
+  compte_credit  text         not null,
+  -- En CENTIMES entiers, STRICTEMENT positif. Une jambe de montant nul n'est pas représentable, et
+  -- c'est voulu : `api/ledger.js` l'omet plutôt que de la poser. `integer` comme toutes les autres
+  -- colonnes d'argent, avec la même leçon derrière — un entier « valide » à 3 000 000 000 lève
+  -- `22003`, et la panne a déjà été payée une fois.
+  montant_cents  integer      not null check (montant_cents > 0),
+  cree_le        timestamptz  not null default now(),
+
+  -- Un transfert ne va pas d'un compte vers lui-même : ce serait une ligne qui ne déplace rien et
+  -- qui compterait quand même dans les lectures.
+  constraint ledger_comptes_distincts check (compte_debit <> compte_credit),
+  constraint ledger_compte_debit_grammaire
+    check (compte_debit ~ '^(joueur:[1-9][0-9]*:(disponible|quarantaine)|enjeu:[1-9][0-9]*|maison:(dotation|commission|contrepartie))$'),
+  constraint ledger_compte_credit_grammaire
+    check (compte_credit ~ '^(joueur:[1-9][0-9]*:(disponible|quarantaine)|enjeu:[1-9][0-9]*|maison:(dotation|commission|contrepartie))$')
+);
+
+-- LA CLÉ D'IDEMPOTENCE, ET CE QU'ELLE PROUVE EXACTEMENT.
+--
+-- Le nom de la clé est le couple `(motif, reference)` — le MOUVEMENT — mais un mouvement a
+-- plusieurs jambes, et une clé unique sur le seul couple refuserait la deuxième. Les paires de
+-- comptes d'un même mouvement sont distinctes deux à deux, et `api/ledger.js` le garantit (c'est
+-- testé), donc la clé identifie EXACTEMENT UNE JAMBE.
+--
+-- CE QU'ELLE PROUVE : une jambe s'écrit au plus une fois, donc un mouvement rejoué en bloc n'écrit
+-- rien. C'est l'insertion REFUSÉE qui apprend ce qui existait déjà, jamais un `select` préalable :
+-- une vérification préalable laisse une fenêtre entre le « existe-t-il ? » et l'écriture, et deux
+-- onglets rapides passent tous les deux. Ici la fenêtre vaut un crédit en double. Même doctrine que
+-- `name_key`, que l'index partiel des billets ouverts et que la clé primaire `(match_id, seq)`.
+--
+-- CE QU'ELLE NE PROUVE PAS, écrit plutôt que tu : elle n'interdit pas deux DÉCOMPOSITIONS
+-- DIFFÉRENTES sur la même référence — un second règlement qui répartirait autrement porterait
+-- d'autres paires de comptes et passerait. Ce trou-là est refermé AILLEURS, par deux protections qui
+-- se recouvrent : l'interdiction du découvert sur le séquestre (un second gain devrait débiter un
+-- séquestre déjà vide) et la clause `where status = 'open' and net_cents is null` du règlement de
+-- `matches`. Trois protections qui se recouvrent, et c'est voulu : la première qui tombe n'ouvre
+-- rien.
+create unique index if not exists ledger_entries_mouvement_uniq
+  on ledger_entries (motif, reference, compte_debit, compte_credit);
+
+-- Les deux index de LECTURE. Le solde d'un compte est la somme de ses crédits moins la somme de ses
+-- débits — c'est ce qui remplace la case qu'on ne crée pas — et cette somme est sur le chemin d'une
+-- requête que le joueur attend. Un index par sens suffit longtemps ; le jour où il ne suffira plus,
+-- l'échappatoire nommée est l'instantané de clôture, et jamais une colonne mise à jour.
+create index if not exists ledger_entries_debit_idx  on ledger_entries (compte_debit);
+create index if not exists ledger_entries_credit_idx on ledger_entries (compte_credit);

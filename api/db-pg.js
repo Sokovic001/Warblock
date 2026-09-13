@@ -32,6 +32,71 @@ function ligneMatch(r) {
              ? r.replay_digest : Number(r.replay_digest) };
 }
 
+// ---------------------------------------------------------------------------------------------
+// LE GRAND LIVRE. Trois fonctions, et elles prennent toutes un CLIENT DÉJÀ EN TRANSACTION plutôt
+// que d'aller en chercher un dans le bassin : une écriture du livre n'a de sens qu'avec ce qu'elle
+// accompagne — la mise avec son billet, le gain avec son règlement — et les deux doivent échouer ou
+// réussir ensemble. Une méthode qui ouvrirait sa propre connexion rendrait cette atomicité
+// impossible à obtenir, et personne ne s'en apercevrait avant le premier billet à demi écrit.
+//
+// IL N'Y A QU'UN ÉCRIVAIN, `ledgerWrite`, et une garde textuelle d'`api/test.js` vérifie qu'il
+// n'est appelé que depuis des méthodes NOMMÉES de ce fichier. C'est le patron déjà en place pour
+// `match_traces` et pour les tables annexes du bloc `Game` : un écrivain d'argent doit être nommé,
+// pas silencieux.
+const LEDGER_COLS = 'id, motif, reference, compte_debit, compte_credit, montant_cents, cree_le';
+
+// L'ÉCRIVAIN UNIQUE. Aucun `on conflict do nothing` ici, et c'est une décision : sur
+// `match_traces`, avaler le doublon est le bon comportement — le premier écrit gagne et le segment
+// renvoyé est identique. Sur le grand livre, un doublon veut dire qu'on est en train de payer deux
+// fois, et l'appelant DOIT l'apprendre. La violation de `ledger_entries_mouvement_uniq` remonte donc
+// telle quelle (`23505`), la transaction entière est annulée, et un mouvement rejoué en bloc n'écrit
+// rien. C'est l'insertion refusée qui apprend ce qui existait déjà, jamais un `select` préalable.
+async function ledgerWrite(client, transferts) {
+  const lignes = transferts || [];
+  // Un mouvement n'est jamais vide. Écrire zéro ligne en croyant en écrire trois est exactement le
+  // genre de succès silencieux qui ne se voit qu'au moment de payer quelqu'un.
+  if (!Array.isArray(lignes) || lignes.length === 0) {
+    throw new Error('grand livre : rien à écrire — un mouvement porte au moins un transfert');
+  }
+  for (const t of lignes) {
+    await client.query(
+      `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents)
+       values ($1,$2,$3,$4,$5)`,
+      [t.motif, t.reference, t.compteDebit, t.compteCredit, t.montantCents]);
+  }
+  return { ecrites: lignes.length };
+}
+
+// LE SOLDE D'UN COMPTE : la somme de ses crédits moins la somme de ses débits. C'est ce qui remplace
+// la case qu'on ne crée pas — un compteur qu'on incrémente est une case qu'on écrase, et un double
+// envoi la fausse pour toujours.
+//
+// LE PIÈGE DU PILOTE, ET IL EST SILENCIEUX : `sum()` rend un `bigint`, donc une CHAÎNE. Sans la
+// conversion, un solde partirait en texte, `solde >= montant` comparerait deux chaînes caractère par
+// caractère — « 9 » y est plus grand que « 10 » — et le refus de découvert laisserait passer
+// exactement ce qu'il existe pour arrêter. Même piège que les graines et que les statistiques, avec
+// un prix plus élevé.
+async function ledgerSolde(client, compte) {
+  const r = await client.query(
+    `select coalesce(sum(montant_cents) filter (where compte_credit = $1), 0)
+          - coalesce(sum(montant_cents) filter (where compte_debit  = $1), 0) as total
+       from ledger_entries
+      where compte_debit = $1 or compte_credit = $1`, [compte]);
+  return Number((r.rows[0] || {}).total) || 0;
+}
+
+// LA RELECTURE D'UN MOUVEMENT, par sa référence. Elle sert à réconcilier et à constater, jamais à
+// décider avant d'écrire : demander « existe-t-il déjà ? » puis insérer laisse une fenêtre entre les
+// deux, et ici cette fenêtre vaut un crédit en double. C'est la clé unique qui arbitre.
+async function ledgerDe(client, { reference }) {
+  const r = await client.query(
+    `select ${LEDGER_COLS} from ledger_entries where reference = $1 order by id`, [reference]);
+  // `id` est un `bigserial`, donc une chaîne, et on ne fait que la recopier — comme `matches.id`.
+  // `montant_cents` est un `integer` : le pilote le rend en nombre, et `Number` le couvre quand
+  // même, pour la raison écrite partout ailleurs — une panne silencieuse coûte deux conversions.
+  return r.rows.map(l => ({ ...l, id: String(l.id), montant_cents: Number(l.montant_cents) }));
+}
+
 function pgDb(connectionString) {
   const pool = new Pool({
     connectionString,
@@ -367,4 +432,8 @@ function pgDb(connectionString) {
   };
 }
 
-module.exports = { pgDb };
+// `ledgerWrite`, `ledgerSolde` et `ledgerDe` sont exportées à part parce qu'elles prennent un client
+// en transaction : ce ne sont pas des méthodes du `db` injecté dans `createApp()`, et le routeur ne
+// les voit jamais. Ce qui les appelle, ce sont les méthodes nommées de `pgDb` — et `api/db-check.js`,
+// qui les éprouve contre une VRAIE Postgres, ce qu'aucun test sans base ne peut faire.
+module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe };
