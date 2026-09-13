@@ -268,7 +268,18 @@ tout solde y est modifiable depuis la console.
   entre deux processus Node, jamais entre deux moteurs. Aucun euro n'entre avant que le grand livre
   de la phase 03 n'existe, et il ne lira que des lignes dont le rejeu a **convergé**.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
-  de flottant, jamais d'écrasement de solde.
+  de flottant, jamais d'écrasement de solde. **En cours**, spécification écrite et découpée en cinq
+  modules : `docs/PHASE-03.md`. Ce qu'elle décide, pour qu'on ne le redécouvre pas en cours de
+  route : le solde est la **somme** d'écritures immuables et jamais une colonne ; une écriture est
+  une **ligne-transfert** (montant strictement positif, compte débité différent du compte crédité),
+  si bien que la partie double est structurelle et non assertée ; la grammaire des comptes et les
+  motifs vivent dans `api/ledger.js` et non dans `WBCore`, parce qu'une comptabilité n'est pas une
+  règle du **jeu** et n'a rien à faire dans les 465 Ko que chaque joueur télécharge — seul
+  `renonciationOuverte`, réellement partagé avec le sas, y descend ; la mise est débitée à
+  l'**ouverture** du billet, dans la même transaction, sous verrou de ligne ; le gain d'une ligne
+  divergente va en **quarantaine**, mesuré et jamais dépensable. Rien n'est fait tant que les cinq
+  modules ne sont pas livrés et que le job Postgres n'a pas été vert une fois — jusque-là, un test
+  qui passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
