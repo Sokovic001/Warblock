@@ -46,7 +46,7 @@ const path = require('node:path');
 const { Pool } = require('pg');
 const C = require('./core');
 const L = require('./ledger');
-const { ledgerWrite, ledgerSolde, ledgerDe } = require('./db-pg');
+const { pgDb, ledgerWrite, ledgerSolde, ledgerDe } = require('./db-pg');
 
 // La même règle que `db-pg.js` : une connexion à la base d'un jeu d'argent ne se fait pas en clair,
 // sauf en local — et le service de l'intégration continue EST en local, sur 127.0.0.1.
@@ -473,6 +473,75 @@ async function main() {
       await refuse(client, '23514', 'matches_status_check',
         `update matches set status = 'inconnu' where id = $1`, [m]);
       await client.query('rollback');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('LA PURGE DES TRACES, CONDITION PAR CONDITION, CONTRE LA VRAIE BASE', async () => {
+      // C'est le PREMIER `delete` du dépôt sur la pièce qui prouve un paiement, et sa clause fait
+      // quelque chose qu'aucune autre requête du dossier ne fait : elle CROISE trois tables et
+      // recalcule un solde de séquestre en SQL. Une doublure JavaScript qui filtre un tableau ne
+      // prouve rien de ce que Postgres fait de cette clause-là — en particulier du `::text` et de la
+      // concaténation `'enjeu:' || matches.id`, qui construisent un nom de compte côté base.
+      //
+      // On monte le cas nominal, on vérifie qu'il purge, puis on retire chaque condition SEULE.
+      await client.query('begin');
+      const base = pgDb(URL_BASE);
+      const u = await creerJoueur(client, 'Purge');
+      const vieux = new Date(Date.now() - (L.TRACE_RETENTION_JOURS + 1) * 24 * 3600 * 1000);
+      const recent = new Date(Date.now() - 3600_000);
+      // Un billet réglé, sa trace, sa mise et son gain : les quatre conditions réunies.
+      const monter = async (statut, quand, avecGain, viderTout) => {
+        const m = await ouvrirBillet(client, u, { status: 'open' });
+        await client.query(
+          `update matches set status = $2, settled_at = $3, gross_cents = 0, fee_cents = 0,
+                              net_cents = 0
+             where id = $1`, [m, statut, quand]);
+        await client.query(
+          `insert into match_traces (match_id, seq, sim_version, steps, data) values ($1,0,1,10,'X')`,
+          [m]);
+        await ledgerWrite(client, L.mouvementMise({ userId: u, matchId: m, miseCents: 50 }));
+        if (avecGain) {
+          await ledgerWrite(client, L.mouvementGain({ matchId: m, miseCents: viderTout ? 50 : 30,
+                                                      grossCents: 0, feeCents: 0, netCents: 0 }));
+        }
+        // Chaque billet doit être clos pour que le suivant puisse s'ouvrir : l'index est partiel.
+        return m;
+      };
+      const reste = async m => {
+        const r = await client.query('select count(*) as n from match_traces where match_id = $1', [m]);
+        return Number(r.rows[0].n);
+      };
+      const nominal = await monter('settled', vieux, true, true);
+      const pasDefinitif = await monter('expired', vieux, true, true);
+      const sansGain = await monter('settled', vieux, false, true);
+      const sequestreHabite = await monter('settled', vieux, true, false);
+      const tropRecent = await monter('settled', recent, true, true);
+      // La purge tourne sur SA propre connexion, hors de la transaction partagée : elle ouvre la
+      // sienne. On valide donc d'abord ce qu'on vient de monter.
+      await client.query('commit');
+      try {
+        const r = await base.purgeTraces({ maintenant: new Date() });
+        if (r.effacees !== 1) throw new Error(`${r.effacees} traces effacées au lieu d'une seule`);
+        if (await reste(nominal) !== 0) throw new Error('le cas nominal n\'a pas été purgé');
+        for (const [quoi, m] of [['statut non définitif', pasDefinitif], ['aucune écriture du livre', sansGain],
+                                 ['séquestre habité', sequestreHabite], ['délai non écoulé', tropRecent]]) {
+          if (await reste(m) !== 1) throw new Error(`la purge a effacé malgré « ${quoi} »`);
+        }
+        // Et elle n'a touché ni une ligne `matches`, ni une écriture du grand livre.
+        const lignes = await client.query('select count(*) as n from matches where user_id = $1', [u]);
+        if (Number(lignes.rows[0].n) !== 5) throw new Error('la purge a effacé une ligne matches');
+        const ecritures = await client.query(
+          `select count(*) as n from ledger_entries where compte_debit like 'joueur:' || $1 || ':%'
+                                                      or compte_credit like 'joueur:' || $1 || ':%'`,
+          [String(u)]);
+        if (Number(ecritures.rows[0].n) === 0) throw new Error('la purge a effacé les écritures du joueur');
+      } finally {
+        await base.close().catch(() => {});
+        // On nettoie à la main : la transaction partagée a été validée, il n'y a plus de `rollback`
+        // qui rende la main. `cascade` emporte les traces et les billets.
+        await client.query('delete from ledger_entries where reference in (select id::text from matches where user_id = $1)', [u]);
+        await client.query('delete from users where id = $1', [u]);
+      }
     });
   } finally {
     partage = null;

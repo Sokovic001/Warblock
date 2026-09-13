@@ -241,9 +241,30 @@ create index if not exists matches_user_status_idx on matches (user_id, status);
 -- réécrit jamais la première — c'est la même doctrine que « une ligne s'insère puis se règle une
 -- fois », poussée jusqu'au bout : ici, elle s'insère et c'est tout.
 --
--- LA DETTE, ÉCRITE PLUTÔT QUE TUE : cette table n'a AUCUNE politique de conservation. Combien de
--- temps garde-t-on la pièce qui prouve une partie, et qui a le droit de la relire, est renvoyé à
--- la phase 03, qui décidera de ce qu'un grand livre a besoin de garder.
+-- LA CONSERVATION, ET C'EST LA PHASE 03 QUI LA FIXE — la dette que ce commentaire portait depuis la
+-- 02b est soldée ici. La trace est la PIÈCE JUSTIFICATIVE D'UN MOUVEMENT D'ARGENT : c'est elle, et
+-- elle seule, qui permet de refaire la partie qui a produit un `net_cents`. Elle se garde donc au
+-- moins aussi longtemps que la fenêtre pendant laquelle un joueur peut contester un paiement, et
+-- cette fenêtre-là est une affaire de phase 06. `TRACE_RETENTION_JOURS`, dans `api/ledger.js`, est
+-- conservatrice par défaut — quatre cents jours — et sa raison est écrite à côté d'elle. CE N'EST
+-- PAS UNE DÉCISION JURIDIQUE.
+--
+-- L'INSERTION SEULE CI-DESSUS GARDE UNE EXCEPTION, ET UNE SEULE : la purge nommée `purgeTraces` de
+-- `api/db-pg.js`. C'est le PREMIER `delete` du dépôt sur la pièce qui prouve un paiement, et il
+-- n'efface une trace que si LES QUATRE CONDITIONS sont réunies — les quatre étant dans la clause du
+-- `delete` lui-même, pas dans le code qui la choisit :
+--   (a) la ligne `matches` est réglée DÉFINITIVEMENT, `status in ('settled', 'rejected')` ;
+--   (b) le grand livre a POSÉ SON ÉCRITURE, un mouvement `gain` ou `remboursement` sur ce match ;
+--   (c) RIEN N'EST EN ATTENTE, le séquestre `enjeu:<match_id>` est à zéro ;
+--   (d) LE DÉLAI EST ÉCOULÉ, `settled_at` plus vieux que la rétention.
+-- Elle ne touche JAMAIS une ligne `matches`, JAMAIS une écriture du grand livre : elle les LIT.
+--
+-- CONSÉQUENCE DIRECTE, ET C'EST LE BON DÉFAUT : la trace d'un billet dont le résultat n'est JAMAIS
+-- arrivé n'est jamais effacée, puisque sa ligne n'est ni `settled` ni `rejected`. C'est exactement
+-- la pièce qu'on voudra relire, et cette table ne descend donc pas à zéro.
+--
+-- Ce qui reste renvoyé plus loin : QUI a le droit de relire une trace. Il n'existe ni journal
+-- d'audit ni rôle d'administration, et c'est à nommer avant la phase 04, avec la contre-passation.
 create table if not exists match_traces (
   match_id    bigint       not null references matches(id) on delete cascade,
   -- Le rang du segment. Une partie complète tient en un à trois envois, jamais vingt : on ne paie

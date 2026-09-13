@@ -35,7 +35,14 @@ const RESULTAT_METHODES = ['POST'];
 // inoffensive : elle n'écrit que dans `match_traces`, en insertion seule, et jamais dans `matches`.
 const TRACE = /^\/api\/match\/([0-9]{1,19})\/trace$/;
 const TRACE_METHODES = ['POST'];
-const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES, TRACE_METHODES)), 'OPTIONS'].join(',');
+// LE RENONCEMENT. Il a sa route parce qu'il n'est ni un résultat ni une trace : il ne juge rien, il
+// ne rejoue rien, il CLÔT un billet et rend la mise — le seul chemin du dossier qui rende une mise.
+// Il suit la même règle que les deux autres : une liste de méthodes, donc un 405 et un pré-vol qui
+// ne peuvent pas diverger.
+const RENONCE = /^\/api\/match\/([0-9]{1,19})\/renounce$/;
+const RENONCE_METHODES = ['POST'];
+const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES, TRACE_METHODES,
+                                            RENONCE_METHODES)), 'OPTIONS'].join(',');
 
 // Combien de temps un billet reste ouvert : l'attente du sas, toute la durée du plan de zone — la
 // borne haute d'une partie que personne ne gagne — et dix minutes de marge. La marge est le
@@ -79,6 +86,24 @@ const REJEU_CODES = {
 // du dossier est « des refus nommés, tous en 400 ou 409, aucun en 500 », et un `402` parle de payer
 // l'API, pas la table. Aucun des deux ne laisse un joueur enfermé dans un billet mort.
 const REFUS_LIVRE = 'Le grand livre a refusé cette écriture : rien n\'a été écrit, et la partie reste dans l\'état où elle était.';
+
+// LES TROIS REFUS QUE LA FENÊTRE DE RENONCEMENT AJOUTE, et ils sont en 409 comme tous les autres.
+// Un seul a besoin d'une phrase constante ; `billet_clos` et `renonce_recent` se construisent avec ce
+// qu'ils ont à dire — un statut, un nombre de secondes.
+//
+// `fenetre_close` dit que la fenêtre est passée : le billet reste jouable, rien n'est écrit, et la
+// mise ne reviendra pas. C'est le prix que la phase fait payer, et il est écrit — le joueur honnête
+// dont l'onglet meurt à la onzième seconde perd sa mise. Le vol qu'on ferme en échange est plus
+// cher : jouer, perdre, n'envoyer ni trace ni résultat, laisser expirer, et se faire rembourser.
+//
+// `renonce_recent` est la TEMPORISATION. Renoncer à la première seconde clôt le billet et libère
+// l'index partiel : `createMatch` en délivrerait un neuf immédiatement, avec une graine neuve, et
+// comme la carte est une fonction pure de `seed_public` — que le client reçoit AVEC le billet — le
+// coût d'un nouveau tirage serait un aller-retour HTTP. La temporisation le fait coûter la fenêtre
+// ENTIÈRE. Ce qui reste acceptable, et il faut l'écrire plutôt que de le taire : un tirage toutes
+// les dix secondes, pour un avantage nul contre vingt bots dont aucun ne connaît la carte. Le jour
+// où les adversaires seront humains, ce chiffre-là devra être relu.
+const REFUS_FENETRE_CLOSE = 'La fenêtre de renoncement de ce billet est passée : la partie est réputée commencée, et la mise ne revient pas.';
 
 // ---------- limitation de débit ----------
 // Un seau par utilisateur, en mémoire. Volontairement simple : il freine le martèlement d'un pseudo
@@ -386,6 +411,36 @@ function createApp({
     // Un billet appartient à quelqu'un. Le compte naît ici comme il naît sur `GET /api/me`, et pour
     // la même raison : d'un jeton vérifié, jamais d'un appel du client.
     const { user } = await chargerCompte(identite);
+
+    // LA TEMPORISATION DU CHERCHEUR DE GRAINE, ET ELLE SE LIT AVANT TOUT LE RESTE. Tant que la
+    // fenêtre de renoncement du dernier billet renoncé n'est pas passée, ce joueur n'en obtient pas
+    // de neuf : sans cela, renoncer à la première seconde rendrait un tirage de carte aussi cher
+    // qu'un aller-retour HTTP. La borne n'est PAS recalculée ici — c'est la même fonction que celle
+    // du sas et de la route de renoncement, appelée sur la ligne renoncée.
+    //
+    // Le refus est posé AVANT les deux tirages de graines et avant `db.createMatch` : il ne laisse
+    // ni billet, ni mise, et ne consomme pas même une graine. Comme le refus `fonds`, il vient après
+    // `chargerCompte`, qui peut écrire une recharge — celle-là est une décision de connexion, elle
+    // n'a rien à voir avec le billet refusé.
+    //
+    // CE QUE CE CONTRÔLE NE FAIT PAS, écrit plutôt que découvert : il n'est pas atomique. Deux
+    // requêtes simultanées peuvent le franchir toutes les deux. Ce qui les rattrape ensuite est
+    // l'index partiel « un seul billet ouvert » — la seconde reprend le billet de la première au
+    // lieu d'en ouvrir un second — donc le pire cas reste UN billet, pas deux, et la temporisation
+    // n'est pas contournable en la martelant.
+    //
+    // ET IL PASSE AVANT LE CHEMIN `repris`, DÉLIBÉRÉMENT. Un `POST` rejoué avec la clé du billet
+    // qu'on vient de renoncer reçoit donc `renonce_recent` et non ce billet-là : le lui rendre
+    // signifierait « voici ton billet », avec un statut `renounced` que le jeu n'a aucune raison de
+    // savoir lire. Un refus nommé dit la vérité ; un billet clos rendu en 200 la déguise.
+    const renonce = await db.lastRenounced({ userId: user.id });
+    if (renonce && C.renonciationOuverte({ openedAt: renonce.opened_at }, new Date(now()))) {
+      return envoyer(res, 409, {
+        erreur: `Tu viens de renoncer à un billet : le suivant s'ouvre au plus tôt ${C.renonceFenetreS()} secondes après l'ouverture de celui-là.`,
+        code: 'renonce_recent',
+        windowSeconds: C.renonceFenetreS(),
+      }, origin);
+    }
 
     // Deux tirages, deux usages. La publique décide de la carte et du gaz, et part au client. La
     // secrète ne quitte jamais le serveur : elle ne sert à rien tant que rien n'est simulé, et
@@ -785,16 +840,110 @@ function createApp({
     return envoyer(res, 200, reglement(regle.match), origin);
   }
 
+  // ---------- POST /api/match/:id/renounce ----------
+  // LA FENÊTRE DE RENONCEMENT, ET C'EST LE CŒUR DE LA PHASE. Le vol que le débit à l'ouverture
+  // ouvre, et il faut le nommer : ouvrir un billet, jouer, perdre, n'envoyer NI trace NI résultat,
+  // laisser expirer, et se faire rembourser. Le joueur ne perdrait alors jamais. Toute condition de
+  // remboursement fondée sur « aucune trace n'est arrivée » est contrôlée par le CLIENT, donc sans
+  // valeur : la seule chose que le serveur observe sans lui est SON PROPRE CHRONOMÈTRE.
+  //
+  // La borne est donc l'horloge du serveur, et elle n'est pas recalculée ici : c'est
+  // `WBCore.renonciationOuverte`, la même fonction que le sas d'attente appelle pour dire au joueur
+  // ce que partir va lui coûter. Deux définitions de cette fenêtre seraient la troisième copie du
+  // patron déjà condamné pour `terminal`, `faits` et `argentCents`. Elle vaut DIX secondes, et pas
+  // les vingt-cinq de `LOBBY.wait` : le jeu décolle dès que la salle est pleine, donc le coup
+  // d'envoi peut tomber à 13,4 s, et une fenêtre de 25 s rembourserait une partie commencée depuis
+  // une douzaine de secondes de jeu réel.
+  //
+  // TROIS REFUS, TOUS NOMMÉS, AUCUN EN 500, ET AUCUN N'ENFERME PERSONNE : un billet inconnu ou qui
+  // n'est pas le sien sort en 404 ; un billet déjà clos en 409 `billet_clos` — sa place est libre,
+  // le joueur peut en redemander un ; la fenêtre passée en 409 `fenetre_close`, sans rien écrire.
+  async function renoncer(req, res, identite, origin, matchId) {
+    if (!limiter('renonce:' + identite.authId))
+      return envoyer(res, 429, { erreur: 'Trop de renoncements d\'affilée. Réessaie dans une minute.' }, origin);
+
+    // CETTE ROUTE NE LIT AUCUN CHAMP DU CORPS, et on le lit quand même. Il n'y a rien que le client
+    // puisse dire : la fenêtre se décide à l'horloge du SERVEUR, et le billet est désigné par le
+    // chemin. Mais un corps qu'on ne consomme jamais empêche Node de réutiliser la connexion, et
+    // `lireCorps` borne au passage ce qu'on accepte d'avaler — c'est ce que font les trois autres
+    // routes qui écrivent, et une exception ici ne se paierait qu'en charge, longtemps après.
+    try { await lireCorps(req); }
+    catch { return envoyer(res, 400, { erreur: 'Requête illisible.' }, origin); }
+
+    const { user } = await chargerCompte(identite);
+    // `user_id` fait partie de la recherche, comme partout ailleurs : un identifiant deviné ne doit
+    // rien apprendre sur la partie de quelqu'un d'autre, pas même qu'elle existe.
+    const ligne = await db.findMatch({ matchId, userId: user.id });
+    if (!ligne) return envoyer(res, 404, { erreur: 'Billet introuvable.', code: 'billet' }, origin);
+    if (ligne.status !== 'open')
+      return envoyer(res, 409, { erreur: 'Ce billet est déjà clos : il n\'y a plus rien à rendre.',
+                                 code: 'billet_clos', status: ligne.status }, origin);
+    // LA FENÊTRE, À L'HORLOGE DU SERVEUR. On la lit AVANT d'écrire quoi que ce soit : hors fenêtre,
+    // la route refuse sans toucher ni la ligne ni le livre, et le billet reste jouable.
+    if (!C.renonciationOuverte({ openedAt: ligne.opened_at }, new Date(now())))
+      return envoyer(res, 409, { erreur: REFUS_FENETRE_CLOSE, code: 'fenetre_close',
+                                 windowSeconds: C.renonceFenetreS() }, origin);
+
+    const r = await db.renounceMatch({ matchId, userId: user.id, at: new Date(now()) });
+    if (r.refus === 'livre')
+      return envoyer(res, 409, { erreur: REFUS_LIVRE, code: 'livre', detail: r.detail || null }, origin);
+    // La ligne a changé d'état entre la lecture et l'écriture — un veilleur, un résultat rendu dans
+    // le même souffle. On le dit, on n'invente rien, et on ne sort pas en 500.
+    if (!r.match)
+      return envoyer(res, 409, { erreur: 'Ce billet est déjà clos : il n\'y a plus rien à rendre.',
+                                 code: 'billet_clos',
+                                 status: (r.deja && r.deja.status) || null }, origin);
+    return envoyer(res, 200, {
+      matchId: String(r.match.id),
+      status: r.match.status,
+      refundedCents: nombre(r.rembourseCents),
+      balanceCents: nombre(r.balanceCents),
+      quarantineCents: nombre(r.quarantineCents),
+    }, origin);
+  }
+
   // ---------- le veilleur ----------
   // Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — restent
   // ouverts pour toujours, et un joueur n'a qu'un billet ouvert à la fois : sans ce balayage, une
   // partie abandonnée enferme son joueur jusqu'à ce qu'il retente après l'expiration, et la table
   // garde des lignes que rien ne clôt. C'est du code qui manipulera de l'argent et que personne ne
   // regarde tourner : il prend son heure en argument, comme tout le reste, et se teste sans
-  // attendre. Il n'écrit AUCUN montant — il ne fait que fermer une porte.
+  // attendre.
+  //
+  // DEPUIS LA PHASE 03, IL ÉCRIT DE L'ARGENT, et ce commentaire disait le contraire — « il n'écrit
+  // AUCUN montant, il ne fait que fermer une porte ». Le revirement est assumé et écrit : à
+  // l'expiration d'un billet, le SÉQUESTRE DOIT ÊTRE VIDÉ vers `maison:contrepartie`, sans quoi de
+  // l'argent reste dans un compte que plus rien ne solde. Laisser le commentaire contredire le code
+  // est ce qui se découvre six mois plus tard, par quelqu'un qui relit le commentaire.
+  //
+  // CE QU'IL NE FAIT TOUJOURS PAS : rembourser. Passé la fenêtre de renoncement, rien ne rend la
+  // mise — c'est très exactement le vol que cette phase ferme. Il n'écrit aucun montant sur la
+  // LIGNE non plus : `net_cents`, `fee_cents` et les autres restent nuls, un billet périmé n'a pas
+  // de verdict.
+  //
+  // `echecs` nomme les billets qu'il n'a pas pu clore. Chaque billet a sa propre transaction, donc
+  // un échec sur l'un — un doublon, un découvert — n'annule pas les autres, et le tour suivant le
+  // reprendra. Un balayage qui avalerait ses échecs laisserait un séquestre habité sans que personne
+  // ne le sache.
   async function veiller() {
-    const { closes } = await db.expireMatches({ avant: new Date(now()) });
-    return { closes };
+    const { closes, echecs } = await db.expireMatches({ avant: new Date(now()) });
+    return { closes, echecs: echecs || [] };
+  }
+
+  // ---------- la purge des traces ----------
+  // La trace est la PIÈCE JUSTIFICATIVE d'un mouvement d'argent : elle se garde au moins aussi
+  // longtemps que la fenêtre pendant laquelle un joueur peut contester, que la phase 06 fixera.
+  // `L.TRACE_RETENTION_JOURS` est donc conservatrice, et ce n'est pas une décision juridique.
+  //
+  // La purge n'efface une trace que si LES QUATRE CONDITIONS sont réunies — ligne réglée
+  // définitivement, écriture du grand livre posée, séquestre vide, délai écoulé — et les quatre sont
+  // dans la clause du `delete`, côté `db-pg.js`. Elle ne touche jamais une ligne `matches`, jamais
+  // une écriture du grand livre.
+  //
+  // Elle voyage avec le routeur comme le veilleur, et pour la même raison : deux idées de l'heure
+  // dans le même processus finiraient par diverger. `main.js` décide quand l'appeler.
+  async function purger() {
+    return db.purgeTraces({ maintenant: new Date(now()) });
   }
 
   const handler = async function handler(req, res) {
@@ -819,7 +968,9 @@ function createApp({
 
     const resultat = RESULTAT.exec(route);
     const trace = TRACE.exec(route);
-    const methodes = resultat ? RESULTAT_METHODES : trace ? TRACE_METHODES : METHODES.get(route);
+    const renonce = RENONCE.exec(route);
+    const methodes = resultat ? RESULTAT_METHODES : trace ? TRACE_METHODES
+                   : renonce ? RENONCE_METHODES : METHODES.get(route);
     if (!methodes) return envoyer(res, 404, { erreur: 'Route inconnue.' }, origin);
     if (!methodes.includes(req.method))
       return envoyer(res, 405, { erreur: 'Méthode non autorisée.' }, origin);
@@ -843,6 +994,7 @@ function createApp({
       // ---------- le billet d'une partie, puis son verdict ----------
       if (route === '/api/match') return await ouvrirBillet(req, res, identite, origin);
       if (trace) return await recevoirTrace(req, res, identite, origin, trace[1]);
+      if (renonce) return await renoncer(req, res, identite, origin, renonce[1]);
       if (resultat) return await rendreResultat(req, res, identite, origin, resultat[1]);
 
       // ---------- lecture ----------
@@ -883,8 +1035,14 @@ function createApp({
   // celui qui écoute décide quand l'appeler. Le brancher ici plutôt que dans `main.js` évite qu'il
   // existe deux idées de l'heure dans le même processus.
   handler.veiller = veiller;
+  // La purge des traces voyage avec le routeur pour la même raison, et elle est SÉPARÉE du veilleur :
+  // l'un tourne chaque minute et clôt des billets, l'autre tourne rarement et efface des pièces
+  // justificatives. Les fondre en un seul balayage ferait passer un `delete` sur la preuve d'un
+  // paiement dans le même tour d'horloge qu'une clôture de routine.
+  handler.purger = purger;
   return handler;
 }
 
 module.exports = { createApp, checkProfile, checkMatch, makeLimiter, AVATARS, MAX_BODY,
-                   MAX_TRACE_BODY, MATCH_MARGE_S, REPLAY_BUDGET_MS, REJEU_CODES, RESULTAT, TRACE };
+                   MAX_TRACE_BODY, MATCH_MARGE_S, REPLAY_BUDGET_MS, REJEU_CODES, RESULTAT, TRACE,
+                   RENONCE };

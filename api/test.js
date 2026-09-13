@@ -352,11 +352,103 @@ function fakeDb(seed = []) {
                    .slice().sort((a, b) => a.seq - b.seq)
                    .map(t => ({ seq: t.seq, sim_version: t.sim_version, steps: t.steps, data: t.data }));
     },
-    async expireMatches({ avant }) {
+    // LE VEILLEUR, ÉCRIVAIN D'ARGENT DEPUIS LA PHASE 03. Il clôt les billets que personne n'a
+    // terminés ET IL VIDE LEUR SÉQUESTRE vers `maison:contrepartie` : une ligne close dont le
+    // séquestre reste habité est de l'argent que plus rien ne solde. Il NE REMBOURSE PAS — passé la
+    // fenêtre de renoncement, rien ne rend la mise, et c'est très exactement le vol que la phase
+    // ferme.
+    //
+    // Une transaction par billet, comme le vrai pilote : un échec sur l'une n'annule pas les autres,
+    // et le billet qui échoue est NOMMÉ. La doublure n'a pas de transaction, alors elle écrit le
+    // livre AVANT de changer le statut — le même ordre qu'ailleurs, et pour la même raison : c'est
+    // le seul moyen d'imiter une annulation.
+    async expireMatches({ avant, max = 500 }) {
+      const candidats = matches
+        .filter(m => m.status === 'open' && new Date(m.expires_at) <= avant)
+        .sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at))
+        .slice(0, max);
       let closes = 0;
-      for (const m of matches)
-        if (m.status === 'open' && new Date(m.expires_at) <= avant) { m.status = 'expired'; closes++; }
-      return { closes };
+      const echecs = [];
+      for (const m of candidats) {
+        try {
+          reglerSequestreDe({ ...m, status: 'expired' });
+        } catch (e) {
+          if (!refusDuLivre(e)) throw e;
+          echecs.push({ id: String(m.id), code: e.code });
+          continue;
+        }
+        m.status = 'expired';
+        closes++;
+      }
+      return { closes, echecs };
+    },
+    // LA RENONCIATION, LE SEUL CHEMIN QUI RENDE UNE MISE. La fenêtre est arbitrée par `app.js` avec
+    // `WBCore.renonciationOuverte` : rien ici ne la recalcule. Ce que la doublure imite, c'est la
+    // clause du vrai `update` — `status = 'open' and net_cents is null` — et le fait que la clôture
+    // et le remboursement soient indissociables. Le montant rendu est ce que le SÉQUESTRE porte, pas
+    // `stake_cents` : un séquestre vide veut dire que le livre n'a jamais engagé cette partie (une
+    // ligne de la phase 02a), et on n'écrit alors rien.
+    async renounceMatch({ matchId, userId, at }) {
+      const m = matches.find(x => String(x.id) === String(matchId) && x.user_id === userId);
+      if (!m || m.status !== 'open' || (m.net_cents !== undefined && m.net_cents !== null))
+        return { match: null, deja: m || null };
+      const engage = soldeDe(L.compteEnjeu(m.id));
+      if (engage > 0) {
+        try {
+          ecrireLedger(L.mouvementRemboursement({ userId, matchId: m.id, miseCents: engage }));
+        } catch (e) {
+          if (!refusDuLivre(e)) throw e;
+          return { match: null, refus: 'livre', detail: e.code };
+        }
+      }
+      m.status = 'renounced';
+      m.settled_at = at;
+      return { match: m, rembourseCents: engage > 0 ? engage : 0,
+               balanceCents: soldeDe(L.compteJoueur(userId)),
+               quarantineCents: soldeDe(L.compteQuarantaine(userId)) };
+    },
+    // Le dernier billet renoncé, celui sur lequel la TEMPORISATION se décide. `order by opened_at
+    // desc limit 1` du vrai pilote, imité tel quel.
+    async lastRenounced({ userId }) {
+      return matches.filter(x => x.user_id === userId && x.status === 'renounced')
+                    .sort((a, b) => new Date(b.opened_at) - new Date(a.opened_at))[0] || null;
+    },
+    // LA PURGE DES TRACES, MIROIR DE LA CLAUSE DU `delete` DE db-pg.js, condition par condition et
+    // dans le même ordre. C'est le premier effacement du dépôt sur la pièce qui prouve un paiement :
+    // les quatre conditions sont écrites ici comme là-bas, et un test les retire UNE PAR UNE.
+    //
+    // Elle ne touche ni `matches` ni `ledger` : elle les lit. La rétention vient d'`api/ledger.js`,
+    // l'heure de l'appelant — c'est ce qui permet de faire vieillir une trace sans attendre quatre
+    // cents jours.
+    async purgeTraces({ maintenant, max = 500 }) {
+      const t = maintenant instanceof Date ? maintenant.getTime() : Number(maintenant);
+      if (!Number.isFinite(t)) throw new Error('purge des traces : heure illisible');
+      const avant = new Date(t - L.TRACE_RETENTION_JOURS * 24 * 3600 * 1000);
+      const purgeables = matches.filter(m =>
+        // (a) réglée DÉFINITIVEMENT
+        ['settled', 'rejected'].includes(m.status)
+        // (d) le délai est écoulé
+        && m.settled_at !== undefined && m.settled_at !== null
+        && new Date(m.settled_at) < avant
+        // (b) le grand livre a posé son écriture sur cette partie
+        && ledger.some(l => l.reference === String(m.id) && L.MOTIFS_REGLEMENT.includes(l.motif))
+        // (c) rien n'est en attente : le séquestre est vide
+        && soldeDe(L.compteEnjeu(m.id)) === 0)
+        .sort((a, b) => new Date(a.settled_at) - new Date(b.settled_at))
+        .slice(0, max);
+      const vises = new Set(purgeables.map(m => String(m.id)));
+      // `parties` compte les parties dont une trace a RÉELLEMENT été effacée, pas les candidates :
+      // c'est ce que le `returning match_id` du vrai `delete` rend, et une partie sans trace ne rend
+      // rien du tout.
+      const touchees = new Set();
+      let effacees = 0;
+      for (let i = traces.length - 1; i >= 0; i--) {
+        if (!vises.has(String(traces[i].match_id))) continue;
+        touchees.add(String(traces[i].match_id));
+        traces.splice(i, 1);
+        effacees++;
+      }
+      return { effacees, parties: touchees.size, avant };
     },
     // ---- LE GRAND LIVRE. Trois méthodes, une seule écrit, et il n'en existe pas de quatrième.
     //
@@ -1610,7 +1702,7 @@ await test('le veilleur clôt les billets expirés, et seulement eux', async () 
   assert.strictEqual(db.matches[1].status, 'settled');
 
   // Personne ne clôt rien tant que rien n'a expiré : le veilleur passe à vide.
-  assert.deepStrictEqual(await app.veiller(), { closes: 0 });
+  assert.deepStrictEqual(await app.veiller(), { closes: 0, echecs: [] });
   assert.strictEqual(db.matches[0].status, 'open');
 
   const tard = await appel(app, { method: 'POST', path: '/api/match', token: 'ok:u3:Max',
@@ -1618,14 +1710,19 @@ await test('le veilleur clôt les billets expirés, et seulement eux', async () 
   // On avance jusqu'après l'expiration du premier billet, mais pas de celui qu'on vient d'ouvrir.
   horloge.t = Date.parse(a.corps.expiresAt) + 1;
   assert.ok(horloge.t < Date.parse(tard.corps.expiresAt));
-  assert.deepStrictEqual(await app.veiller(), { closes: 1 });
+  assert.deepStrictEqual(await app.veiller(), { closes: 1, echecs: [] });
   assert.strictEqual(db.matches[0].status, 'expired', 'le billet que personne n\'a terminé');
   assert.strictEqual(db.matches[1].status, 'settled', 'une partie réglée n\'est jamais rouverte ni reclose');
   assert.strictEqual(db.matches[2].status, 'open', 'un billet encore valable n\'est pas balayé');
   // Repassé deux fois, il ne clôt plus rien : il ferme une porte, il ne la claque pas en boucle.
-  assert.deepStrictEqual(await app.veiller(), { closes: 0 });
+  assert.deepStrictEqual(await app.veiller(), { closes: 0, echecs: [] });
 });
-await test('le veilleur n\'écrit aucun montant : il ferme une porte, il ne règle rien', async () => {
+await test('le veilleur n\'écrit aucun montant SUR LA LIGNE : un billet périmé n\'a pas de verdict', async () => {
+  // Ce test disait « il ne règle rien », et la phase 03 l'a rendu à moitié faux : le veilleur vide
+  // désormais le séquestre. Ce qui reste vrai, et qui est tout ce que ce test-ci prouve, c'est
+  // qu'aucun MONTANT n'entre dans la ligne `matches` — un billet que personne n'a terminé n'a pas
+  // de verdict, et lui en écrire un ferait compter une partie qui n'a jamais été jugée. Le
+  // séquestre, lui, a son propre test un peu plus bas.
   const { db, app, horloge } = bancDeBillet();
   const b = await demander(app);
   horloge.t = Date.parse(b.corps.expiresAt) + 1;
@@ -1634,6 +1731,7 @@ await test('le veilleur n\'écrit aucun montant : il ferme une porte, il ne règ
   for (const col of ['net_cents', 'fee_cents', 'gross_cents', 'purse_cents', 'ecart_cents'])
     assert.strictEqual(ligne[col], undefined, `le veilleur a écrit ${col}`);
   assert.strictEqual(ligne.settled_at, undefined);
+  assert.strictEqual(ligne.status, 'expired');
 });
 await test('chaque requête rejouée deux fois : mêmes lignes, mêmes réponses', async () => {
   // Le patron, appliqué à toutes les routes qui écrivent. Ce qui compte n'est pas qu'elles
@@ -1738,7 +1836,7 @@ await test('une partie refusée ou restée ouverte ne compte pour rien', async (
 
   // Et périmée, pas davantage : le veilleur ferme une porte, il ne règle rien.
   horloge.t = Date.parse(ouvert.corps.expiresAt) + 1;
-  assert.deepStrictEqual(await app.veiller(), { closes: 1 });
+  assert.deepStrictEqual(await app.veiller(), { closes: 1, echecs: [] });
   assert.deepStrictEqual(await mesStats(app), avant, 'une partie périmée a compté');
   assert.strictEqual(db.matches.length, 3);
 });
@@ -2279,20 +2377,71 @@ await test('MAX_BODY vaut toujours 4 Ko partout, et la borne large ne vaut QUE s
   const trace = await envoyerTrace(app, b.corps.id, SEGMENT({ data: bourre }));
   assert.strictEqual(trace.corps.code, 'donnees', 'un corps de 8 Ko doit atteindre la route de trace');
 });
-test('match_traces est en INSERTION SEULE : aucun update, aucun delete, nulle part', () => {
-  // Garde textuelle, et elle porte sur les deux côtés : le schéma et le pilote. Aucune base ne
-  // tourne, donc c'est tout ce qu'on peut prouver — et il faut le dire : un test qui passe contre la
-  // doublure prouve la doublure, pas Postgres.
+test('match_traces : aucun update, et LE SEUL delete est la purge nommée, dont la clause porte les QUATRE conditions', () => {
+  // CE TEST A CHANGÉ DE FORME EN PHASE 03, ET IL FAUT LE DIRE PLUTÔT QUE DE LE LAISSER GLISSER. Il
+  // interdisait tout `delete from match_traces`, et il passait. La politique de conservation en
+  // ouvre un — le PREMIER `delete` du dépôt sur la pièce qui prouve un paiement — donc la garde
+  // s'affaiblit forcément. Une garde qu'on affaiblit sans le dire est très exactement l'écart que la
+  // recette de la 02b a trouvé : on écrit donc ce qu'elle ne garde plus (« aucun delete ») et ce
+  // qu'elle garde à la place, qui est plus étroit — UN seul delete, nommé, et sa clause porte les
+  // quatre conditions.
+  //
+  // Aucune base ne tourne, donc c'est tout ce qu'on peut prouver ici : un test qui passe contre la
+  // doublure prouve la doublure, pas Postgres. Le comportement des quatre conditions s'éprouve
+  // séparément, condition par condition, contre la doublure.
   const fs = require('node:fs'), path = require('node:path');
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   const pg = fs.readFileSync(path.join(__dirname, 'db-pg.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
   assert.match(sql, /create table if not exists match_traces/);
   assert.match(sql, /primary key \(match_id, seq\)/, 'la clé qui arbitre le premier-écrit-gagne a disparu');
+  const suppressions = [];
   for (const q of (pg.match(/`[^`]*`/g) || [])) {
     if (!/match_traces/.test(q)) continue;
+    // L'insertion seule tient encore sur la modification : une trace ne se RÉÉCRIT jamais, premier
+    // écrit gagne, et ça n'a pas bougé d'un octet.
     assert.ok(!/\bupdate\s+match_traces\b/i.test(q), 'un update vise match_traces : ' + q);
-    assert.ok(!/\bdelete\s+from\s+match_traces\b/i.test(q), 'un delete vise match_traces : ' + q);
+    if (/\bdelete\s+from\s+match_traces\b/i.test(q)) suppressions.push(q);
   }
+  assert.strictEqual(suppressions.length, 1,
+    `${suppressions.length} suppressions de traces dans db-pg.js : il ne doit y en avoir qu'UNE, la purge nommée`);
+  const purge = suppressions[0];
+  // (a) la ligne `matches` est réglée DÉFINITIVEMENT. Ni `expired`, ni `abandoned`, ni `renounced`,
+  // ni `open` : une partie que personne n'a jugée garde sa pièce.
+  assert.match(purge, /status in \('settled', 'rejected'\)/,
+    'la purge n\'exige plus une ligne réglée définitivement : ' + purge);
+  // (b) le grand livre a POSÉ SON ÉCRITURE sur cette partie. La liste des motifs qui soldent un
+  // billet vit dans `api/ledger.js` : on confronte les deux écritures plutôt que de les croire.
+  const motifs = purge.match(/motif in \(([^)]*)\)/);
+  assert.ok(motifs, 'la purge n\'exige plus une écriture du grand livre : ' + purge);
+  assert.deepStrictEqual((motifs[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1)),
+    L.MOTIFS_REGLEMENT.slice(),
+    'la clause de la purge et api/ledger.js ne s\'accordent pas sur ce qui solde un billet');
+  assert.match(purge, /exists \(select 1 from ledger_entries/, purge);
+  // (c) RIEN N'EST EN ATTENTE : le séquestre de cette partie est à zéro. La somme n'est pas
+  // recopiée, elle vient de `soldeExpr`, la même que celle de `ledgerSolde`.
+  assert.match(purge, /soldeExpr\(enjeu\)/, 'la purge ne regarde plus le séquestre : ' + purge);
+  assert.match(purge, /\)\s*=\s*0/, 'la purge n\'exige plus un séquestre vide : ' + purge);
+  // Le compte du séquestre est nommé une fois, en SQL, et rien de ce qui y entre ne vient d'une
+  // requête HTTP : c'est l'identifiant de la ligne `matches` qu'on est en train de lire.
+  assert.ok(pg.includes('const enjeu = "\'enjeu:\' || matches.id"'),
+    'le compte du séquestre de la purge a changé de forme : ' + purge);
+  // (d) LE DÉLAI EST ÉCOULÉ.
+  assert.match(purge, /settled_at\s*<\s*\$1/, 'la purge n\'exige plus le délai de rétention : ' + purge);
+  // ET ELLE NE TOUCHE NI `matches` NI LE GRAND LIVRE : elle les LIT. Un `delete` ou un `update` sur
+  // l'une de ces deux tables dans la même instruction serait une purge qui efface une preuve.
+  assert.ok(!/\b(delete\s+from|update)\s+(matches|ledger_entries)\b/i.test(purge), purge);
+  // La rétention est une constante NOMMÉE, avec sa raison écrite à côté d'elle, et jamais un nombre
+  // de jours écrit dans la requête.
+  assert.ok(Number.isInteger(L.TRACE_RETENTION_JOURS) && L.TRACE_RETENTION_JOURS > 0,
+    'TRACE_RETENTION_JOURS doit être un nombre de jours entier');
+  assert.ok(pg.includes('L.TRACE_RETENTION_JOURS'),
+    'la purge n\'utilise pas la constante de rétention : un délai en dur ne se relit pas');
+  const ledgerSrc = fs.readFileSync(path.join(__dirname, 'ledger.js'), 'utf8');
+  const i = ledgerSrc.indexOf('const TRACE_RETENTION_JOURS');
+  const raison = ledgerSrc.slice(ledgerSrc.lastIndexOf('// ---------- La conservation', i), i);
+  assert.match(raison, /pièce justificative/i, 'la raison de la rétention n\'est plus écrite à côté d\'elle');
+  assert.match(raison, /phase 06/, 'la rétention doit dire qui la fixera vraiment');
+  assert.match(raison, /juridique/i, 'la rétention doit dire qu\'elle n\'est PAS une décision juridique');
   // L'insertion, elle, porte `on conflict do nothing` : c'est la BASE qui arbitre l'idempotence,
   // jamais un `select` préalable — même doctrine que `name_key`.
   const inserts = (pg.match(/`[^`]*`/g) || []).filter(q => /insert into match_traces/i.test(q));
@@ -2409,7 +2558,7 @@ await test('SIX CODES NOMMÉS, chacun en 400 ou 409, jamais en 500, et jamais un
     // Et le veilleur la ramasse : le joueur n'est enfermé que jusqu'à l'expiration de son billet,
     // pas au-delà, et il peut renvoyer sa trace entre-temps.
     horloge.t = Date.parse(b.corps.expiresAt) + 1;
-    assert.deepStrictEqual(await app.veiller(), { closes: 1 }, code);
+    assert.deepStrictEqual(await app.veiller(), { closes: 1, echecs: [] }, code);
   }
   // Les six codes de la trace sont bien ceux que la spécification nomme, plus deux gardes internes.
   const { REJEU_CODES } = require('./app');
@@ -3503,9 +3652,9 @@ await test('LA FRONTIÈRE AVEC LA 02a SE CONSTATE : une ligne sans écriture de 
 });
 
 await test('CINQUANTE PARTIES DE BOUT EN BOUT : la somme globale est nulle à CHAQUE étape, et aucun séquestre ne reste habité', async () => {
-  // Les cinq modes, les quatre tables, et les issues que le module 3 sait produire. `renounced` est
-  // la sixième, et elle n'existe pas encore : c'est le module 4 qui l'ouvre, avec le veilleur
-  // écrivain d'argent. Ce test-ci ne prétend donc pas la couvrir, et le dit.
+  // Les cinq modes, les quatre tables, et les cinq issues qui passent par le règlement ou la
+  // clôture. La SIXIÈME, `renounced`, ne passe par aucun des deux — elle a sa propre route et son
+  // propre mouvement — et elle est couverte par « LA SIXIÈME ISSUE », sur le même domaine.
   const db = fakeDb();
   const horloge = { t: T0 };
   let g = 0, s = 0;
@@ -3590,6 +3739,462 @@ await test('CINQUANTE PARTIES DE BOUT EN BOUT : la somme globale est nulle à CH
   zeroGlobal(db, 'à la toute fin');
 });
 
+// ------------------------------------------------------------------------------------------------
+// LE BILLET QUE PERSONNE NE TERMINE (phase 03, module 4). La fenêtre de renoncement, la
+// temporisation du chercheur de graine, le veilleur devenu écrivain d'argent, et la conservation des
+// traces. Tout est éprouvé contre la DOUBLURE, avec l'horloge injectée : une horloge qu'on avance
+// fait vieillir un billet sans attendre, et fait vieillir une trace sans attendre quatre cents jours.
+console.log('Le billet que personne ne termine : renoncement, veilleur, conservation');
+
+const renoncer = (app, id, opts = {}) =>
+  appel(app, { method: 'POST', path: `/api/match/${id}/renounce`, token: 'ok:u1:Loic', ...opts });
+const soldeEnjeu = (db, id) => L.soldeDe(livreDe(db), L.compteEnjeu(id));
+const remboursementsDe = db => db.ledger.filter(l => l.motif === 'remboursement');
+
+await test('LE VOL QUE CETTE PHASE FERME : jouer, perdre, n\'envoyer NI trace NI résultat, laisser expirer — le solde vaut dotation − mise, JAMAIS dotation', async () => {
+  // C'est le vol que le débit à l'ouverture ouvre, et il faut le nommer : si un billet expiré était
+  // remboursé, le joueur ne perdrait JAMAIS. Toute condition fondée sur « aucune trace n'est
+  // arrivée » est contrôlée par le client, donc sans valeur — la seule chose que le serveur observe
+  // sans lui est son propre chronomètre, et il a dit non depuis la onzième seconde.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  const b = await demander(app);
+  const mise = b.corps.stakeCents;
+  // Il JOUE, et il perd. La trace existe ; elle ne partira jamais.
+  const p = partieDe(b);
+  assert.ok(p.segments.length > 0, 'la partie du test n\'a produit aucune trace : elle ne prouve rien');
+  assert.strictEqual(db.traces.length, 0, 'la trace du test est partie : ce n\'est plus le vol qu\'on décrit');
+  assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS - mise);
+
+  // Il laisse expirer. Le veilleur passe.
+  horloge.t = Date.parse(b.corps.expiresAt) + 1;
+  assert.deepStrictEqual(await app.veiller(), { closes: 1, echecs: [] });
+  assert.strictEqual(db.matches[0].status, 'expired');
+
+  // LE SOLDE, ET C'EST TOUT CE QUE CE TEST EXISTE POUR DIRE.
+  assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS - mise,
+    'un billet expiré sans résultat a été remboursé : le joueur ne perd jamais');
+  assert.notStrictEqual(soldeJoueur(db), L.DOTATION_CENTS);
+  assert.strictEqual(remboursementsDe(db).length, 0, 'le veilleur a remboursé');
+  // La mise est chez la maison, et le séquestre est VIDE : c'est le revirement du veilleur.
+  assert.strictEqual(soldeEnjeu(db, db.matches[0].id), 0,
+    'le veilleur a laissé un séquestre habité : cet argent-là, plus rien ne le solde');
+  assert.strictEqual(L.soldeDe(livreDe(db), L.MAISON_CONTREPARTIE), mise);
+  zeroGlobal(db, 'après un billet expiré');
+  reconcilier(db, 'le billet que personne n\'a terminé');
+});
+
+await test('LES DEUX BORNES EXACTES DE LA FENÊTRE : à la neuvième seconde on rembourse, à la onzième on refuse et on n\'écrit rien', async () => {
+  // La fenêtre vaut dix secondes, et pas les vingt-cinq de `LOBBY.wait` : le jeu décolle dès que la
+  // salle est pleine. On n'écrit pas 10 ici — on interroge `WBCore.renonceFenetreS`, faute de quoi
+  // ce test cesserait de dire la vérité le jour où le lobby change.
+  const fenetre = C.renonceFenetreS() * 1000;
+  assert.ok(fenetre > 0 && fenetre < C.LOBBY.wait * 1000, `${fenetre} ms`);
+
+  // NEUVIÈME SECONDE : remboursé, au centime, et le billet est clos avec SON statut.
+  {
+    const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+    const b = await demander(app);
+    const mise = b.corps.stakeCents;
+    horloge.t = Date.parse(b.corps.openedAt) + 9000;
+    const r = await renoncer(app, b.corps.id);
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+    assert.strictEqual(r.corps.status, 'renounced');
+    assert.strictEqual(r.corps.refundedCents, mise);
+    assert.strictEqual(r.corps.balanceCents, L.DOTATION_CENTS);
+    assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS, 'la mise n\'est pas revenue');
+    assert.strictEqual(soldeEnjeu(db, db.matches[0].id), 0);
+    assert.strictEqual(remboursementsDe(db).length, 1);
+    assert.strictEqual(remboursementsDe(db)[0].reference, String(db.matches[0].id));
+    // La maison n'a rien encaissé : un renoncement n'est pas une défaite.
+    assert.strictEqual(L.soldeDe(livreDe(db), L.MAISON_CONTREPARTIE), 0);
+    zeroGlobal(db, 'après un renoncement');
+    reconcilier(db, 'un billet renoncé');
+  }
+  // ONZIÈME SECONDE : refus NOMMÉ, en 409, et RIEN n'a bougé — ni la ligne, ni le livre.
+  {
+    const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+    const b = await demander(app);
+    const avant = db.ledger.slice();
+    let vu500 = 0;
+    app.onError = () => { vu500++; };
+    horloge.t = Date.parse(b.corps.openedAt) + 11000;
+    const r = await renoncer(app, b.corps.id);
+    assert.strictEqual(r.code, 409, JSON.stringify(r.corps));
+    assert.strictEqual(r.corps.code, 'fenetre_close');
+    assert.strictEqual(vu500, 0, 'un refus de fenêtre est sorti en 500');
+    assert.deepStrictEqual(db.ledger, avant, 'un refus de fenêtre a écrit dans le grand livre');
+    assert.strictEqual(db.matches[0].status, 'open', 'un refus de fenêtre a clos le billet');
+    assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS - b.corps.stakeCents);
+    reconcilier(db, 'un renoncement refusé');
+  }
+  // ET LES DEUX BORNES EXACTES, au millième près : `renonciationOuverte` est un `<=`, donc le
+  // dernier instant ouvert est la fenêtre elle-même. Une borne éprouvée à deux secondes près ne dit
+  // rien de celle que le code applique.
+  for (const [decalage, attendu] of [[fenetre, 200], [fenetre + 1, 409]]) {
+    const { app, horloge } = bancDeBillet({ limiter: () => true });
+    const b = await demander(app);
+    horloge.t = Date.parse(b.corps.openedAt) + decalage;
+    const r = await renoncer(app, b.corps.id);
+    assert.strictEqual(r.code, attendu, `à ${decalage} ms : ${JSON.stringify(r.corps)}`);
+  }
+});
+
+await test('les refus du renoncement sont NOMMÉS, jamais un 500, et aucun n\'enferme le joueur', async () => {
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  let vu500 = 0;
+  app.onError = () => { vu500++; };
+  const b = await demander(app);
+  // Un billet inconnu, et le billet de quelqu'un d'autre : 404 tous les deux. Un identifiant deviné
+  // ne doit rien apprendre sur la partie d'un autre, pas même qu'elle existe.
+  assert.strictEqual((await renoncer(app, '999999')).code, 404);
+  const autre = await renoncer(app, b.corps.id, { token: 'ok:u2:Zoe' });
+  assert.strictEqual(autre.code, 404, JSON.stringify(autre.corps));
+
+  // Un billet déjà clos : refus NOMMÉ, et la place est libre — le joueur n'est pas enfermé.
+  horloge.t = Date.parse(b.corps.openedAt) + 1000;
+  assert.strictEqual((await renoncer(app, b.corps.id)).code, 200);
+  const deux = await renoncer(app, b.corps.id);
+  assert.strictEqual(deux.code, 409, JSON.stringify(deux.corps));
+  assert.strictEqual(deux.corps.code, 'billet_clos');
+  assert.strictEqual(remboursementsDe(db).length, 1, 'renoncer deux fois a remboursé deux fois');
+  assert.strictEqual(vu500, 0, 'un refus de renoncement est sorti en 500');
+
+  // Et les formes de la route, comme pour la trace et le résultat.
+  for (const m of ['GET', 'PATCH', 'DELETE'])
+    assert.strictEqual((await appel(app, { method: m, path: '/api/match/1/renounce', token: 'ok:u1:Loic' })).code, 405, m);
+  for (const chemin of ['/api/match//renounce', '/api/match/abc/renounce', '/api/match/1/renounce/x'])
+    assert.strictEqual((await appel(app, { method: 'POST', path: chemin, token: 'ok:u1:Loic' })).code, 404, chemin);
+  assert.strictEqual((await appel(app, { method: 'POST', path: '/api/match/1/renounce' })).code, 401);
+  reconcilier(db, 'les refus du renoncement');
+});
+
+await test('LE VEILLEUR PASSÉ CENT FOIS : il ne rembourse jamais, il ne vide jamais deux fois, et chaque séquestre part chez la maison', async () => {
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  const joueurs = ['ok:u1:Loic', 'ok:u2:Zoe', 'ok:u3:Max'];
+  const billets = [];
+  for (let i = 0; i < joueurs.length; i++)
+    billets.push(await demander(app, { ...DEMANDE, stake: [0.5, 1, 5][i], clientKey: 'v' + i },
+                                { token: joueurs[i] }));
+  const mises = billets.map(b => b.corps.stakeCents);
+  horloge.t = Math.max(...billets.map(b => Date.parse(b.corps.expiresAt))) + 1;
+
+  const premier = await app.veiller();
+  assert.deepStrictEqual(premier, { closes: 3, echecs: [] });
+  const apresPremier = db.ledger.slice();
+  // CENT PASSAGES DE PLUS. Le livre ne bouge pas d'une ligne : un séquestre déjà vide n'a rien à
+  // vider, et la clause `status = 'open'` n'a plus rien à clore.
+  for (let i = 0; i < 100; i++)
+    assert.deepStrictEqual(await app.veiller(), { closes: 0, echecs: [] }, `passage ${i}`);
+  assert.deepStrictEqual(db.ledger, apresPremier, 'le veilleur a réécrit au centième passage');
+
+  assert.strictEqual(remboursementsDe(db).length, 0,
+    'le veilleur a remboursé : passé la fenêtre, RIEN ne rend la mise');
+  for (const b of billets) assert.strictEqual(soldeEnjeu(db, b.corps.id), 0, b.corps.id);
+  assert.strictEqual(L.soldeDe(livreDe(db), L.MAISON_CONTREPARTIE), mises.reduce((a, m) => a + m, 0),
+    'les séquestres ne sont pas tous arrivés chez la maison');
+  for (let i = 0; i < joueurs.length; i++) {
+    const uid = db.users[i].id;
+    assert.strictEqual(L.soldeDe(livreDe(db), L.compteJoueur(uid)), L.DOTATION_CENTS - mises[i]);
+  }
+  zeroGlobal(db, 'après cent passages du veilleur');
+  reconcilier(db, 'le veilleur');
+});
+
+await test('UN BILLET QUI ÉCHOUE N\'EMPORTE PAS LE BALAYAGE : une transaction par billet, et l\'échec est NOMMÉ', async () => {
+  // C'est la raison de forme du revirement : un mouvement du grand livre ne se pose pas en masse.
+  // Avec un `update` de 500 lignes, un seul refus d'écriture annulerait les 499 autres clôtures —
+  // ou pire, les laisserait closes avec leur séquestre habité.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  const joueurs = ['ok:u1:Loic', 'ok:u2:Zoe', 'ok:u3:Max'];
+  const billets = [];
+  for (let i = 0; i < joueurs.length; i++)
+    billets.push(await demander(app, { ...DEMANDE, clientKey: 'e' + i }, { token: joueurs[i] }));
+  const casse = String(billets[1].corps.id);
+  horloge.t = Math.max(...billets.map(b => Date.parse(b.corps.expiresAt))) + 1;
+
+  // Le grand livre refuse le vidage du SECOND séquestre, et de lui seul.
+  db.panne.ledger = t => t.some(x => x.motif === 'gain' && x.reference === casse);
+  const r = await app.veiller();
+  assert.strictEqual(r.closes, 2, 'un échec a emporté les clôtures voisines');
+  assert.deepStrictEqual(r.echecs, [{ id: casse, code: '23505' }],
+    'le billet en échec doit être NOMMÉ, pas avalé');
+  // Le billet en échec n'a PAS bougé : ni clos, ni vidé. C'est le seul état acceptable — une ligne
+  // close dont le séquestre reste habité serait de l'argent que plus rien ne solde.
+  const rate = db.matches.find(m => String(m.id) === casse);
+  assert.strictEqual(rate.status, 'open');
+  assert.strictEqual(soldeEnjeu(db, rate.id), rate.stake_cents);
+  for (const b of billets) if (String(b.corps.id) !== casse) {
+    assert.strictEqual(db.matches.find(m => String(m.id) === b.corps.id).status, 'expired');
+    assert.strictEqual(soldeEnjeu(db, b.corps.id), 0);
+  }
+  reconcilier(db, 'après un balayage partiel');
+
+  // La panne passée, le tour suivant le reprend. Rien n'est perdu, rien n'est enfermé.
+  db.panne.ledger = null;
+  assert.deepStrictEqual(await app.veiller(), { closes: 1, echecs: [] });
+  assert.strictEqual(rate.status, 'expired');
+  assert.strictEqual(soldeEnjeu(db, rate.id), 0);
+  zeroGlobal(db, 'après la reprise du veilleur');
+  reconcilier(db, 'le veilleur après la panne');
+});
+
+await test('UN RÉSULTAT ARRIVÉ APRÈS UN REMBOURSEMENT n\'écrit aucun second mouvement, et un billet remboursé ne reçoit plus de gain', async () => {
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const p = partieDe(b, { encaisser: 300 });
+  // La trace arrive AVANT le renoncement : le billet est encore ouvert, c'est un envoi parfaitement
+  // normal. Ce qui doit être refusé, c'est de le faire PAYER après coup.
+  await poserTrace(app, b.corps.id, p.segments);
+  horloge.t = Date.parse(b.corps.openedAt) + 5000;
+  const rr = await renoncer(app, b.corps.id);
+  assert.strictEqual(rr.code, 200, JSON.stringify(rr.corps));
+  const apresRemboursement = db.ledger.slice();
+  assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS);
+
+  // Le résultat arrive quand même. La ligne est close : on relit son état, on ne recalcule rien, et
+  // AUCUN montant n'entre — c'est la doctrine de tout billet clos, appliquée au sixième statut.
+  horloge.t = ARRIVEE(p.rapport);
+  const rep = await rendre(app, b.corps.id, p.rapport);
+  assert.strictEqual(rep.corps.status, 'renounced', JSON.stringify(rep.corps));
+  assert.strictEqual(rep.corps.netCents, null, 'un billet remboursé a reçu un gain');
+  assert.deepStrictEqual(db.ledger, apresRemboursement,
+    'un résultat rendu après un remboursement a écrit dans le grand livre');
+  assert.strictEqual(db.ledger.filter(l => l.motif === 'gain').length, 0);
+  assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS);
+  // Et une trace de plus est refusée, nommément : le billet est clos.
+  const t = await appel(app, { method: 'POST', path: `/api/match/${b.corps.id}/trace`,
+                               token: 'ok:u1:Loic',
+                               body: { seq: 9, simVersion: SIM.SIM_VERSION, data: p.segments[0] } });
+  assert.strictEqual(t.code, 409, JSON.stringify(t.corps));
+  assert.strictEqual(t.corps.code, 'billet_clos');
+  // ET LE SÉQUESTRE REFUSERAIT DE TOUTE FAÇON : un gain devrait le débiter, et il est vide. C'est la
+  // protection qui reste debout même si la clause `where` du règlement glissait un jour.
+  const ligne = db.matches[0];
+  await assert.rejects(() => db.ledgerWrite(L.mouvementGain({
+    userId: ligne.user_id, matchId: ligne.id, miseCents: ligne.stake_cents,
+    grossCents: 400, feeCents: 80, netCents: 320, convergee: true })),
+    e => e.code === 'decouvert', 'un gain a pu être posé sur un séquestre remboursé');
+  zeroGlobal(db, 'après un résultat tardif');
+  reconcilier(db, 'le billet remboursé puis rendu');
+});
+
+await test('LA TEMPORISATION DU CHERCHEUR DE GRAINE : 409 renonce_recent pendant la fenêtre, accepté juste après, et le refus n\'écrit rien', async () => {
+  // Renoncer à la première seconde clôt le billet et libère l'index partiel : `createMatch` en
+  // délivrerait un neuf immédiatement, avec une graine neuve, et comme la carte est une fonction
+  // pure de `seed_public` — que le client reçoit AVEC le billet — un nouveau tirage coûterait un
+  // aller-retour HTTP. La temporisation le fait coûter la fenêtre entière.
+  const { db, app, horloge, tires } = bancDeBillet({ limiter: () => true });
+  const un = await demander(app);
+  const ouvert = Date.parse(un.corps.openedAt);
+  horloge.t = ouvert + 1000;
+  assert.strictEqual((await renoncer(app, un.corps.id)).code, 200);
+
+  const graines = tires(), lignes = db.matches.length, livre = db.ledger.length;
+  horloge.t = ouvert + 2000;
+  const refus = await demander(app, { ...DEMANDE, clientKey: 'trop-tot' });
+  assert.strictEqual(refus.code, 409, JSON.stringify(refus.corps));
+  assert.strictEqual(refus.corps.code, 'renonce_recent');
+  assert.strictEqual(refus.corps.windowSeconds, C.renonceFenetreS());
+  assert.strictEqual(db.matches.length, lignes, 'la temporisation a laissé un billet');
+  assert.strictEqual(db.ledger.length, livre, 'la temporisation a laissé une écriture');
+  // ELLE NE CONSOMME PAS MÊME UNE GRAINE : le refus est posé avant les deux tirages. Un chercheur
+  // de graine qui martèlerait la route n'en verrait pas défiler une seule.
+  assert.strictEqual(tires(), graines, 'un tirage de graine a eu lieu malgré le refus');
+
+  // Et elle tient jusqu'au dernier millième : la borne est celle de `renonciationOuverte`, pas une
+  // seconde arrondie.
+  horloge.t = ouvert + C.renonceFenetreS() * 1000;
+  assert.strictEqual((await demander(app, { ...DEMANDE, clientKey: 'pile' })).corps.code, 'renonce_recent');
+  horloge.t = ouvert + C.renonceFenetreS() * 1000 + 1;
+  const neuf = await demander(app, { ...DEMANDE, clientKey: 'apres' });
+  assert.strictEqual(neuf.code, 200, JSON.stringify(neuf.corps));
+  assert.notStrictEqual(neuf.corps.seed, un.corps.seed, 'un billet neuf doit porter une graine neuve');
+  assert.strictEqual(neuf.corps.balanceCents, L.DOTATION_CENTS - neuf.corps.stakeCents);
+  zeroGlobal(db, 'après la temporisation');
+  reconcilier(db, 'la temporisation');
+});
+
+await test('LA SIXIÈME ISSUE : sur les cinq modes et les quatre tables, un billet renoncé laisse le livre équilibré et le séquestre VIDE', async () => {
+  // Le test des cinquante parties couvre les cinq issues que le module 3 savait produire, et il dit
+  // qu'il ne couvre pas `renounced`. Celui-ci la couvre, sur le même domaine.
+  const db = fakeDb();
+  const horloge = { t: T0 };
+  let g = 0, s = 0;
+  const app = appDe(db, {
+    randomSeed: () => GRAINES[g++ % GRAINES.length],
+    randomSecret: () => SECRETS[s++ % SECRETS.length],
+    now: () => horloge.t, chrono: () => 0, limiter: () => true,
+  });
+  const MODES = Object.keys(C.MODES), MISES = C.TIERS.map(t => t.stake);
+  let n = 0;
+  for (const mode of MODES) for (const stake of MISES) {
+    const token = `ok:r${n}:Zoe`;
+    const quoi = `renoncement ${mode} ${stake} $`;
+    horloge.t = T0;
+    const b = await demander(app, { mode, stake, brawler: BRAWLER, clientKey: 'a' }, { token });
+    assert.strictEqual(b.code, 200, `${quoi} : ${JSON.stringify(b.corps)}`);
+    assert.strictEqual(soldeEnjeu(db, b.corps.id), b.corps.stakeCents, quoi);
+    horloge.t = T0 + 4000;
+    const r = await renoncer(app, b.corps.id, { token });
+    assert.strictEqual(r.code, 200, `${quoi} : ${JSON.stringify(r.corps)}`);
+    assert.strictEqual(r.corps.refundedCents, b.corps.stakeCents, quoi);
+    assert.strictEqual(soldeEnjeu(db, b.corps.id), 0, `${quoi} : séquestre non vidé`);
+    const uid = db.users.find(u => u.auth_id === `r${n}`).id;
+    assert.strictEqual(L.soldeDe(livreDe(db), L.compteJoueur(uid)), L.DOTATION_CENTS, quoi);
+    zeroGlobal(db, quoi);
+    reconcilier(db, quoi);
+    n++;
+  }
+  assert.strictEqual(n, MODES.length * MISES.length);
+  assert.ok(db.matches.every(m => m.status === 'renounced'));
+  // La maison n'a rien gagné et rien perdu : un renoncement est un aller-retour, pas une partie.
+  assert.strictEqual(L.soldeDe(livreDe(db), L.MAISON_CONTREPARTIE), 0);
+  assert.strictEqual(L.soldeDe(livreDe(db), L.MAISON_COMMISSION), 0);
+});
+
+// ---------- LA CONSERVATION DES TRACES ----------
+// Un cas dégénéré, construit exprès : une partie réglée, vieille, dont le livre porte l'écriture et
+// dont le séquestre est vide. C'est le seul état où une trace s'efface, et chacune des quatre
+// conditions est ensuite RETIRÉE SEULE. On ne teste pas en bloc le premier `delete` du dépôt sur la
+// pièce qui prouve un paiement.
+async function bancDeTrace({ status = 'settled', settledAt = T0, avecMise = true, avecGain = true,
+                             gainPartiel = 0, segments = 2 } = {}) {
+  const db = fakeDb();
+  const id = 1, uid = 1, mise = 50;
+  await db.ledgerWrite(L.mouvementDotation({ userId: uid, montantCents: L.DOTATION_CENTS }));
+  db.matches.push({ id, user_id: uid, mode: 'solo', stake_cents: mise, seats: 20, team_size: 1,
+                    brawler: BRAWLER, seed_public: GRAINES[0], seed_secret: SECRETS[0],
+                    sim_version: SIM.SIM_VERSION, client_key: 'archive', status,
+                    first_result_at: new Date(T0), opened_at: new Date(T0),
+                    expires_at: new Date(T0 + 1000),
+                    settled_at: settledAt === null ? null : new Date(settledAt),
+                    gross_cents: 0, fee_cents: 0, net_cents: status === 'settled' ? 0 : null,
+                    digest_match: true });
+  if (avecMise) await db.ledgerWrite(L.mouvementMise({ userId: uid, matchId: id, miseCents: mise }));
+  if (avecGain) {
+    // `gainPartiel` est ce qui rend le cas DÉGÉNÉRÉ : le livre a bien posé son écriture — la
+    // condition (b) tient — mais il n'a vidé qu'une partie du séquestre, si bien que (c) ne tient
+    // plus. C'est le seul montage qui sépare vraiment ces deux conditions-là.
+    const vide = gainPartiel || mise;
+    await db.ledgerWrite(L.mouvementGain({ matchId: id, miseCents: vide,
+                                           grossCents: 0, feeCents: 0, netCents: 0 }));
+  }
+  for (let seq = 0; seq < segments; seq++)
+    await db.addTrace({ matchId: id, seq, simVersion: SIM.SIM_VERSION, steps: 1,
+                        data: 'AAAA' + seq, maxSteps: 1_000_000 });
+  return { db, id, mise };
+}
+const APRES_RETENTION = T0 + (L.TRACE_RETENTION_JOURS + 1) * 24 * 3600 * 1000;
+
+await test('LA PURGE, CAS NOMINAL : les quatre conditions réunies, la trace s\'efface — et rien d\'autre', async () => {
+  const { db } = await bancDeTrace();
+  assert.strictEqual(db.traces.length, 2);
+  const lignes = JSON.stringify(db.matches), livre = db.ledger.slice();
+  const r = await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) });
+  assert.strictEqual(r.effacees, 2, 'les deux segments de la partie doivent partir ensemble');
+  assert.strictEqual(r.parties, 1);
+  assert.strictEqual(db.traces.length, 0);
+  // ELLE NE TOUCHE NI UNE LIGNE `matches`, NI UNE ÉCRITURE DU GRAND LIVRE. `ledger_entries` reste en
+  // insertion seule, sans exception : la purge porte sur `match_traces` et sur elle seule.
+  assert.strictEqual(JSON.stringify(db.matches), lignes, 'la purge a touché une ligne matches');
+  assert.deepStrictEqual(db.ledger, livre, 'la purge a touché une écriture du grand livre');
+  zeroGlobal(db, 'après la purge');
+  reconcilier(db, 'la purge');
+  // Repassée, elle n'a plus rien à faire : une trace effacée ne se réefface pas.
+  assert.deepStrictEqual(await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) }),
+    { effacees: 0, parties: 0, avant: new Date(APRES_RETENTION - L.TRACE_RETENTION_JOURS * 24 * 3600 * 1000) });
+});
+
+await test('LA PURGE, CONDITION (a) RETIRÉE : une ligne qui n\'est pas réglée DÉFINITIVEMENT garde sa trace', async () => {
+  // `expired`, `abandoned`, `renounced` et `open` ne sont pas des règlements : la partie n'a jamais
+  // été jugée, et c'est exactement la pièce qu'on voudra relire.
+  for (const status of ['expired', 'abandoned', 'renounced', 'open']) {
+    const { db } = await bancDeTrace({ status });
+    const r = await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) });
+    assert.strictEqual(r.effacees, 0, `une trace ${status} a été effacée`);
+    assert.strictEqual(db.traces.length, 2, status);
+  }
+  // Et le contre-témoin : `rejected` est bien un règlement définitif, donc il purge.
+  const { db } = await bancDeTrace({ status: 'rejected' });
+  assert.strictEqual((await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) })).effacees, 2,
+    'une ligne refusée est réglée définitivement : sa trace doit pouvoir partir');
+});
+
+await test('LA PURGE, CONDITION (b) RETIRÉE : sans écriture du grand livre sur cette partie, la trace reste', async () => {
+  // Le cas est celui d'une ligne de la phase 02a : faits déclarés, aucune mise, aucun gain. Son
+  // séquestre est vide — la condition (c) tient donc toute seule — et c'est bien la condition (b)
+  // qui la retient. Sans elle, la première purge effacerait les pièces de toutes les lignes que le
+  // grand livre n'a jamais lues.
+  const { db } = await bancDeTrace({ avecMise: false, avecGain: false });
+  assert.strictEqual(L.soldeDe(livreDe(db), L.compteEnjeu(1)), 0, 'le montage ne teste pas (b) seule');
+  // ET LE MOTIF COMPTE, PAS SEULEMENT LA RÉFÉRENCE. Une dotation porte `<user_id>` et un gain porte
+  // `<match_id>` : les deux vivent dans le même espace de noms, et le joueur 1 de ce montage a bien
+  // une écriture de référence « 1 ». Sans le filtre sur le motif, la dotation d'un joueur ferait
+  // purger la trace de la partie qui porte le même numéro — une collision silencieuse, et sur le
+  // chemin d'un effacement.
+  assert.ok(db.ledger.some(l => l.reference === '1' && l.motif === 'dotation'),
+    'le montage ne met pas la collision de référence à l\'épreuve');
+  assert.strictEqual(db.ledger.filter(l => l.reference === '1'
+    && L.MOTIFS_REGLEMENT.includes(l.motif)).length, 0);
+  const r = await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) });
+  assert.strictEqual(r.effacees, 0, 'une trace sans écriture du grand livre a été effacée');
+  assert.strictEqual(db.traces.length, 2);
+});
+
+await test('LA PURGE, CONDITION (c) RETIRÉE : un séquestre encore habité retient sa trace', async () => {
+  // Le cas dégénéré : le livre a POSÉ son écriture — (b) tient — mais il n'a vidé que trente des
+  // cinquante centimes. Il reste vingt centimes en attente, et tant qu'il en reste un seul, la pièce
+  // qui prouve ce que cette partie a payé ne s'efface pas.
+  const { db } = await bancDeTrace({ gainPartiel: 30 });
+  assert.strictEqual(L.soldeDe(livreDe(db), L.compteEnjeu(1)), 20, 'le montage ne teste pas (c) seule');
+  assert.ok(db.ledger.some(l => l.reference === '1' && l.motif === 'gain'), '(b) doit tenir ici');
+  const r = await db.purgeTraces({ maintenant: new Date(APRES_RETENTION) });
+  assert.strictEqual(r.effacees, 0, 'une trace dont le séquestre est habité a été effacée');
+  assert.strictEqual(db.traces.length, 2);
+});
+
+await test('LA PURGE, CONDITION (d) RETIRÉE : avant le délai de rétention, rien ne part', async () => {
+  const { db } = await bancDeTrace();
+  // La veille du terme, au millième près. Une rétention éprouvée à un mois près ne dit rien de celle
+  // que le code applique.
+  const veille = T0 + L.TRACE_RETENTION_JOURS * 24 * 3600 * 1000;
+  assert.strictEqual((await db.purgeTraces({ maintenant: new Date(veille) })).effacees, 0,
+    'une trace a été effacée le jour même du terme : le contrôle est un « plus vieux que »');
+  assert.strictEqual((await db.purgeTraces({ maintenant: new Date(veille + 1) })).effacees, 2,
+    'la rétention ne se termine jamais : la table grandirait sans borne');
+  // Et une ligne close sans `settled_at` ne part pas non plus : sans date, il n'y a pas de délai.
+  const sansDate = await bancDeTrace({ settledAt: null });
+  assert.strictEqual((await sansDate.db.purgeTraces({ maintenant: new Date(APRES_RETENTION) })).effacees, 0,
+    'une ligne sans settled_at a été purgée : sur quel délai ?');
+});
+
+await test('LA PURGE N\'EFFACE JAMAIS LA TRACE D\'UN BILLET DONT LE RÉSULTAT N\'EST JAMAIS ARRIVÉ, et la table ne descend pas à zéro', async () => {
+  // C'est la conséquence directe de la première condition, et c'est LE BON DÉFAUT : la ligne d'un
+  // billet que personne n'a terminé n'est ni `settled` ni `rejected`, donc sa pièce reste. C'est
+  // exactement celle qu'on voudra relire le jour où quelqu'un contestera une mise perdue.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const p = partieDe(b, { encaisser: 300 });
+  await poserTrace(app, b.corps.id, p.segments);
+  const combien = db.traces.length;
+  assert.ok(combien > 0);
+  // Le résultat n'arrive jamais. Le veilleur clôt, vide le séquestre, et n'écrit aucun verdict.
+  horloge.t = Date.parse(b.corps.expiresAt) + 1;
+  await app.veiller();
+  assert.strictEqual(db.matches[0].status, 'expired');
+  assert.strictEqual(soldeEnjeu(db, db.matches[0].id), 0);
+
+  // Quatre cents jours plus tard, et mille ans plus tard : la trace est toujours là.
+  horloge.t = APRES_RETENTION;
+  assert.strictEqual((await app.purger()).effacees, 0);
+  horloge.t = T0 + 1000 * 365 * 24 * 3600 * 1000;
+  assert.strictEqual((await app.purger()).effacees, 0,
+    'la pièce d\'un billet jamais jugé a fini par être effacée');
+  assert.strictEqual(db.traces.length, combien);
+  zeroGlobal(db, 'après une purge qui n\'efface rien');
+  reconcilier(db, 'le billet jamais jugé');
+});
+
 console.log('Le grand livre : le schéma, les gardes textuelles, et la vraie Postgres');
 // Tout ce qui suit lit du TEXTE. Il faut le dire une fois de plus, parce que c'est la limite exacte
 // de ce module : aucune base ne tourne ici, et un test qui passe contre la doublure prouve la
@@ -3621,7 +4226,16 @@ test('toute colonne du grand livre dont db-pg.js parle existe dans schema.sql', 
     assert.match(bloc, new RegExp(`^\\s*${col}\\s`, 'm'), `la colonne ${col} manque à ledger_entries`);
   const pg = PG_NU();
   const listes = (pg.match(/^const LEDGER_\w+ =[^;]*;/gm) || []).join(' ').replace(/'/g, ' ');
-  const requetes = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q));
+  // LA PURGE EST LA SEULE REQUÊTE QUI FRANCHIT DEUX TABLES, et elle est écartée d'ici NOMMÉMENT
+  // plutôt que silencieusement : elle lit `matches` et `ledger_entries` pour effacer dans
+  // `match_traces`, donc elle porte forcément des mots qui ne sont pas des colonnes du grand livre.
+  // Ce qu'elle promet, c'est le test « le seul delete est la purge nommée » qui le vérifie, clause
+  // par clause. On compte quand même les requêtes croisées : une SECONDE ne doit pas se faufiler
+  // ici sans que personne ne s'en aperçoive.
+  const croisees = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q) && /match_traces/.test(q));
+  assert.strictEqual(croisees.length, 1,
+    `${croisees.length} requêtes croisent le grand livre et les traces : il ne doit y avoir que la purge`);
+  const requetes = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q) && !/match_traces/.test(q));
   assert.ok(requetes.length >= 3, `seulement ${requetes.length} requêtes du grand livre dans db-pg.js`);
   const MOTS_SQL = new Set(['const', 'select', 'from', 'where', 'and', 'or', 'is', 'not', 'null',
     'insert', 'into', 'values', 'returning', 'order', 'by', 'sum', 'coalesce', 'filter', 'as',
@@ -3666,9 +4280,21 @@ test('ledger_entries est en INSERTION SEULE : aucun update, aucun delete, nulle 
   // existe pour arrêter. `api/db-check.js` l'éprouve pour de bon, contre une vraie base.
   const pg = PG_NU();
   const lecteur = pg.slice(pg.indexOf('async function ledgerSolde'), pg.indexOf('async function ledgerDe'));
-  assert.ok(lecteur.length > 200, 'le lecteur de solde n\'a pas été retrouvé');
-  assert.match(lecteur, /\bsum\s*\(/, 'le solde doit rester une SOMME, jamais une colonne');
+  assert.ok(lecteur.length > 100, 'le lecteur de solde n\'a pas été retrouvé');
   assert.match(lecteur, /return\s+Number\(/, 'le solde repart en chaîne : sum() rend un bigint');
+  // LA SOMME EST ÉCRITE UNE SEULE FOIS, ET LE LECTEUR L'INTERPOLE. Elle sert aussi à la troisième
+  // condition de la purge des traces — « le séquestre est à zéro » — et deux écritures de « un solde
+  // est cette somme-là » finiraient par différer, celle qui différerait étant justement celle qui
+  // autorise un EFFACEMENT. On garde donc les deux moitiés : le lecteur passe par l'expression
+  // partagée, et l'expression partagée est bien une somme.
+  assert.match(lecteur, /soldeExpr\(/, 'le lecteur de solde n\'utilise plus l\'expression partagée');
+  const expression = pg.slice(pg.indexOf('function soldeExpr('), pg.indexOf('async function ledgerWrite'));
+  assert.ok(expression.length > 100, 'l\'expression partagée du solde n\'a pas été retrouvée');
+  assert.match(expression, /\bsum\s*\(/, 'le solde doit rester une SOMME, jamais une colonne');
+  assert.match(expression, /compte_credit/, expression);
+  assert.match(expression, /compte_debit/, expression);
+  assert.strictEqual((pg.match(/\bsoldeExpr\s*\(/g) || []).length, 3,
+    'l\'expression du solde doit être définie une fois et appelée deux : le lecteur, et la purge');
   // La DOUBLURE n'expose aucun chemin de modification non plus : trois méthodes, une seule écrit.
   const db = fakeDb();
   assert.deepStrictEqual(Object.keys(db).filter(k => typeof db[k] === 'function' && /^ledger/.test(k)).sort(),
@@ -3897,12 +4523,24 @@ test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis le
   // — `reglerSequestre` : le gain, le vidage d'un séquestre clos, et rien d'autre. Vider et régler
   //   sont la même opération comptable, donc une seule fonction et une seule entrée ici.
   //
-  // Le module 4 y ajoutera le veilleur et le remboursement. Un écrivain d'argent de plus doit être
-  // nommé, pas silencieux.
-  const APPELANTS_LEDGER = ['findOrCreate', 'createMatch', 'reglerSequestre'];
+  // — `renounceMatch` : le REMBOURSEMENT, arrivé au module 4. C'est le seul chemin du dépôt qui
+  //   rende une mise, et il est borné par la fenêtre de renoncement, à l'horloge du serveur.
+  //
+  // ET LA GARDE S'ÉTEND À `reglerSequestre`, PARCE QUE LE VEILLEUR SERAIT SINON UN ÉCRIVAIN
+  // SILENCIEUX. Il n'appelle pas `ledgerWrite` directement — il passe par `reglerSequestre`, qui
+  // est bien dans la liste — donc une garde posée sur le seul écrivain direct l'aurait laissé
+  // entrer sans que personne n'ait à l'écrire. Or c'est exactement le revirement de cette phase :
+  // à l'expiration, le séquestre est vidé vers `maison:contrepartie`. On garde donc les appelants
+  // des DEUX : l'écrivain, et la fonction qui l'appelle pour vider un séquestre.
+  //
+  // — `settleMatch` et `expireMatches` : les deux qui règlent un séquestre sans écrire eux-mêmes.
+  const APPELANTS_LEDGER = ['findOrCreate', 'createMatch', 'reglerSequestre', 'renounceMatch',
+                            'settleMatch', 'expireMatches'];
   const pg = PG_NU();
   assert.strictEqual((pg.match(/^async function ledgerWrite\s*\(/gm) || []).length, 1,
     'l\'écrivain du grand livre doit être défini une fois et une seule');
+  assert.strictEqual((pg.match(/^async function reglerSequestre\s*\(/gm) || []).length, 1,
+    'le règlement d\'un séquestre doit être défini une fois et une seule');
 
   // Le détecteur de fonction englobante. Il est ÉPROUVÉ sur un cas connu avant de servir : une
   // garde dont le mécanisme ne marche pas passe verte sur tout, ce qui est pire que pas de garde.
@@ -3930,14 +4568,18 @@ test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis le
   const temoins = sites('ligneMatch').map(englobante);
   assert.ok(temoins.length >= 4, `seulement ${temoins.length} appels témoins`);
   for (const t of temoins)
-    assert.ok(/^(createMatch|findMatch|settleMatch|markPlayed|expireMatches)$/.test(t),
+    assert.ok(/^(createMatch|findMatch|settleMatch|markPlayed|expireMatches|renounceMatch|lastRenounced)$/.test(t),
       `le détecteur de fonction englobante rend « ${t} » : il ne marche plus`);
 
-  for (const appel of sites('ledgerWrite')) {
+  for (const nom of ['ledgerWrite', 'reglerSequestre']) for (const appel of sites(nom)) {
     const qui = englobante(appel);
     assert.ok(APPELANTS_LEDGER.includes(qui),
-      `l'écrivain du grand livre est appelé depuis « ${qui} », qui n'est pas dans la liste des appelants autorisés`);
+      `${nom} est appelé depuis « ${qui} », qui n'est pas dans la liste des appelants autorisés du grand livre`);
   }
+  // ET LE VEILLEUR Y EST NOMMÉMENT. C'est le revirement de la phase : il écrit de l'argent, donc il
+  // doit figurer dans cette liste. Un écrivain d'argent de plus se nomme, il ne se glisse pas.
+  assert.ok(sites('reglerSequestre').map(englobante).includes('expireMatches'),
+    'le veilleur ne vide plus les séquestres : une ligne close laisserait son séquestre habité');
   // Et le routeur ne touche JAMAIS le grand livre directement : il ne connaît que les méthodes
   // qu'on lui injecte, et `ledgerWrite` n'en est pas une.
   const app = lireApi('app.js');

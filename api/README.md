@@ -19,6 +19,7 @@ exactement ce qu'il faudrait supprimer. Mieux vaut ne pas la créer.
 | `POST /api/match` | Émet le **billet** d'une partie — graines, mise en centimes, sièges, version de simulation, expiration — **et débite la mise**, dans la même transaction. |
 | `POST /api/match/:id/trace` | Reçoit la **trace des entrées du joueur**, en segments, en insertion seule. |
 | `POST /api/match/:id/result` | **Rejoue la partie**, recalcule les faits, juge, **clôt** la ligne et **écrit le gain**, dans la même transaction. |
+| `POST /api/match/:id/renounce` | **Rend la mise** et clôt le billet en `'renounced'` — uniquement pendant la **fenêtre de renoncement**, à l'horloge du serveur. La seule route du dépôt qui rende une mise. |
 
 Tout le reste répond 404. Toutes exigent un jeton de session valide, sauf `/api/health`.
 
@@ -32,6 +33,7 @@ POST /api/match      { mode, stake, brawler, clientKey }
 → 200                { id, mode, stakeCents, seats, teamSize, brawler, seed, status, openedAt, expiresAt,
                        balanceCents, quarantineCents }
 → 409                { erreur, code: 'fonds', balanceCents, quarantineCents, requiredCents }
+→ 409                { erreur, code: 'renonce_recent', windowSeconds }
 ```
 
 - `mode` est une clé de `WBCore.MODES`, `stake` la mise **en dollars telle qu'elle est affichée** et
@@ -467,13 +469,34 @@ Détail complet plus bas, avec la quarantaine et le refus `409 livre`.
 
 Les billets que personne ne termine — onglet fermé, navigateur tué, joueur parti — resteraient
 ouverts pour toujours, et un joueur n'a qu'un billet ouvert à la fois. `app.veiller()` les clôt, et
-**eux seuls** : sa clause porte `status = 'open'` et l'expiration, il n'écrit aucun montant, et il
-prend son heure du même endroit que le reste du routeur. *Cette dernière phrase a une date de
-péremption écrite : la phase 03 la contredit, et c'est un revirement assumé — à l'expiration, le
-séquestre doit être vidé. Le module 4 réécrit le veilleur et ce paragraphe. Au module 3, un billet
-clos par `createMatch` vide bien son séquestre ; un billet clos par le veilleur, pas encore.* `main.js` l'appelle chaque minute. C'est
-du code qui manipulera de l'argent et que personne ne regarde tourner : il se teste comme le
-reste, horloge injectée, sans attendre.
+**eux seuls** : sa clause porte `status = 'open'` et l'expiration, et il prend son heure du même
+endroit que le reste du routeur. `main.js` l'appelle chaque minute. C'est du code qui manipule de
+l'argent et que personne ne regarde tourner : il se teste comme le reste, horloge injectée, sans
+attendre.
+
+**REVIREMENT DE LA PHASE 03, ET IL EST ÉCRIT PLUTÔT QUE LAISSÉ À SE DÉCOUVRIR.** Ce paragraphe disait
+« il n'écrit aucun montant — il ne fait que fermer une porte », et `api/app.js` et `api/db-pg.js` le
+disaient aussi. **C'est faux depuis le module 4** : à l'expiration d'un billet, le séquestre est vidé
+vers `maison:contrepartie`, sans quoi l'invariant « aucun séquestre ne reste habité » tombe et de
+l'argent dort dans un compte que plus rien ne solde. Les trois commentaires sont réécrits ; laisser un
+commentaire contredire le code est ce qui se découvre six mois plus tard, par quelqu'un qui relit le
+commentaire.
+
+Ce qui n'a pas changé : **il ne rembourse rien**. Passé la fenêtre de renoncement, plus rien ne rend
+la mise — c'est exactement le vol que la phase ferme. Et il n'écrit aucun montant sur la **ligne** :
+`net_cents`, `fee_cents` et les autres restent nuls, un billet périmé n'a pas de verdict.
+
+Deux conséquences de forme, toutes deux visibles dans `expireMatches` :
+
+- **une boucle de transactions bornées, une par billet**, et plus un `update` de 500 lignes. Un
+  mouvement du grand livre ne se pose pas en masse, et un échec sur une ligne — un doublon, un
+  découvert — ne doit pas annuler les autres. Le billet qui échoue est **nommé** dans `echecs`, et le
+  tour suivant le reprendra ; un balayage qui avalerait ses échecs laisserait un séquestre habité
+  sans que personne ne le sache ;
+- **le veilleur est nommé dans la liste des appelants autorisés** de l'écrivain du grand livre. La
+  garde textuelle s'étend d'ailleurs de `ledgerWrite` à `reglerSequestre` : le veilleur n'appelle pas
+  l'écrivain directement, donc une garde posée sur le seul écrivain direct l'aurait laissé entrer
+  sans que personne n'ait à l'écrire. Un écrivain d'argent de plus se nomme, il ne se glisse pas.
 
 ## Les statistiques sont la somme des parties, pas des compteurs
 
@@ -853,6 +876,138 @@ réconciliation attrape.
 Ils **ne prouvent pas** le verrou. Ils ne peuvent pas : seul `api/db-check.js` le peut, et il n'a
 jamais tourné contre une base. **Un test qui passe contre la doublure prouve la doublure.**
 
+## Le billet que personne ne termine — renoncement, temporisation, conservation
+
+Phase 03, module 4. Trois choses qui se tiennent : ce qu'un joueur peut récupérer, ce qu'il ne peut
+plus récupérer, et combien de temps on garde la pièce qui le prouve.
+
+### Le vol que ce module ferme, et il faut le nommer
+
+**Ouvrir un billet, jouer, perdre, n'envoyer NI trace NI résultat, laisser expirer, et se faire
+rembourser.** Le joueur ne perdrait alors jamais. Toute condition de remboursement fondée sur « aucune
+trace n'est arrivée » est contrôlée par le **client**, donc sans valeur : la seule chose que le
+serveur observe sans lui est **son propre chronomètre**. Un test porte le nom du vol, joue une vraie
+partie perdue, n'envoie rien, laisse expirer, et vérifie que le solde vaut `dotation − mise` et
+**jamais** `dotation`.
+
+### `POST /api/match/:id/renounce`
+
+La seule route du dépôt qui **rende une mise**. Elle est acceptée **uniquement pendant la fenêtre de
+`WBCore.renonciationOuverte`**, à l'horloge du serveur — la même fonction que le sas d'attente appelle
+pour dire au joueur ce que partir va lui coûter. La borne n'est **pas recalculée ici** : deux
+définitions seraient la troisième copie du patron déjà condamné pour `terminal`, `faits` et
+`argentCents`.
+
+**La fenêtre vaut dix secondes, et pas les vingt-cinq de `LOBBY.wait`.** Le jeu décolle plus tôt :
+`waitTick` pose `W.drop = min(W.drop, W.t + LOBBY.dropIn)` dès que la salle est pleine, et `joinRate`
+plafonne la pression à 2,4 — le coup d'envoi peut donc tomber à 13,4 s. Une fenêtre de 25 s
+rembourserait une partie commencée depuis une douzaine de secondes de jeu réel, et le vol qu'on se
+donne le mal de fermer se rouvrirait par la porte d'à côté.
+
+Elle clôt le billet en `'renounced'` et rembourse **ce que le séquestre porte** — pas `stake_cents` :
+le mouvement est ainsi garanti de le vider jusqu'au dernier centime, et confronter les deux nombres
+est le travail de `ledgerReconcile`. Les deux écritures, clôture et remboursement, sont **une seule
+transaction**, sous verrou de la ligne `matches`. Un séquestre vide veut dire que le livre n'a jamais
+engagé cette partie — une ligne de la 02a — et on n'écrit alors rien.
+
+| Refus | Code | Ce qu'il laisse |
+|---|---|---|
+| billet inconnu, ou qui n'est pas le sien | `404` | rien |
+| billet déjà clos | `409 billet_clos` | rien ; la place est libre, le joueur redemande un billet |
+| fenêtre passée | `409 fenetre_close` | rien ; le billet reste **jouable** |
+| le grand livre refuse | `409 livre` | rien ; la transaction est annulée en entier |
+
+Aucun n'est un 500, et aucun n'enferme le joueur. Les deux bornes exactes sont éprouvées au
+millième : `renonciationOuverte` est un `<=`, donc le dernier instant ouvert est la fenêtre
+elle-même, et la milliseconde suivante refuse.
+
+**Un résultat rendu après un remboursement ne paie rien.** La ligne est close : la route du résultat
+relit son état, comme sur tout billet clos, et n'écrit aucun montant. Et si la clause `where` du
+règlement glissait un jour, le séquestre **vide** refuserait le gain de toute façon — un gain devrait
+le débiter, et le découvert n'y est pas autorisé. Trois protections qui se recouvrent, une fois de
+plus.
+
+Ce que la fenêtre fait payer, et qui n'est pas rien : **le joueur honnête dont l'onglet meurt à la
+onzième seconde perd sa mise.** La phase nomme le vol qu'elle ferme ; elle doit nommer le prix
+qu'elle fait payer.
+
+### La temporisation du chercheur de graine — `409 renonce_recent`
+
+Renoncer à la première seconde clôt le billet, libère l'index partiel, et `createMatch` en délivrerait
+un neuf **immédiatement**, avec une graine neuve. La carte étant une fonction pure de `seed_public`,
+que le client reçoit **avec** le billet, le coût d'un nouveau tirage serait un aller-retour HTTP.
+C'est une surface que cette phase ouvre elle-même.
+
+`POST /api/match` refuse donc en **`409 renonce_recent`** tant que la fenêtre du **dernier billet
+renoncé** n'est pas passée — même fonction, même borne. Le refus est posé avant les deux tirages de
+graines et avant toute écriture : ni billet, ni écriture, ni graine consommée.
+
+**Ce qui reste acceptable, et il est écrit plutôt que tu** : un tirage toutes les dix secondes, pour
+un avantage nul contre vingt bots dont aucun ne connaît la carte. Le jour où les adversaires seront
+humains, ce chiffre-là devra être relu.
+
+**Ce que ce contrôle ne fait pas** : il n'est pas atomique. Deux requêtes simultanées peuvent le
+franchir toutes les deux. Ce qui les rattrape ensuite est l'index partiel « un seul billet ouvert » —
+la seconde reprend le billet de la première au lieu d'en ouvrir un second — donc le pire cas reste
+**un** billet, pas deux.
+
+### La conservation de `match_traces` — la dette de la 02b, soldée
+
+La trace est la **pièce justificative d'un mouvement d'argent** : c'est elle, et elle seule, qui
+permet de refaire la partie qui a produit un `net_cents`. `TRACE_RETENTION_JOURS` vit dans
+`api/ledger.js`, avec sa raison écrite à côté d'elle — la tension est réelle et elle est écrite : ce
+fichier dit « le grand livre, et rien d'autre », mais deux des quatre conditions de la purge sont des
+conditions du livre, et `db-pg.js` charge `pg`, donc `api/test.js` ne peut pas le lire. La valeur est
+**conservatrice**, quatre cents jours, et **ce n'est pas une décision juridique** : la vraie fenêtre
+de contestation est une affaire de phase 06.
+
+La purge est **bornée** et n'efface une trace que si **les quatre conditions** sont réunies — et les
+quatre sont dans la clause du `delete` lui-même, pas dans le code qui la choisit :
+
+1. la ligne `matches` est **réglée définitivement** — `status in ('settled', 'rejected')` ;
+2. le grand livre a **posé son écriture** — un mouvement `gain` ou `remboursement` porte ce
+   `match_id`. Le **motif** compte autant que la référence : une dotation porte `<user_id>` et un gain
+   porte `<match_id>`, les deux vivent dans le même espace de noms, et sans le filtre la dotation du
+   joueur 1 ferait purger la trace de la partie 1 ;
+3. **rien n'est en attente** — `solde(enjeu:<match_id>) = 0`. La somme n'est pas recopiée : elle sort
+   de la même expression que `ledgerSolde`, parce que deux écritures de « un solde est cette
+   somme-là » finiraient par différer et que celle qui différerait serait justement celle qui autorise
+   un effacement ;
+4. **le délai est écoulé** — `settled_at` plus vieux que la rétention.
+
+Elle ne touche **jamais** une ligne `matches`, **jamais** une écriture du grand livre : elle les
+**lit**. `ledger_entries` reste en insertion seule, sans exception.
+
+**Conséquence directe, et c'est le bon défaut** : la trace d'un billet dont le résultat n'est jamais
+arrivé n'est **jamais** effacée, puisque sa ligne n'est ni `settled` ni `rejected`. C'est exactement
+la pièce qu'on voudra relire, et la table ne descend donc pas à zéro. Un test l'éprouve à quatre
+cents jours **et à mille ans**.
+
+**UNE GARDE A CHANGÉ DE FORME, ET IL FAUT LE DIRE.** `api/test.js` interdisait tout
+`delete from match_traces` dans `db-pg.js`, et il **passait**. Il dit maintenant « le seul `delete` de
+cette table est la purge nommée, et sa clause porte les quatre conditions » — c'est plus étroit sur ce
+qui reste gardé, et c'est plus faible sur l'interdiction elle-même. Une garde qu'on affaiblit sans le
+dire est très exactement l'écart que la recette de la 02b a trouvé. Les quatre conditions sont en plus
+éprouvées **une par une**, sur un cas dégénéré construit exprès : quatre tests, pas un. C'est le
+premier `delete` du dépôt sur la pièce qui prouve un paiement ; on ne le teste pas en bloc.
+
+`main.js` appelle `app.purger()` **une fois par heure**, et sur son propre minuteur : il n'y a aucune
+raison de faire passer ce `delete`-là dans le même tour d'horloge qu'une clôture de routine, et la
+rétention se comptant en centaines de jours, une heure de retard n'a aucun effet observable.
+
+### Ce que les tests du module 4 prouvent, et ce qu'ils ne prouvent pas
+
+Contre la doublure, horloge injectée, sans base ni réseau : le vol nommé ; les deux bornes exactes de
+la fenêtre ; les quatre refus, tous nommés, aucun en 500, aucun qui enferme ; le veilleur passé **cent
+fois** qui ne rembourse jamais, ne vide jamais deux fois, et envoie chaque séquestre chez la maison ;
+le résultat tardif qui n'écrit aucun second mouvement ; la temporisation qui refuse puis accepte, sans
+consommer une graine ; la **sixième issue** sur les cinq modes et les quatre tables, avec
+`ledgerReconcile` et le zéro global à chaque scénario ; la purge, condition par condition.
+
+Ils **ne prouvent toujours pas** ce que Postgres fait de la clause de la purge — un `::text`, une
+concaténation qui construit un nom de compte, un solde recalculé en SQL sur trois tables. C'est
+`api/db-check.js` qui l'éprouve, et il n'a **jamais** tourné contre une base.
+
 ## `db-check.js` — la vraie Postgres, et ce qui est livré est la RECETTE
 
 **Livrer un script n'est pas l'avoir lancé.** Ce qui est livré ici, c'est la recette : un script, un
@@ -901,7 +1056,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             179 tests sans rien installer, 188 avec jose
+test.js             193 tests sans rien installer, 202 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1004,8 +1159,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 179 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 188 : les 179, plus la chaîne complète de vérification
+node api/test.js          # 193 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 202 : les 193, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
@@ -1171,13 +1326,26 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   tout le butin de la carte dès la première seconde. Ce n'est pas un oubli, c'est le prix de
   l'architecture, et il est payé les yeux ouverts : avec des adversaires tous robots, la seule
   victime en est la maison, à chaque partie. **À ne jamais diluer.**
-- **`match_traces` n'a AUCUNE politique de conservation.** Combien de temps garde-t-on la pièce qui
-  prouve une partie, et qui a le droit de la relire : renvoyé au module 4 de la phase 03.
-- **Le veilleur ne vide pas encore les séquestres.** Un billet clos par `createMatch` — périmé ou
-  déjà joué — vide le sien ; un billet clos par `app.veiller()` laisse le sien habité. L'invariant
-  « aucun séquestre ne reste habité » n'est donc pas encore vrai partout, et c'est le mandat écrit
-  du module 4. Le statut `'renounced'` existe dans le schéma et n'est écrit par personne, pour la
-  même raison.
+- **`match_traces` a désormais une politique de conservation, mais PAS de règle d'accès.**
+  `TRACE_RETENTION_JOURS` dit combien de temps on garde la pièce qui prouve une partie ; **qui a le
+  droit de la relire** n'est écrit nulle part, et il n'existe ni journal d'audit ni rôle
+  d'administration. À nommer avant la phase 04, avec la contre-passation. La rétention elle-même est
+  conservatrice par défaut et **n'est pas une décision juridique** : la vraie fenêtre de contestation
+  est une affaire de phase 06, et la constante devra être relue à ce moment-là.
+- **LE PREMIER `delete` DU DÉPÔT SUR LA PIÈCE QUI PROUVE UN PAIEMENT EXISTE MAINTENANT.** Il est
+  borné par quatre conditions, chacune éprouvée en la retirant seule, et la garde qui interdisait
+  tout `delete from match_traces` a donc été **affaiblie sciemment** — c'est écrit ici, dans le
+  message de commit et dans le test lui-même. Ce que personne n'a encore vu : ce que Postgres fait de
+  cette clause-là. Elle croise trois tables et recalcule un solde de séquestre en SQL, et
+  `api/db-check.js` n'a jamais tourné.
+- **La fenêtre de renoncement fait payer sa mise au joueur honnête dont l'onglet meurt à la onzième
+  seconde.** C'est le prix de la fermeture du vol « jouer, perdre, ne rien envoyer, laisser expirer,
+  se faire rembourser ». Il n'y a aucun chemin de correction : la contre-passation existe, personne
+  n'est habilité à l'emprunter, et rien dans l'API ne l'expose.
+- **La temporisation `renonce_recent` n'est pas atomique.** Elle lit le dernier billet renoncé puis
+  ouvre le nouveau : deux requêtes simultanées peuvent la franchir toutes les deux. L'index partiel
+  « un seul billet ouvert » les rattrape — le pire cas reste un billet — mais la propriété n'est pas
+  tenue par une contrainte, et elle est donc à relire le jour où les adversaires seront humains.
 - **Personne n'est habilité à contre-passer.** C'est le seul chemin de correction du grand livre, et
   ni journal d'audit ni rôle d'administration n'existent : le premier incident réel se réglera à la
   main dans `psql`, un dimanche soir, et c'est ce jour-là que la règle « aucun `update` » tombera. À

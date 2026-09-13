@@ -82,6 +82,15 @@ function compteValide(compte) { return typeof compte === 'string' && COMPTE_RE.t
 // `docs/PHASE-03.md` : un motif, un `alter table`, un test.
 const MOTIFS = Object.freeze(['dotation', 'recharge', 'mise', 'gain', 'remboursement', 'contrepassation']);
 
+// LES DEUX MOTIFS QUI SOLDENT UNE PARTIE, et pourquoi ils sont nommés à part. Un billet se termine
+// de deux façons seulement : son séquestre part au règlement (`gain`, y compris le règlement à net
+// nul d'une partie qui n'a rien rapporté), ou il revient au joueur (`remboursement`). Voir l'un de
+// ces deux mouvements sur un `match_id` est donc la preuve que le livre a POSÉ SON ÉCRITURE sur
+// cette partie — c'est la deuxième des quatre conditions de la purge des traces. La liste est ici
+// pour que la clause SQL de la purge et la doublure d'`api/test.js` la lisent au même endroit : deux
+// écritures de la même règle sont le patron du `respawn()` défini deux fois.
+const MOTIFS_REGLEMENT = Object.freeze(['gain', 'remboursement']);
+
 function exigeMotif(motif) {
   if (!MOTIFS.includes(motif)) {
     throw new Error(`grand livre : motif hors liste (${String(motif)}) — les motifs sont ${MOTIFS.join(', ')}`);
@@ -117,6 +126,32 @@ const DOTATION_CENTS = 5000;
 // l'écrit est le serveur au moment de la connexion — jamais une route que le client appelle.
 const PLANCHER_CENTS = 500;
 const RECHARGE_CENTS = 1000;
+
+// ---------- La conservation de la trace d'une partie ----------
+//
+// POURQUOI CETTE CONSTANTE VIT ICI, dans un fichier qui dit « le grand livre, et rien d'autre ». La
+// tension est réelle et il vaut mieux l'écrire que la cacher : `TRACE_RETENTION_JOURS` parle de
+// `match_traces`, pas d'une écriture. Mais LA TRACE EST LA PIÈCE JUSTIFICATIVE D'UN MOUVEMENT
+// D'ARGENT — c'est elle, et elle seule, qui permet de refaire la partie qui a produit un `net_cents`
+// — et deux des quatre conditions de la purge sont des conditions du LIVRE : il faut qu'une écriture
+// de règlement ou de remboursement porte cette partie, et que son séquestre soit vide. La règle se
+// lit donc à côté des mouvements qu'elle prouve. Les deux autres domiciles possibles ne tenaient
+// pas : `db-pg.js` charge `pg`, donc `api/test.js` ne peut pas le charger (l'intégration continue
+// lance les tests AVANT `npm install`) ; un fichier de plus pour un entier serait une surface de
+// plus pour rien.
+//
+// LA VALEUR EST CONSERVATRICE, ET CE N'EST PAS UNE DÉCISION JURIDIQUE. La trace se garde au moins
+// aussi longtemps que la fenêtre pendant laquelle un joueur peut contester un paiement, et cette
+// fenêtre-là est une affaire de phase 06, sur un cadre légal que personne n'a encore lu. Quatre
+// cents jours, c'est une année pleine plus cinq semaines : une contestation ouverte le dernier jour
+// d'un exercice se traite le mois suivant, et la marge existe pour que la pièce soit encore là ce
+// jour-là. Se tromper vers le haut coûte des lignes dans une table ; se tromper vers le bas coûte la
+// preuve d'un paiement, et celle-là ne se refait pas.
+//
+// Ce que la purge ne fera JAMAIS, et c'est le bon défaut : effacer la trace d'un billet dont le
+// résultat n'est jamais arrivé. Sa ligne n'est ni `settled` ni `rejected`, donc la première des
+// quatre conditions ne tient pas — et c'est exactement la pièce qu'on voudra relire.
+const TRACE_RETENTION_JOURS = 400;
 
 // ---------- Le découvert ----------
 //
@@ -417,8 +452,8 @@ module.exports = {
   COMPTE_RE_SQL, COMPTE_RE, compteValide, exigeCompte,
   compteJoueur, compteQuarantaine, compteEnjeu,
   MAISON_DOTATION, MAISON_COMMISSION, MAISON_CONTREPARTIE,
-  MOTIFS, exigeMotif,
-  DOTATION_CENTS, PLANCHER_CENTS, RECHARGE_CENTS,
+  MOTIFS, MOTIFS_REGLEMENT, exigeMotif,
+  DOTATION_CENTS, PLANCHER_CENTS, RECHARGE_CENTS, TRACE_RETENTION_JOURS,
   COMPTES_EMETTEURS, decouvertAutorise,
   transfert,
   mouvementDotation, mouvementRecharge, mouvementMise, mouvementGain,

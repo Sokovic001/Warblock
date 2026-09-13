@@ -50,6 +50,18 @@ function ligneMatch(r) {
 // pas silencieux.
 const LEDGER_COLS = 'id, motif, reference, compte_debit, compte_credit, montant_cents, cree_le';
 
+// LE SOLDE D'UN COMPTE, ÉCRIT UNE SEULE FOIS ET INTERPOLÉ DEUX. Il sert à `ledgerSolde` ci-dessous,
+// et à la troisième condition de la purge des traces — « rien n'est en attente : le séquestre de
+// cette partie est à zéro ». Deux écritures de « un solde est cette somme-là » finiraient par
+// différer, et celle qui différerait serait justement celle qui autorise un EFFACEMENT.
+//
+// Ce que la fonction reçoit est une EXPRESSION SQL et jamais une valeur : `$1` d'un côté, une
+// concaténation sur `matches.id` de l'autre. Rien de ce qui entre ici ne vient d'une requête HTTP.
+function soldeExpr(compte) {
+  return `coalesce(sum(montant_cents) filter (where compte_credit = ${compte}), 0)
+        - coalesce(sum(montant_cents) filter (where compte_debit  = ${compte}), 0)`;
+}
+
 // L'ÉCRIVAIN UNIQUE. Aucun `on conflict do nothing` ici, et c'est une décision : sur
 // `match_traces`, avaler le doublon est le bon comportement — le premier écrit gagne et le segment
 // renvoyé est identique. Sur le grand livre, un doublon veut dire qu'on est en train de payer deux
@@ -113,8 +125,7 @@ async function ledgerWrite(client, transferts) {
 // un prix plus élevé.
 async function ledgerSolde(client, compte) {
   const r = await client.query(
-    `select coalesce(sum(montant_cents) filter (where compte_credit = $1), 0)
-          - coalesce(sum(montant_cents) filter (where compte_debit  = $1), 0) as total
+    `select ${soldeExpr('$1')} as total
        from ledger_entries
       where compte_debit = $1 or compte_credit = $1`, [compte]);
   return Number((r.rows[0] || {}).total) || 0;
@@ -646,20 +657,213 @@ function pgDb(connectionString) {
       }
     },
 
-    // Le veilleur. Il clôt les billets que personne n'a terminés, et EUX SEULS : la clause porte
-    // `status = 'open'` et l'expiration, aucun montant n'est écrit, aucune partie réglée n'est
-    // touchée. L'heure lui est passée, elle n'est pas lue ici — c'est ce qui permet de le tester
-    // sans attendre.
+    // LE VEILLEUR, ET IL ÉCRIT DE L'ARGENT DEPUIS LA PHASE 03. Ce commentaire disait jusqu'ici
+    // « il n'écrit AUCUN montant — il ne fait que fermer une porte », et c'était vrai tant qu'aucun
+    // séquestre n'existait. Ce n'est plus vrai, et le revirement est écrit plutôt que laissé à se
+    // découvrir six mois plus tard : à l'expiration d'un billet, LE SÉQUESTRE DOIT ÊTRE VIDÉ vers
+    // `maison:contrepartie`, sans quoi l'invariant « aucun séquestre ne reste habité » est faux et
+    // de l'argent dort dans un compte que plus rien ne solde.
+    //
+    // PASSÉ LA FENÊTRE DE RENONCEMENT, RIEN NE REND LA MISE. Le veilleur clôt SANS remboursement :
+    // c'est très exactement le vol que la phase ferme — jouer, perdre, n'envoyer ni trace ni
+    // résultat, laisser expirer et se faire rembourser. Le seul chemin qui rende une mise est
+    // `renounceMatch`, et il est borné par l'horloge du SERVEUR.
+    //
+    // UNE BOUCLE DE TRANSACTIONS BORNÉES, UNE PAR BILLET, et plus un `update` de 500 lignes. Un
+    // mouvement du grand livre ne se pose pas en masse, et un échec sur une ligne — un doublon, un
+    // découvert — ne doit pas annuler les autres : chaque billet a sa transaction, et celui qui
+    // échoue est NOMMÉ dans `echecs` au lieu d'emporter le balayage avec lui.
+    //
+    // La clause ne clôt que ce que personne n'a terminé : `status = 'open'` et l'expiration.
+    // L'heure lui est passée, elle n'est pas lue ici — c'est ce qui permet de le tester sans
+    // attendre.
     async expireMatches({ avant, max = 500 }) {
+      // Les candidats sont lus hors transaction, et c'est sans conséquence : chaque clôture
+      // revérifie `status = 'open'` sous son propre verrou. Un billet réglé entre la lecture et la
+      // clôture est simplement sauté.
+      const lecture = await pool.connect();
+      let ids;
+      try {
+        const r = await lecture.query(
+          `select id from matches
+             where status = 'open' and expires_at <= $1
+             order by expires_at limit $2`, [avant, max]);
+        ids = r.rows.map(l => l.id);
+      } finally {
+        lecture.release();
+      }
+
+      let closes = 0;
+      const echecs = [];
+      for (const id of ids) {
+        const client = await pool.connect();
+        try {
+          await client.query('begin');
+          // LE VERROU, sur la seule ligne qui existe par partie : c'est le séquestre de CELLE-CI
+          // qu'on s'apprête à débiter.
+          await client.query('select id from matches where id = $1 for update', [id]);
+          const maj = await client.query(
+            `update matches set status = 'expired'
+               where id = $1 and status = 'open' and expires_at <= $2
+             returning ${MATCH_COLS}`, [id, avant]);
+          if (!maj.rows[0]) { await client.query('rollback'); continue; }
+          // Le séquestre part chez la maison, dans la MÊME transaction que la clôture. Un billet
+          // sans écriture de mise — une ligne de la phase 02a — n'en a pas, et rien n'est écrit.
+          await reglerSequestre(client, maj.rows[0]);
+          await client.query('commit');
+          closes++;
+        } catch (e) {
+          await client.query('rollback').catch(() => {});
+          // ON N'AVALE QUE CE QUE LE GRAND LIVRE A LE DROIT DE REFUSER — un doublon, un découvert —
+          // et rien d'autre. C'est la règle de tous les autres appelants de l'écrivain dans ce
+          // fichier, et elle vaut ici plus qu'ailleurs : un `catch` qui ramasse tout ferait d'une
+          // base injoignable ou d'une faute de programmation un balayage qui rend paisiblement
+          // « zéro clôture », que personne ne regarde et que `main.js` ne journaliserait même pas.
+          // Une panne silencieuse sur le chemin de l'argent est précisément ce que ce dossier
+          // refuse. Le billet en échec est NOMMÉ, et le tour suivant le reprendra ; sa ligne n'est
+          // pas close et son séquestre n'a pas bougé, ce qui est le seul état acceptable.
+          if (!refusDuLivre(e)) throw e;
+          echecs.push({ id: String(id), code: e.code });
+        } finally {
+          client.release();
+        }
+      }
+      return { closes, echecs };
+    },
+
+    // LA RENONCIATION, ET LE SEUL CHEMIN DU DÉPÔT QUI RENDE UNE MISE. La fenêtre est arbitrée par
+    // `app.js`, qui appelle `WBCore.renonciationOuverte` avec l'horloge du serveur : rien ici ne
+    // recalcule une borne. Ce que cette méthode garantit, c'est que la clôture du billet et le
+    // remboursement sont UNE SEULE transaction — un billet renoncé sans son remboursement serait
+    // une mise perdue sans recours, et un remboursement sans clôture serait un billet gratuit.
+    //
+    // LE MONTANT RENDU EST CE QUE LE SÉQUESTRE PORTE, pas `stake_cents`. Même raisonnement que
+    // `reglerSequestre` : le mouvement est ainsi garanti de le vider jusqu'au dernier centime, et
+    // confronter les deux nombres est le travail de `ledgerReconcile`. Un séquestre vide veut dire
+    // que le livre n'a jamais engagé cette partie — une ligne de la phase 02a — et on n'écrit alors
+    // rien du tout : la frontière avec la 02a se constate ici comme ailleurs.
+    async renounceMatch({ matchId, userId, at }) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        await client.query('select id from matches where id = $1 for update', [matchId]);
+        const maj = await client.query(
+          `update matches set status = 'renounced', settled_at = $3
+             where id = $1 and user_id = $2 and status = 'open' and net_cents is null
+           returning ${MATCH_COLS}`, [matchId, userId, at]);
+        if (!maj.rows[0]) {
+          // Rien à clore : le billet n'existe pas, n'est pas le sien, ou il est déjà clos. On relit
+          // pour que la route puisse nommer le refus au lieu de rendre un 500.
+          const deja = await client.query(
+            `select ${MATCH_COLS} from matches where id = $1 and user_id = $2`, [matchId, userId]);
+          await client.query('commit');
+          return { match: null, deja: ligneMatch(deja.rows[0]) || null };
+        }
+        const engage = await ledgerSolde(client, L.compteEnjeu(matchId));
+        if (engage > 0) {
+          try {
+            await ledgerWrite(client, L.mouvementRemboursement({
+              userId, matchId, miseCents: engage }));
+          } catch (e) {
+            if (!refusDuLivre(e)) throw e;
+            // Tout est annulé, y compris la clôture : le billet repart `open`, le joueur peut
+            // réessayer tant que la fenêtre dure, et rien ne sort en 500.
+            await client.query('rollback');
+            return { match: null, refus: 'livre', detail: e.code };
+          }
+        }
+        const balanceCents = await ledgerSolde(client, L.compteJoueur(userId));
+        const quarantineCents = await ledgerSolde(client, L.compteQuarantaine(userId));
+        await client.query('commit');
+        return { match: ligneMatch(maj.rows[0]), rembourseCents: engage > 0 ? engage : 0,
+                 balanceCents, quarantineCents };
+      } catch (e) {
+        await client.query('rollback').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+
+    // LE DERNIER BILLET RENONCÉ D'UN JOUEUR, et à quoi il sert. Renoncer à la première seconde clôt
+    // le billet, libère l'index partiel, et `createMatch` en délivrerait un neuf IMMÉDIATEMENT, avec
+    // une graine neuve : la carte étant une fonction pure de `seed_public`, que le client reçoit
+    // AVEC le billet, le coût d'un nouveau tirage serait un aller-retour HTTP. C'est `app.js` qui
+    // ferme cela, en interrogeant `WBCore.renonciationOuverte` sur CETTE ligne-ci : tant que sa
+    // fenêtre n'est pas passée, aucun billet neuf. Un tirage coûte alors la fenêtre entière.
+    //
+    // Le coût de cette lecture est une requête indexée de plus sur chaque ouverture de billet
+    // (`matches_user_status_idx` porte `(user_id, status)`). C'est écrit plutôt que découvert.
+    async lastRenounced({ userId }) {
       const client = await pool.connect();
       try {
         const r = await client.query(
-          `update matches set status = 'expired'
-             where id in (select id from matches
-                           where status = 'open' and expires_at <= $1
-                           order by expires_at limit $2)
-           returning id`, [avant, max]);
-        return { closes: r.rows.length };
+          `select ${MATCH_COLS} from matches
+             where user_id = $1 and status = 'renounced'
+             order by opened_at desc limit 1`, [userId]);
+        return ligneMatch(r.rows[0]) || null;
+      } finally {
+        client.release();
+      }
+    },
+
+    // LA PURGE DES TRACES, ET C'EST LE PREMIER `delete` DU DÉPÔT SUR LA PIÈCE QUI PROUVE UN
+    // PAIEMENT. Elle n'efface une trace que si LES QUATRE CONDITIONS sont réunies, et les quatre
+    // sont dans la clause du `delete` lui-même — pas dans le code qui la choisit. Une condition
+    // vérifiée avant l'instruction laisse une fenêtre ; ici il n'y en a pas, et un test relit le
+    // texte de cette clause.
+    //
+    //   (a) la ligne `matches` est réglée DÉFINITIVEMENT — `status in ('settled', 'rejected')` ;
+    //   (b) le grand livre a POSÉ SON ÉCRITURE — un mouvement `gain` ou `remboursement` porte ce
+    //       `match_id`. La liste est écrite en clair dans la clause pour qu'une garde puisse la
+    //       LIRE, et un test la confronte à `L.MOTIFS_REGLEMENT` : c'est le patron déjà employé
+    //       pour l'expression des comptes de `schema.sql`, deux écritures qui se confrontent plutôt
+    //       que de se faire confiance. Et LE MOTIF COMPTE AUTANT QUE LA RÉFÉRENCE : une dotation
+    //       porte `<user_id>` là où un gain porte `<match_id>`, les deux vivent dans le même espace
+    //       de noms, et sans ce filtre la dotation du joueur 1 ferait purger la partie 1 ;
+    //   (c) RIEN N'EST EN ATTENTE — le séquestre de cette partie est à zéro ;
+    //   (d) LE DÉLAI EST ÉCOULÉ — `settled_at` est plus vieux que `TRACE_RETENTION_JOURS`.
+    //
+    // ELLE NE TOUCHE JAMAIS UNE LIGNE `matches`, JAMAIS UNE ÉCRITURE DU GRAND LIVRE : elle les LIT.
+    // `ledger_entries` reste en insertion seule, sans exception.
+    //
+    // Conséquence directe et voulue : la trace d'un billet dont le résultat n'est JAMAIS arrivé
+    // n'est jamais effacée, puisque sa ligne n'est ni `settled` ni `rejected`. C'est exactement la
+    // pièce qu'on voudra relire, et la table ne descend donc pas à zéro.
+    //
+    // L'heure vient de l'appelant, comme partout ailleurs : c'est l'horloge injectée dans
+    // `createApp`, et c'est ce qui permet de faire vieillir une trace sans attendre quatre cents
+    // jours.
+    async purgeTraces({ maintenant, max = 500 }) {
+      const t = maintenant instanceof Date ? maintenant.getTime() : Number(maintenant);
+      if (!Number.isFinite(t)) throw new Error('purge des traces : heure illisible');
+      const avant = new Date(t - L.TRACE_RETENTION_JOURS * 24 * 3600 * 1000);
+      // Le compte du séquestre de la partie, en SQL. Il est nommé ici plutôt qu'écrit deux fois dans
+      // la clause, et `soldeExpr` en tire la somme — la même que celle de `ledgerSolde`.
+      const enjeu = "'enjeu:' || matches.id";
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `delete from match_traces
+            where match_id in (
+              select id from matches
+               where status in ('settled', 'rejected')
+                 and settled_at is not null
+                 and settled_at < $1
+                 and exists (select 1 from ledger_entries
+                              where ledger_entries.reference = matches.id::text
+                                and ledger_entries.motif in ('gain', 'remboursement'))
+                 and (select ${soldeExpr(enjeu)}
+                        from ledger_entries
+                       where compte_debit = ${enjeu} or compte_credit = ${enjeu}) = 0
+               order by settled_at limit $2)
+          returning match_id`,
+          [avant, max]);
+        // Le nombre de LIGNES effacées, et le nombre de PARTIES : une partie a un à trois segments,
+        // et c'est la seconde qui dit ce que la purge a réellement soldé.
+        return { effacees: r.rows.length,
+                 parties: new Set(r.rows.map(l => String(l.match_id))).size,
+                 avant };
       } finally {
         client.release();
       }

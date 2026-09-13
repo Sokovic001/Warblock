@@ -47,6 +47,18 @@ const veille = setInterval(() => {
 // Sans `unref`, ce minuteur empêcherait le processus de s'arrêter tout seul.
 veille.unref();
 
+// LA PURGE DES TRACES, ET ELLE A SON PROPRE MINUTEUR. Une heure, et pas une minute : elle efface la
+// pièce qui prouve un paiement, et il n'y a aucune raison de faire passer ce `delete`-là dans le
+// même tour d'horloge qu'une clôture de routine. Rien ne presse non plus — la rétention se compte en
+// centaines de jours, donc une heure de retard sur un effacement n'a aucun effet observable.
+// Une erreur de base se journalise et le tour suivant réessaiera : la purge est bornée et
+// idempotente par nature, une trace déjà effacée ne se réefface pas.
+const PURGE_MS = 3600_000;
+const purge = setInterval(() => {
+  app.purger().catch(e => console.error(`[${new Date().toISOString()}] purge des traces :`, e && e.stack || e));
+}, PURGE_MS);
+purge.unref();
+
 const server = http.createServer((req, res) => { app(req, res); });
 server.listen(port, () => {
   console.log(`API Warblock sur le port ${port}, origines : ${origins.join(', ')}`);
@@ -59,6 +71,7 @@ server.listen(port, () => {
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
     clearInterval(veille);
+    clearInterval(purge);
     server.close(() => db.close().then(() => process.exit(0), () => process.exit(0)));
     setTimeout(() => process.exit(1), 10_000).unref();
   });
