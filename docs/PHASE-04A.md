@@ -137,6 +137,22 @@ Elle exporte aussi sa **traduction SQL**, `REFERENCE_BILLET_SQL`, et une garde t
 l'expression du schéma à cette chaîne — même patron que `COMPTE_RE_SQL`. Aucun `cast`, aucune
 conversion : on compare du texte à `matches.id::text`.
 
+**Deux points relevés à la livraison du module 1, et consignés ici pour ne pas les redécouvrir.**
+
+Le premier est une contrainte d'écriture de la traduction SQL : le groupe des motifs doit être **non
+capturant**. `substring(texte from motif)` rend la première parenthèse **capturante** de
+l'expression ; capturer le motif d'origine rendrait « gain » là où on attend « 42 », c'est-à-dire une
+lecture **vide** plutôt que fausse, donc silencieuse. Le groupe capturant est celui des chiffres, et
+la même source sert au `RegExp` de JavaScript et à l'expression SQL.
+
+Le second est une **limite assumée** de la règle telle qu'elle est écrite : contre-passer une
+contre-passation produit `contrepassation:gain:42`, que l'expression ne ramène à **aucun** billet, et
+cette écriture-là ne compterait donc pas dans l'exposition. Le double geste n'a pas d'appelant — le
+verbe `contrepasser` du module 5 corrige un **mouvement d'origine** — et l'élargir demanderait
+d'élargir `REFERENCE_BILLET_SQL` du même coup, donc de re-décider des deux côtés ensemble. Chiffré,
+le jour où quelqu'un ouvrira ce chemin : un préfixe `(?:contrepassation:)*` dans une expression, des
+deux côtés, et un test. Écrit ici plutôt que laissé à découvrir sur un plafond qu'on croirait tenir.
+
 ### 5. Le plafond se décide à l'OUVERTURE du billet, et rien n'est réservé
 
 Sur l'exposition réalisée d'une fenêtre glissante **plus** le pire cas du billet qu'on ouvre. Rien

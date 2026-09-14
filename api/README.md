@@ -1,4 +1,4 @@
-# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b), grand livre (phase 03, en cours)
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b), grand livre (phase 03), bord de l'argent réel (phase 04a, en cours)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
 ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
@@ -686,6 +686,127 @@ en outre que l'écran lise une **horloge** et non un compteur de tics : `sasRemb
 elle ne promet **rien** sur un billet **repris**, dont l'heure d'ouverture est celle d'un sas
 précédent — c'est pour cela que `POST /api/match` rend `repris` avec le billet.
 
+## L'exposition de la maison — calculable, et appelée par personne
+
+Phase 04a, module 1. Le grand livre **mesurait** l'exposition depuis la phase 03 : le solde négatif
+de `maison:contrepartie` **est** ce que coûtent dix-neuf adversaires qui ne misent rien. Il ne la
+**bornait** pas. Ce module la rend calculable — cinq constantes entières et quatre fonctions pures
+dans `api/ledger.js` — et **rien ne les appelle encore** : aucune route, aucune colonne, aucun
+changement de schéma, pas un octet de comportement en plus. C'est « le contrat avant le brancheur »,
+déjà employé en 02a pour `seedFor` et `matchFlow`, et son prix est écrit dans `docs/PHASE-04A.md` :
+un module qui ne tourne que dans les tests jusqu'à ce que le module 4 le branche.
+
+**L'exposition est une SOMME d'écritures, jamais une colonne.** `expositionDe(transferts,
+references)` la lit sur les **deux** comptes de maison — `maison:contrepartie` et
+`maison:commission` — restreinte aux écritures qui parlent des billets demandés, et rend
+`−(solde(contrepartie) + solde(commission))`. C'est la doctrine de la table de compteurs supprimée en
+02a, appliquée une fois de plus : un compteur qu'on incrémente est une case qu'on écrase. Le
+corollaire est écrit comme test —
+**on franchit le plafond en posant des écritures, jamais en touchant un compteur, et relire redonne
+le même chiffre**. `maison:dotation` n'y entre **jamais** : émettre des crédits fictifs n'est pas
+s'exposer, et l'y laisser ferait de la première connexion de chaque joueur 5 000 centimes
+d'exposition. Le résultat est un entier **signé** : positif quand la maison a versé, négatif
+d'exactement la mise sur un billet perdu — les billets perdus s'imputent sur les gagnés, l'exposition
+est **nette**.
+
+**`referenceBillet(motif, reference)` est le cœur du module, pas un utilitaire — et c'est le piège
+de la phase, celui qui naît vert si on ne le nomme pas.** `ledger_entries.reference` est du **texte**,
+et `mouvementContrepassation` y écrit `<motifOrigine>:<refOrigine>` : donc `gain:42`, et pas `42`. La
+raison est bonne — on lit dans le livre **ce qui** a été contre-passé sans faire de jointure. Mais une
+jointure `ledger → matches` par `reference::bigint` lèverait `22P02` sur ces lignes-là, et une
+jointure qui les **filtre** les ignore : un gain contre-passé continuerait de compter dans
+l'exposition. Le module qui écrit la requête n'est pas celui qui crée les lignes qui la cassent, donc
+le défaut se révélerait une phase plus tard sur un chiffre qu'on croirait juste. La fonction est
+**exhaustive sur la liste fermée `MOTIFS`** : `mise`, `gain` et `remboursement` rendent la référence
+elle-même si elle a la forme `[1-9][0-9]*` ; `dotation` (référence = `user_id`) et `recharge`
+(référence = `<user_id>:<AAAA-MM-JJ>`) rendent `null`, ce ne sont pas des billets ;
+`contrepassation` rend l'identifiant extrait de son préfixe. Un septième motif ne tombe pas dans un
+`else` silencieux, il **lance**. Elle rend une **chaîne** de chiffres, jamais un nombre : c'est du
+texte qu'on comparera à `matches.id::text`, sans aucun `cast` — un `bigint` ne tient pas toujours
+dans un `Number`.
+
+**`REFERENCE_BILLET_SQL` est la même règle en SQL, et il n'en existe qu'une écriture.** Exportée en
+chaîne comme `COMPTE_RE_SQL`, **construite à partir des mêmes listes et des mêmes expressions** que
+la fonction, pour que le schéma la recopie et qu'une garde textuelle compare les deux. Le groupe des
+motifs y est **non capturant** : `substring(texte from motif)` rend la première parenthèse
+**capturante**, et capturer le motif rendrait « gain » là où on attend « 42 » — une lecture vide au
+lieu d'une lecture fausse, donc silencieuse.
+
+**Une limite, nommée plutôt que découverte** : contre-passer une contre-passation produit
+`contrepassation:gain:42`, que la règle ne ramène à **aucun** billet. Le double geste n'a pas
+d'appelant — l'outil de la phase corrige un mouvement d'origine — et l'élargir demanderait
+d'élargir `REFERENCE_BILLET_SQL` du même coup. C'est consigné dans `docs/PHASE-04A.md` plutôt que
+laissé à découvrir.
+
+**Le pire cas d'un billet est calculé par le JEU, pas ici.**
+`expositionBilletMaxCents(netMaxCents, miseCents)` **reçoit** le net maximal et rend
+`max(0, netMaxCents − miseCents)` : même discipline que `mouvementGain`, qui reçoit brut, commission
+et net sans les recalculer, et c'est la garde textuelle « aucune arithmétique de commission » qui la
+tient. L'appelant demandera le chiffre à `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`.
+Le **clamp à zéro** n'est pas une précaution de style : une table dont le net maximal est sous la mise
+n'expose la maison à rien, et reporter un nombre négatif ferait qu'ouvrir une petite table achèterait
+de la marge sur une grande. La propriété qui compte n'est pas la formule mais sa **confrontation** :
+sur les quatre paliers × cinq modes, le chiffre annoncé égale **au centime** la somme nette des
+jambes de maison que `mouvementGain` produit réellement à brut maximal. Jamais asserté depuis une
+formule recopiée — c'est la leçon du pot forfaitaire ressuscité, qui a coûté un `ecart_cents` de −520.
+
+**Les cinq constantes, et les deux ancrages qui tiennent le plafond.**
+
+```
+PLAFOND_FENETRE_H       =      24   heures, fenêtre GLISSANTE (une journée calendaire se
+                                    réinitialise à une heure connue : attendre minuit deviendrait
+                                    une stratégie)
+PLAFOND_TABLES_PAR_JOUR =       4   tables maximales par joueur et par fenêtre
+PLAFOND_JOUEUR_CENTS    = 156 000   centimes  (= 4 × 39 000)
+PLAFOND_MAISON_CENTS    = 2 000 000 centimes — le fusible global
+FUSIBLE_RAFRAICHI_S     =      60   secondes
+```
+
+Le pire cas maximal du domaine est la **Resurgence à 10 $** : cinquante sièges, brut maximal 50 000,
+commission 10 000, net 40 000, donc **39 000 centimes d'exposition pour 1 000 misés**. Ce nombre est
+**recalculé par le test depuis `WBCore`**, jamais écrit à la main, et le test tombe si un palier ou un
+mode bouge — pour que quelqu'un **re-décide** au lieu de laisser un nombre survivre à la table qui
+l'a justifié. **Premier ancrage, le plancher** : sous 39 000, la Resurgence à 10 $ devient impossible
+à ouvrir pour tout le monde et tout le temps, et la panne se lirait comme un bug du lobby — un
+plafond décide donc quelles tables **existent**. **Second ancrage** : sous 78 000, une seule victoire
+maximale ferme la table pour vingt-quatre heures, puisque le billet suivant en pèse autant ; le
+premier gros gagnant **légitime** lirait `plafond` sur un lobby qui a l'air cassé. D'où la question
+retenue — combien de tables maximales laisse-t-on ouvertes après une grosse sortie ? — et la réponse,
+quatre.
+
+**Le plafond par joueur est EXACT ; le fusible global est APPROCHÉ.** Le premier se lira dans la
+transaction d'ouverture, **après** le verrou `select id from users where id = $1 for update`, parce
+que deux onglets du même joueur doivent être sérialisés et que son agrégat est borné par les billets
+d'un seul joueur sur vingt-quatre heures. Le second est un **interrupteur**, pas un invariant : le
+lire sous ce verrou ferait de chaque ouverture un agrégat non borné sur la table qui grossit le plus
+vite du dépôt, et le dépôt a déjà payé ce genre de chose une fois — `GET /api/me` retenait un client
+du bassin assez longtemps pour mettre en file le renoncement d'un **autre** joueur au-delà de sa
+fenêtre de dix secondes. Le fusible se relit donc au plus une fois toutes les `FUSIBLE_RAFRAICHI_S`
+secondes, hors transaction, et **il a le droit d'être en retard d'une minute** : ce retard vaut au
+plus ce qu'une minute d'ouvertures peut engager.
+
+**`plafondVerdict({ expositionRealiseeCents, expositionBilletCents, plafondCents })`** rend
+`{ franchi, expositionCents, plafondCents }`, gelé. `expositionCents = max(0, réalisée) + billet`, et
+`franchi` est **strictement supérieur** : il faut que le **quatrième** billet maximal passe, sans quoi
+`PLAFOND_TABLES_PAR_JOUR` en vaudrait trois. Le **clamp à zéro avant comparaison** est une décision :
+l'exposition est nette, mais une exposition négative reportée serait un compte d'épargne à moissonner
+— perdre cent parties achèterait le droit d'en gagner une très grosse. Le verdict est **monotone**,
+et un test le balaie : croître l'exposition ne fait jamais repasser au vert.
+
+**Ce que ces nombres coûtent, sans enjoliver.** Un compte vaut au plus 1 560 $ de contrepartie par
+jour ; le fusible vaut 20 000 $, c'est-à-dire **environ treize comptes saturés dans la même journée**.
+`findOrCreate` crée un compte par adresse email, donc treize adresses jetables suffisent à le faire
+sauter. Le vrai plafond de la maison **est le fusible global** ; le plafond par joueur ne sert qu'à
+empêcher un seul compte de l'épuiser à lui seul. Le remède à la flotte de comptes est une
+vérification d'identité, pas une règle de jeu : elle est en 04b, et en attendant le déclenchement du
+fusible refuse **tout le monde** — c'est une alerte, pas un réglage.
+
+**`decouvertAutorise` a enfin été confrontée à l'espace des comptes**, et pas seulement aux deux
+littéraux de `COMPTES_EMETTEURS` : pour **toute** forme que la grammaire engendre — les trois familles
+paramétrées sur toutes les magnitudes qu'un `bigserial` produit, plus les trois comptes de maison —
+le découvert est faux hors de `maison:dotation` et `maison:contrepartie`. C'est la garde qui
+empêchera un futur `maison:reserve` d'hériter du découvert par distraction.
+
 ## `ledger_entries` — la table, et ce que sa clé prouve
 
 Phase 03, module 2. Le grand livre cesse d'être un objet en mémoire : il a une table, et rien de ce
@@ -1094,14 +1215,15 @@ dette est soldée : il permet d'écrire qu'elle a maintenant une recette.
 app.js              le routeur. Rien hors du cœur de Node, tout le reste lui est injecté.
 core.js             charge WBCore depuis index.html
 sim.js              charge WBSim depuis index.html — même chargeur, même garde bruyante
-ledger.js           le grand livre : grammaire, motifs, mouvements, montants. PUR, sans dépendance.
+ledger.js           le grand livre : grammaire, motifs, mouvements, montants, et l'exposition de
+                    la maison. PUR, sans dépendance.
 crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sans dépendance
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             201 tests sans rien installer, 210 avec jose
+test.js             213 tests sans rien installer, 222 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1204,8 +1326,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 201 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 210 : les 201, plus la chaîne complète de vérification
+node api/test.js          # 213 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 222 : les 213, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```

@@ -372,6 +372,52 @@ décision n'a ni raison écrite ni test, alors que sa jumelle en a deux. Il n'ex
 — l'économie figée au coup d'envoi — à côté du `W.enLigne` qui existe pour le sas, et
 `startMatch` a pourtant un appelant unique.
 
+### La référence d'une écriture est du TEXTE, et un gain contre-passé doit rester visible — phase 04a, module 1
+
+Le module qui rend l'exposition de la maison calculable tenait en cinq constantes et trois fonctions
+évidentes. La quatrième ne l'était pas, et c'est la seule qui méritait d'être écrite ici.
+
+`ledger_entries.reference` est une colonne de **texte**. Toutes les écritures qui parlent d'un billet
+n'y portent pourtant pas le même contenu : `mise`, `gain` et `remboursement` y écrivent
+l'identifiant nu — `42` — mais `mouvementContrepassation` y écrit `<motifOrigine>:<refOrigine>`,
+donc `gain:42`. Ce choix de la phase 03 est bon, et sa raison est écrite à côté de lui : on lit dans
+le livre **ce qui** a été contre-passé sans faire une jointure.
+
+Le piège est que la lecture évidente de l'exposition est une jointure `ledger → matches` par
+`reference::bigint`. Sur les lignes de contre-passation, elle lève `22P02`. La correction évidente
+de ce `22P02` est d'ajouter un filtre qui ne garde que les références numériques — et ce filtre
+**ignore** exactement les lignes qui annulent un gain. Un gain contre-passé continuerait alors de
+compter dans l'exposition d'un joueur, sur un chiffre que personne n'aurait de raison de soupçonner.
+
+Ce qui rend le défaut coûteux n'est pas sa difficulté, c'est son **calendrier** : le module qui écrit
+la requête n'est pas celui qui crée les lignes qui la cassent. Il naîtrait **vert**, et se révélerait
+une phase plus tard, sur un plafond qu'on croirait tenir. C'est pour cela que la règle est une
+fonction pure, `referenceBillet(motif, reference)`, **exhaustive sur la liste fermée des motifs** —
+un septième motif la fait lancer au lieu de tomber dans un `else` — livrée avec sa traduction SQL
+`REFERENCE_BILLET_SQL` **construite à partir des mêmes listes**, et testée contre les références que
+les six mouvements produisent réellement, contre-passations comprises.
+
+Deux détails ont failli passer, et ils sont notés pour la prochaine fois qu'on écrira une règle des
+deux côtés à la fois. Le premier : la fonction rend une **chaîne** de chiffres, jamais un nombre. On
+comparera du texte à `matches.id::text`, sans aucun `cast` ; un `bigint` ne tient pas toujours dans
+un `Number`, et la conversion serait un arrondi silencieux sur la clé d'une pièce comptable. Le
+second : dans l'expression SQL, le groupe des motifs doit être **non capturant**, parce que
+`substring(texte from motif)` rend la première parenthèse **capturante** — capturer le motif rendrait
+« gain » là où on attend « 42 », c'est-à-dire une lecture **vide** plutôt que fausse, donc
+silencieuse.
+
+**Ce que la règle ne couvre pas, écrit ici plutôt que laissé à découvrir** : contre-passer une
+contre-passation produit `contrepassation:gain:42`, qui ne se ramène à aucun billet. Le double geste
+n'a pas d'appelant — l'outil de la 04a corrige un mouvement d'origine — et l'élargir demanderait
+d'élargir `REFERENCE_BILLET_SQL` du même coup, donc de re-décider des deux côtés ensemble. C'est un
+préfixe à ajouter à une expression régulière le jour où quelqu'un ouvrira ce chemin, pas une reprise.
+
+Le module se livre par ailleurs **sans un seul appelant**, et c'est la doctrine « le contrat avant le
+brancheur », déjà employée en 02a pour `seedFor` et `matchFlow`. Son prix est le même et il est écrit
+dans `docs/PHASE-04A.md` : si le module qui branche glissait, cinq constantes et quatre fonctions
+resteraient du code que personne n'aurait vu tourner ailleurs que dans `api/test.js`. À ce stade,
+**405 tests sur le jeu et 213 sur l'API** sans rien installer, 222 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes

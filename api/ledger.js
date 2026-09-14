@@ -353,6 +353,190 @@ function soldeDe(transferts, compte) {
   return solde;
 }
 
+// ---------- L'exposition de la maison ----------
+//
+// CE QUE LA MAISON RISQUE, et pourquoi cela se calcule ici alors que personne ne l'appelle encore.
+// Le grand livre MESURE l'exposition depuis la phase 03 — le solde négatif de `maison:contrepartie`
+// EST ce que coûtent dix-neuf adversaires qui ne misent rien — mais il ne la BORNE pas. Ce qui suit
+// la rend calculable ; le module qui refuse à l'ouverture du billet vient après, et ce décalage est
+// délibéré : « le contrat avant le brancheur », déjà employé en 02a pour `seedFor` et `matchFlow`.
+// Le prix est écrit dans `docs/PHASE-04A.md` plutôt que caché : tant que le brancheur n'est pas là,
+// ces fonctions ne tournent que dans les tests.
+
+// LA FENÊTRE est glissante, et pas une journée calendaire : une journée calendaire se réinitialise à
+// une heure connue de tous, et attendre minuit deviendrait une stratégie.
+const PLAFOND_FENETRE_H = 24;
+
+// COMBIEN DE TABLES MAXIMALES ON LAISSE OUVERTES APRÈS UNE GROSSE SORTIE. C'est le second ancrage du
+// plafond, et c'est celui qui manquait. Un joueur qui vient de rafler une table maximale a consommé
+// le pire cas ; son billet suivant sur la même table en pèse autant, donc deux pires cas au total.
+// Sous cette barre, le premier gros gagnant LÉGITIME lit `plafond` et voit un lobby cassé — et comme
+// l'exposition est nette et qu'un billet perdu ne vaut que la mise, il lui faudrait des dizaines de
+// défaites pour effacer sa victoire. Quatre est la réponse retenue, et elle se re-décide chaque fois
+// qu'un mode ou un palier change.
+const PLAFOND_TABLES_PAR_JOUR = 4;
+
+// LE PLAFOND PAR JOUEUR sur la fenêtre : quatre fois le pire cas de la table la plus chère — la
+// Resurgence à 10 $, cinquante sièges, 39 000 centimes d'exposition pour 1 000 misés. Le nombre est
+// ÉCRIT ici et RECALCULÉ ailleurs : un test d'`api/test.js` le dérive depuis `WBCore` sur les quatre
+// paliers et les cinq modes et compare, parce que ce fichier n'a pas le droit de le dériver lui-même
+// — la garde textuelle qui lui interdit toute arithmétique de commission passe par là.
+//
+// Le premier ancrage est un plancher : sous 39 000, la Resurgence à 10 $ devient impossible à ouvrir
+// pour tout le monde et tout le temps, et la panne se lirait comme un bug du lobby. Un plafond
+// décide donc quelles tables EXISTENT, et c'est pour cela qu'il se pose par rapport au pire cas et
+// jamais sur un nombre rond « raisonnable ».
+const PLAFOND_JOUEUR_CENTS = 156000;
+
+// LE FUSIBLE GLOBAL, et ce qu'il vaut vraiment : environ treize comptes saturés dans la même
+// journée. Ce n'est pas un réglage, c'est une alerte — son déclenchement refuse TOUT LE MONDE. Il
+// existe parce qu'un plafond par joueur ne borne pas une flotte de comptes : une identité vaut une
+// adresse email, et le seul remède réel à la flotte est une vérification d'identité, renvoyée à la
+// phase 04b avec le reste du bord de l'argent réel.
+const PLAFOND_MAISON_CENTS = 2000000;
+
+// À QUELLE CADENCE LE FUSIBLE SE RELIT, et pourquoi il a le droit d'être en retard. Le plafond par
+// joueur est EXACT et se lit sous le verrou de ligne qui existe déjà, parce que deux onglets d'un
+// même joueur doivent être sérialisés. Le fusible, lui, est un agrégat non borné sur la table qui
+// grossit le plus vite du dépôt : le lire sous ce verrou allongerait la section critique la plus
+// disputée du système, et le dépôt a déjà payé ce genre de chose une fois — `GET /api/me` retenait
+// un client du bassin assez longtemps pour mettre en file le renoncement d'un AUTRE joueur au-delà
+// de sa fenêtre de dix secondes. Être exact au billet près sur un seuil de deux millions de centimes
+// ne veut rien dire ; payer un agrégat non borné à chaque ouverture pour l'obtenir est la mauvaise
+// moitié du marché. Le retard vaut donc au plus ce qu'une minute d'ouvertures peut engager.
+const FUSIBLE_RAFRAICHI_S = 60;
+
+// LE PIRE CAS D'UN BILLET : ce que la maison risque au maximum sur la table qu'on s'apprête à
+// ouvrir. Elle REÇOIT le net maximal, elle ne le calcule PAS — c'est la même discipline que
+// `mouvementGain`, qui reçoit brut, commission et net sans les recalculer, et c'est la garde
+// textuelle de ce fichier qui la tient. L'appelant demande le chiffre à
+// `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`, et un test d'`api/test.js`
+// confronte le résultat aux jambes de maison que `mouvementGain` produit RÉELLEMENT à brut maximal
+// — jamais à une formule recopiée, c'est la leçon du pot forfaitaire ressuscité.
+//
+// LE CLAMP À ZÉRO n'est pas une précaution de style. Une table dont le net maximal est sous la mise
+// n'expose la maison à rien du tout : le séquestre suffit à payer, et le reliquat rentre chez elle.
+// Reporter un nombre négatif viendrait en déduction de l'exposition réalisée, c'est-à-dire
+// qu'ouvrir une petite table achèterait de la marge sur une grande.
+function expositionBilletMaxCents(netMaxCents, miseCents) {
+  if (!Number.isSafeInteger(netMaxCents) || netMaxCents < 0) {
+    throw new Error(`grand livre : netMaxCents invalide (${String(netMaxCents)}) — attendu un entier de centimes positif ou nul, venu de WBCore`);
+  }
+  exigeMontant(miseCents);
+  return Math.max(0, netMaxCents - miseCents);
+}
+
+// LES MOTIFS QUI DÉSIGNENT UN BILLET, et le seul qui le désigne indirectement. `MOTIFS` est la liste
+// fermée ; celle-ci en est une partition, et `referenceBillet` ci-dessous ne sait traiter que ces
+// trois sous-ensembles. Un septième motif tomberait donc dans un refus bruyant plutôt que dans un
+// silence : c'est tout l'intérêt de découper la liste au lieu de tester trois cas et de laisser un
+// `else` ramasser le reste.
+const MOTIFS_BILLET = Object.freeze(['mise', 'gain', 'remboursement']);
+const MOTIFS_SANS_BILLET = Object.freeze(['dotation', 'recharge']);
+
+// `[1-9][0-9]*` pour la même raison que dans `COMPTE_RE_SQL` : un `bigserial` ne produit jamais de
+// zéro de tête, et « 007 » ne doit pas devenir un second billet à côté de « 7 ».
+const BILLET_RE_SQL = '^[1-9][0-9]*$';
+const BILLET_RE = new RegExp(BILLET_RE_SQL);
+// Le groupe de motifs est NON CAPTURANT, et ce n'est pas un détail d'esthétique : Postgres rend, par
+// `substring(texte from motif)`, la première parenthèse CAPTURANTE. Capturer le motif d'origine
+// rendrait « gain » là où on attend « 42 ». Le groupe capturant est donc celui des chiffres, et la
+// même source sert au `RegExp` de JavaScript et à l'expression SQL.
+const CONTREPASSATION_RE_SQL = `^(?:${MOTIFS_BILLET.join('|')}):([1-9][0-9]*)$`;
+const CONTREPASSATION_RE = new RegExp(CONTREPASSATION_RE_SQL);
+
+// CE QUI RAMÈNE UNE ÉCRITURE À UN BILLET, ou à `null`. C'est le cœur du module, et le piège de la
+// phase : il naît VERT si on ne le nomme pas.
+//
+// `ledger_entries.reference` est du TEXTE, et `mouvementContrepassation` y écrit
+// `<motifOrigine>:<refOrigine>` — donc `gain:42`, et pas `42`. La raison est bonne : on lit dans le
+// livre CE QUI a été contre-passé sans faire une jointure. Mais une jointure `ledger → matches` par
+// `reference::bigint` lèverait `22P02` sur ces lignes-là, et une jointure qui les filtre les IGNORE
+// — c'est-à-dire qu'un gain contre-passé continuerait de compter dans l'exposition. Le module qui
+// écrit la requête n'est pas celui qui crée les lignes qui la cassent : le défaut se révélerait une
+// phase plus tard, sur un chiffre qu'on croirait juste.
+//
+// Elle rend une CHAÎNE de chiffres, jamais un nombre : c'est du texte qu'on comparera à
+// `matches.id::text`, sans aucun `cast`. Un `bigint` ne tient pas toujours dans un `Number`, et la
+// conversion serait un arrondi silencieux sur la clé d'une pièce comptable.
+function referenceBillet(motif, reference) {
+  exigeMotif(motif);
+  if (typeof reference !== 'string') return null;
+  // La dotation référence un joueur, la recharge un joueur et un jour : ce ne sont pas des billets,
+  // et ce n'est pas un oubli — émettre des crédits fictifs n'est pas s'exposer.
+  if (MOTIFS_SANS_BILLET.includes(motif)) return null;
+  if (MOTIFS_BILLET.includes(motif)) return BILLET_RE.test(reference) ? reference : null;
+  if (motif === 'contrepassation') {
+    const m = CONTREPASSATION_RE.exec(reference);
+    return m === null ? null : m[1];
+  }
+  throw new Error(`grand livre : referenceBillet ne sait pas ce que le motif ${motif} désigne — la liste fermée MOTIFS a changé sans que cette fonction suive`);
+}
+
+// LA MÊME RÈGLE, EN SQL, et il ne doit jamais en exister deux écritures. Exportée en CHAÎNE parce
+// que c'est elle que le schéma recopiera, exactement comme `COMPTE_RE_SQL` ; une garde textuelle d'un
+// module ultérieur comparera le texte du schéma à cette chaîne. Elle se CONSTRUIT à partir des mêmes
+// listes et des mêmes expressions que la fonction ci-dessus : deux écritures de la même règle sont le
+// patron du `respawn()` défini deux fois, et ici la seconde vivrait dans un fichier `.sql` que
+// personne ne relit.
+const REFERENCE_BILLET_SQL =
+  `case when motif in (${MOTIFS_BILLET.map(m => `'${m}'`).join(', ')}) and reference ~ '${BILLET_RE_SQL}' then reference`
+  + ` when motif = 'contrepassation' then substring(reference from '${CONTREPASSATION_RE_SQL}')`
+  + ' else null end';
+
+// L'EXPOSITION RÉALISÉE sur un ensemble de billets. Une SOMME d'écritures immuables, jamais une
+// colonne : un compteur qu'on incrémente est une case qu'on écrase, et un double envoi la fausse pour
+// toujours. C'est la doctrine de `user_stats` appliquée une fois de plus, et son corollaire est
+// testable — on franchit le plafond en POSANT DES ÉCRITURES, et relire redonne le même chiffre.
+//
+// DEUX COMPTES, ET SEULEMENT DEUX : `maison:contrepartie`, qui avance le pot que personne n'a misé,
+// et `maison:commission`, qui en rattrape une part. `maison:dotation` n'y entre JAMAIS — émettre des
+// crédits fictifs n'est pas s'exposer, et le laisser entrer ferait de la première connexion de
+// chaque joueur une exposition de 5 000 centimes.
+//
+// Le résultat est un entier SIGNÉ, et c'est voulu : l'exposition est NETTE, les billets perdus
+// s'imputent sur les gagnés. Le clamp à zéro n'appartient pas ici mais à `plafondVerdict`, qui est
+// l'endroit où l'on compare.
+function expositionDe(transferts, references) {
+  const voulues = new Set([...(references || [])].map(r => identifiant(r, 'référence de billet')));
+  const retenus = (transferts || []).filter(t => {
+    const billet = referenceBillet(t.motif, t.reference);
+    return billet !== null && voulues.has(billet);
+  });
+  const contrepartie = soldeDe(retenus, MAISON_CONTREPARTIE);
+  const commission = soldeDe(retenus, MAISON_COMMISSION);
+  // `0 - x` et non `-x` : `-0` est un nombre distinct de `0` pour `Object.is`, donc pour
+  // `assert.strictEqual` et pour toute comparaison stricte qu'un appelant écrirait. Un livre vide
+  // doit rendre zéro, pas « moins zéro ».
+  return 0 - (contrepartie + commission);
+}
+
+// LE VERDICT. `expositionRealiseeCents` vient du livre, `expositionBilletCents` du billet qu'on
+// s'apprête à ouvrir. L'index partiel `matches_un_seul_ouvert` garantit qu'un joueur n'a jamais plus
+// d'un pire cas en vol : la somme « réalisé + un seul pire cas » est donc EXACTE, et il n'y a rien à
+// réserver ni à libérer. C'est ce qui rend inutile un compte d'engagement crédité à l'ouverture et
+// soldé au règlement, qui aurait doublé le nombre d'écritures et ajouté une jambe à chacune des six
+// issues d'un billet.
+//
+// LE CLAMP À ZÉRO AVANT COMPARAISON est une décision, pas une commodité. L'exposition est nette — les
+// billets perdus s'imputent sur les gagnés — mais une exposition négative reportée serait un compte
+// d'épargne à moissonner : perdre cent parties achèterait le droit d'en gagner une très grosse.
+//
+// `franchi` est une comparaison STRICTE : il faut que le quatrième billet maximal passe, sans quoi
+// `PLAFOND_TABLES_PAR_JOUR` en vaudrait trois et le second ancrage serait faux d'une table.
+function plafondVerdict({ expositionRealiseeCents, expositionBilletCents, plafondCents }) {
+  if (!Number.isSafeInteger(expositionRealiseeCents)) {
+    throw new Error(`grand livre : expositionRealiseeCents invalide (${String(expositionRealiseeCents)}) — attendu un entier de centimes, éventuellement négatif`);
+  }
+  for (const [nom, v] of [['expositionBilletCents', expositionBilletCents], ['plafondCents', plafondCents]]) {
+    if (!Number.isSafeInteger(v) || v < 0) {
+      throw new Error(`grand livre : ${nom} invalide (${String(v)}) — attendu un entier de centimes positif ou nul`);
+    }
+  }
+  const expositionCents = Math.max(0, expositionRealiseeCents) + expositionBilletCents;
+  return Object.freeze({ franchi: expositionCents > plafondCents, expositionCents, plafondCents });
+}
+
 // ---------- La réconciliation ----------
 //
 // Le zéro global ne dit RIEN sur l'appariement : il est vrai même si un montant juste est posé sur
@@ -509,4 +693,7 @@ module.exports = {
   mouvementDotation, mouvementRecharge, mouvementMise, mouvementGain,
   mouvementRemboursement, mouvementContrepassation,
   soldeDe, ledgerReconcile, STATUTS_CLOS,
+  PLAFOND_FENETRE_H, PLAFOND_TABLES_PAR_JOUR, PLAFOND_JOUEUR_CENTS, PLAFOND_MAISON_CENTS,
+  FUSIBLE_RAFRAICHI_S,
+  expositionBilletMaxCents, referenceBillet, REFERENCE_BILLET_SQL, expositionDe, plafondVerdict,
 };

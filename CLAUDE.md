@@ -51,8 +51,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 405 tests sur le jeu (`node test.js`) et
-  201 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 210 en tout — de bout en bout avec de la vraie
+  213 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 222 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -269,6 +269,22 @@ porte : le reste a besoin d'un navigateur pour tourner.
   `(motif, reference, compte_debit, compte_credit)` prouve qu'une jambe s'écrit au plus une fois,
   et ne prouve **pas** l'unicité d'une décomposition — ce trou-là est refermé par l'interdiction du
   découvert sur le séquestre et par la clause du règlement.
+- **L'exposition de la maison est une SOMME d'écritures, et elle est CALCULABLE sans être branchée.**
+  Elle se lit sur les deux comptes `maison:contrepartie` et `maison:commission` ; `maison:dotation`
+  n'y entre **jamais** — émettre des crédits fictifs n'est pas s'exposer. Elle est **nette** et
+  **signée**, et c'est `plafondVerdict` qui la ramène à zéro avant de comparer : une exposition
+  négative reportée serait un compte d'épargne à moissonner. Le pire cas d'un billet est **reçu**,
+  jamais calculé dans `api/ledger.js`, et confronté au centime aux jambes de maison que
+  `mouvementGain` produit réellement — 39 000 centimes au maximum du domaine, la Resurgence à 10 $,
+  d'où `PLAFOND_JOUEUR_CENTS = 4 × 39 000`, **recalculé** par le test depuis `WBCore` pour qu'un
+  palier ou un mode qui change fasse re-décider. Une écriture se ramène à un billet par une fonction
+  pure **exhaustive sur la liste fermée des motifs**, `referenceBillet`, parce que
+  `ledger_entries.reference` est du **texte** et qu'une contre-passation y porte `gain:42` : une
+  jointure par `reference::bigint` lèverait `22P02`, et une jointure qui filtre ces lignes laisserait
+  un gain contre-passé compter dans l'exposition. Sa traduction SQL, `REFERENCE_BILLET_SQL`, est
+  construite depuis les mêmes listes — il n'existe jamais deux écritures de la même règle. **Rien
+  n'appelle encore tout cela** : c'est « le contrat avant le brancheur », et le plafond ne refuse
+  aucun billet tant que le module 4 de la 04a n'est pas livré.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Le solde est une SOMME d'écritures, et les routes l'écrivent.** La dotation et la recharge sont
@@ -401,6 +417,11 @@ tout solde y est modifiable depuis la console.
     justificatives d'un compte effacé, et un **plancher d'horloge** sur les règlements qui paient.
     Six modules. Rien n'y ouvre de table en argent réel, `SIM_VERSION` ne bouge pas, et le jeu ne
     reçoit qu'un membre de plus dans `WBCore.REFUS_SAS` et une fonction pure de plus dans `WBCore`.
+    *Module 1* : **livré**. `api/ledger.js` reçoit les cinq constantes du plafond,
+    `expositionBilletMaxCents`, `referenceBillet` et sa traduction SQL, `expositionDe` et
+    `plafondVerdict`, plus l'épreuve exhaustive de `decouvertAutorise` sur l'espace des comptes.
+    **Aucun appelant, aucune route, aucune colonne** : le dépôt ne change pas de comportement d'un
+    octet, et la borne n'existe pas encore.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.

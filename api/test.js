@@ -3163,6 +3163,449 @@ test('soldeDe rend ZÉRO sur une liste vide, et un ENTIER partout', () => {
   assert.strictEqual(L.soldeDe(livre, L.compteEnjeu(999)), 0);
 });
 
+// ------------------------------------------------------------------------------------------------
+// L'EXPOSITION DE LA MAISON (phase 04a, module 1). Le grand livre MESURAIT l'exposition depuis la
+// phase 03 ; il ne la BORNAIT pas. Ces fonctions la rendent calculable, et rien ne les appelle
+// encore : aucune route, aucune colonne, aucun changement de schéma. C'est « le contrat avant le
+// brancheur », déjà employé en 02a pour `seedFor` et `matchFlow`, et le prix est écrit dans
+// `docs/PHASE-04A.md` — hors de ces tests, le module ne tourne nulle part.
+console.log('L\'exposition de la maison : le pire cas, la référence, le plafond');
+
+// Le pire cas d'une table, RECALCULÉ depuis `WBCore` et jamais écrit à la main : le net maximal que
+// `purseBound` autorise, moins la mise que le joueur a réellement versée.
+function pireCasDe(miseCents, seats) {
+  return L.expositionBilletMaxCents(C.cashoutCents(C.purseBound(miseCents, seats).maxCents).netCents,
+                                    miseCents);
+}
+
+test('LE PIRE CAS D\'UN BILLET est confronté aux ÉCRITURES RÉELLES, sur les quatre paliers et les cinq modes', () => {
+  // Jamais asserté depuis une formule recopiée : c'est la leçon du pot forfaitaire ressuscité, qui a
+  // coûté un `ecart_cents` de −520. Le chiffre annoncé est comparé AU CENTIME à ce que les jambes de
+  // maison de `mouvementGain` portent vraiment quand le joueur rafle toute la table.
+  for (const { id, seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const p = C.cashoutCents(C.purseBound(miseCents, seats).maxCents);
+    const annonce = L.expositionBilletMaxCents(p.netCents, miseCents);
+    const livre = L.mouvementMise({ userId: 1, matchId: 42, miseCents })
+      .concat(L.mouvementGain({ userId: 1, matchId: 42, miseCents, grossCents: p.grossCents,
+                                feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+    assert.strictEqual(annonce, L.expositionDe(livre, ['42']),
+      `${id} $${miseCents / 100} : le pire cas annoncé n'est pas celui que le livre porte`);
+    // Et il vaut bien ce que la maison paie de sa poche : le brut versé au pot, moins ce que la
+    // commission rattrape, moins la seule mise qui a été réellement versée.
+    assert.strictEqual(annonce, (p.grossCents - miseCents) - p.feeCents, `${id} $${miseCents / 100}`);
+    assert.ok(Number.isSafeInteger(annonce) && annonce > 0, `${id} : ${annonce}`);
+  }
+  // LE CLAMP À ZÉRO, sur la seule forme de table qui le déclenche : un net maximal sous la mise
+  // n'expose la maison à rien — le séquestre suffit à payer, et le reliquat rentre chez elle.
+  assert.strictEqual(L.expositionBilletMaxCents(0, 1000), 0);
+  assert.strictEqual(L.expositionBilletMaxCents(999, 1000), 0);
+  assert.strictEqual(L.expositionBilletMaxCents(1000, 1000), 0);
+  assert.strictEqual(L.expositionBilletMaxCents(1001, 1000), 1);
+  // Elle REÇOIT le net maximal, elle ne le calcule pas : ce qui n'est pas un entier de centimes est
+  // refusé, jamais arrondi en silence.
+  for (const mauvais of [-1, 1.5, NaN, Infinity, '800', null, undefined])
+    assert.throws(() => L.expositionBilletMaxCents(mauvais, 100), /netMaxCents invalide/, String(mauvais));
+  for (const mauvais of [0, -1, 1.5, NaN, '100', null])
+    assert.throws(() => L.expositionBilletMaxCents(800, mauvais), /montant invalide/, String(mauvais));
+});
+
+test('LE MAXIMUM DU DOMAINE vaut 39 000 centimes, et la table qui le porte est la Resurgence à 10 $', () => {
+  let max = 0;
+  const porteuses = [];
+  for (const { id, seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const pire = pireCasDe(miseCents, seats);
+    if (pire > max) { max = pire; porteuses.length = 0; }
+    if (pire === max) porteuses.push(`${id} $${miseCents / 100}`);
+  }
+  assert.strictEqual(max, 39000, 'le pire cas du domaine a bougé : le plafond doit être re-décidé');
+  // La table est NOMMÉE, pas seulement chiffrée : cinquante sièges à 10 $, brut maximal 50 000,
+  // commission 10 000, net 40 000, donc 39 000 d'exposition pour 1 000 misés. La resurgence en duo
+  // porte les mêmes cinquante sièges, donc le même pire cas : les deux sont attendues.
+  assert.deepStrictEqual(porteuses, ['resurgence $10', 'resurgenceDuo $10']);
+  assert.strictEqual(C.seatsOf(C.MODES.resurgence), 50);
+  assert.deepStrictEqual(C.cashoutCents(C.purseBound(1000, 50).maxCents),
+                         { grossCents: 50000, feeCents: 10000, netCents: 40000 });
+  assert.strictEqual(pireCasDe(1000, 50), 39000);
+});
+
+test('PLAFOND_JOUEUR_CENTS est DÉRIVÉ du pire cas maximal, recalculé depuis WBCore et jamais écrit à la main', () => {
+  // LES DEUX ANCRAGES, et il faut les deux :
+  //
+  // 1. LE PLANCHER. Sous 39 000, la Resurgence à 10 $ devient impossible à ouvrir pour tout le monde
+  //    et tout le temps, et la panne se lirait comme un bug du lobby. Un nombre rond « raisonnable »
+  //    — 10 000, 20 000 — ferme silencieusement les deux tables les plus chères. Le plafond décide
+  //    donc quelles tables EXISTENT.
+  // 2. LE SECOND ANCRAGE, celui qui manquait. Sous 78 000, une seule victoire maximale ferme la
+  //    table pour vingt-quatre heures : le joueur a consommé 39 000, son billet suivant en pèse
+  //    39 000 de plus. Le premier gros gagnant LÉGITIME lirait `plafond` sur un lobby qui a l'air
+  //    cassé, et il lui faudrait trente-neuf défaites pour effacer sa victoire.
+  //
+  // D'où la question retenue — combien de tables maximales laisse-t-on ouvertes après une grosse
+  // sortie ? — et la réponse : quatre. Un palier ou un mode qui change fait tomber ce test, pour que
+  // quelqu'un RE-DÉCIDE au lieu de laisser un nombre survivre à la table qui l'a justifié.
+  let pireCasMaximal = 0;
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER)
+    pireCasMaximal = Math.max(pireCasMaximal, pireCasDe(miseCents, seats));
+  assert.strictEqual(L.PLAFOND_JOUEUR_CENTS, L.PLAFOND_TABLES_PAR_JOUR * pireCasMaximal);
+  assert.ok(L.PLAFOND_JOUEUR_CENTS >= pireCasMaximal, 'sous un pire cas, la table la plus chère n\'existe plus');
+  assert.ok(L.PLAFOND_JOUEUR_CENTS >= 2 * pireCasMaximal, 'sous deux pires cas, une seule victoire ferme la table');
+  // Le fusible global vaut environ treize comptes saturés dans la même journée. Ce n'est pas un
+  // invariant, c'est un aveu daté : le remède à la flotte de comptes est une vérification
+  // d'identité, et elle est en 04b.
+  assert.ok(L.PLAFOND_MAISON_CENTS > L.PLAFOND_JOUEUR_CENTS,
+    'un fusible global sous le plafond par joueur rendrait le second inatteignable');
+  assert.strictEqual(Math.floor(L.PLAFOND_MAISON_CENTS / L.PLAFOND_JOUEUR_CENTS), 12,
+    'le fusible ne vaut plus le nombre de comptes saturés annoncé dans la spécification');
+});
+
+test('les cinq constantes du plafond sont des ENTIERS de centimes, d\'heures ou de secondes', () => {
+  // L'argent se compte en centimes entiers, jamais en flottant : un arrondi sur un seuil se voit au
+  // moment où il refuse quelqu'un, c'est-à-dire trop tard.
+  const attendu = { PLAFOND_FENETRE_H: 24, PLAFOND_TABLES_PAR_JOUR: 4, PLAFOND_JOUEUR_CENTS: 156000,
+                    PLAFOND_MAISON_CENTS: 2000000, FUSIBLE_RAFRAICHI_S: 60 };
+  for (const [nom, valeur] of Object.entries(attendu)) {
+    assert.strictEqual(L[nom], valeur, nom);
+    assert.ok(Number.isSafeInteger(L[nom]) && L[nom] > 0, `${nom} = ${L[nom]}`);
+  }
+  // La fenêtre est GLISSANTE, et pas une journée calendaire : attendre minuit deviendrait une
+  // stratégie. Et le fusible se relit à une cadence, pas à chaque ouverture — le lire sous le verrou
+  // de ligne ferait de chaque billet un agrégat non borné sur la table qui grossit le plus vite.
+  assert.ok(L.FUSIBLE_RAFRAICHI_S < L.PLAFOND_FENETRE_H * 3600);
+});
+
+test('expositionDe rend un entier SIGNÉ : positif quand la maison a versé, négatif sur un billet perdu, zéro sur un livre vide', () => {
+  // Zéro sur un livre vide, et un VRAI zéro : `-0` est un nombre distinct de `0` pour `Object.is`,
+  // donc pour `assert.strictEqual` et pour toute comparaison stricte qu'un appelant écrirait.
+  assert.strictEqual(L.expositionDe([], ['1']), 0);
+  assert.strictEqual(L.expositionDe(undefined, ['1']), 0);
+  assert.strictEqual(L.expositionDe([], []), 0);
+  assert.ok(Object.is(L.expositionDe([], ['1']), 0), 'un livre vide rend « moins zéro »');
+
+  // LE JOUEUR QUI RAFLE LA TABLE : la maison a versé, l'exposition est positive.
+  const p = C.cashoutCents(C.purseBound(1000, 50).maxCents);
+  const gagne = L.mouvementMise({ userId: 1, matchId: 1, miseCents: 1000 })
+    .concat(L.mouvementGain({ userId: 1, matchId: 1, miseCents: 1000, grossCents: p.grossCents,
+                              feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  assert.strictEqual(L.expositionDe(gagne, ['1']), 39000);
+
+  // LE JOUEUR QUI PERD : le séquestre part entier chez la contrepartie, donc l'exposition est
+  // NÉGATIVE D'EXACTEMENT LA MISE. C'est ce qui finance les versements du cas précédent, et c'est
+  // pour cela que l'exposition est nette.
+  const perdu = C.cashoutCents(0);
+  const perte = L.mouvementMise({ userId: 1, matchId: 2, miseCents: 1000 })
+    .concat(L.mouvementGain({ userId: 1, matchId: 2, miseCents: 1000, grossCents: perdu.grossCents,
+                              feeCents: perdu.feeCents, netCents: perdu.netCents, convergee: true }));
+  assert.strictEqual(L.expositionDe(perte, ['2']), -1000);
+
+  // Et elle est NETTE sur l'ensemble : les billets perdus s'imputent sur les gagnés.
+  const tout = gagne.concat(perte);
+  assert.strictEqual(L.expositionDe(tout, ['1', '2']), 38000);
+  // Restreinte aux références demandées, et à elles seules : un billet qu'on n'interroge pas ne
+  // pèse rien. C'est ce qui rendra l'agrégat borné par joueur et par fenêtre.
+  assert.strictEqual(L.expositionDe(tout, ['1']), 39000);
+  assert.strictEqual(L.expositionDe(tout, ['2']), -1000);
+  assert.strictEqual(L.expositionDe(tout, ['3']), 0);
+  // Les trois formes qu'un pilote Postgres rend pour un `bigserial` désignent le même billet.
+  for (const r of [1, '1', 1n]) assert.strictEqual(L.expositionDe(tout, [r]), 39000, String(r));
+  assert.strictEqual(L.expositionDe(tout, new Set(['1', '2'])), 38000, 'un Set est un ensemble comme un autre');
+  for (const mauvais of ['007', '0', -3, 1.5, '', 'sept', null])
+    assert.throws(() => L.expositionDe(tout, [mauvais]), /identifiant/, String(mauvais));
+});
+
+test('LA DOTATION ET LA RECHARGE n\'entrent JAMAIS dans l\'exposition, même quand elles dominent le livre', () => {
+  // Émettre des crédits fictifs n'est pas s'exposer. `maison:dotation` est donc hors de la somme, et
+  // ce n'est pas un oubli : sans cette règle, la première connexion de chaque joueur compterait pour
+  // 5 000 centimes d'exposition, et le fusible global sauterait sur des inscriptions.
+  const p = C.cashoutCents(C.purseBound(1000, 50).maxCents);
+  const partie = L.mouvementMise({ userId: 7, matchId: 7, miseCents: 1000 })
+    .concat(L.mouvementGain({ userId: 7, matchId: 7, miseCents: 1000, grossCents: p.grossCents,
+                              feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  const nu = L.expositionDe(partie, ['7']);
+  assert.strictEqual(nu, 39000);
+
+  // On noie la partie sous des émissions : mille dotations et mille recharges, soit six millions de
+  // centimes émis — trois fois le fusible global. L'exposition ne doit pas bouger d'un centime.
+  let bruyant = [];
+  for (let u = 1; u <= 1000; u++) {
+    bruyant = bruyant.concat(L.mouvementDotation({ userId: u, montantCents: L.DOTATION_CENTS }));
+    bruyant = bruyant.concat(L.mouvementRecharge({ userId: u, jour: '2026-09-15', montantCents: L.RECHARGE_CENTS }));
+  }
+  assert.ok(-L.soldeDe(bruyant, L.MAISON_DOTATION) >= 3 * L.PLAFOND_MAISON_CENTS, 'le bruit ne domine pas assez');
+  assert.strictEqual(L.expositionDe(bruyant.concat(partie), ['7']), nu);
+  assert.strictEqual(L.expositionDe(bruyant, ['7']), 0);
+
+  // LE PIÈGE EXACT : la référence d'une dotation est l'identifiant du JOUEUR, celle d'une recharge
+  // `<joueur>:<jour>`. Le joueur 7 et le billet 7 portent donc le même texte, et une lecture qui
+  // regarderait la référence sans regarder le motif les confondrait. On le prouve sur une écriture
+  // de motif `dotation` qui touche un compte de maison — la grammaire l'autorise, aucun mouvement
+  // ne la produit, et c'est précisément le genre de ligne qu'un incident ferait naître.
+  const piege = [L.transfert('dotation', '7', L.MAISON_CONTREPARTIE, L.compteJoueur(7), 50000)];
+  assert.strictEqual(L.expositionDe(piege, ['7']), 0, 'une dotation a été prise pour un billet');
+  assert.strictEqual(L.referenceBillet('dotation', '7'), null);
+  assert.strictEqual(L.referenceBillet('recharge', '7:2026-09-15'), null);
+});
+
+test('UN GAIN CONTRE-PASSÉ est bien vu : l\'exposition retombe exactement où elle était', () => {
+  // LE DÉFAUT QUE CE MODULE EXISTE POUR FAIRE NAÎTRE FERMÉ. `mouvementContrepassation` écrit
+  // `gain:<id>` et non `<id>` — pour qu'on lise dans le livre CE QUI a été contre-passé sans faire
+  // de jointure. Une lecture par `reference::bigint` lèverait `22P02` sur ces lignes ; une lecture
+  // qui les filtre les IGNORE, et un gain contre-passé continuerait de compter dans l'exposition.
+  // Le module qui écrit la requête n'est pas celui qui crée les lignes qui la cassent : sans ce
+  // test, le défaut naîtrait vert et se révélerait une phase plus tard.
+  const p = C.cashoutCents(C.purseBound(1000, 50).maxCents);
+  const mise = L.mouvementMise({ userId: 5, matchId: 5, miseCents: 1000 });
+  const gain = L.mouvementGain({ userId: 5, matchId: 5, miseCents: 1000, grossCents: p.grossCents,
+                                 feeCents: p.feeCents, netCents: p.netCents, convergee: true });
+  assert.strictEqual(L.expositionDe(mise.concat(gain), ['5']), 39000);
+
+  const contre = L.mouvementContrepassation({ transferts: gain });
+  assert.strictEqual(contre[0].reference, 'gain:5', 'la référence d\'une contre-passation porte son motif d\'origine');
+  // Le gain est annulé, donc l'exposition aussi : elle retombe à ce qu'elle était avant lui — la
+  // mise seule, que la maison n'a pas encore encaissée.
+  assert.strictEqual(L.expositionDe(mise.concat(gain, contre), ['5']), 0);
+  // Et le livre boucle : c'est la vérification que le zéro global ne suffit pas à donner.
+  for (const c of ['enjeu:5', L.compteJoueur(5), L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE])
+    assert.strictEqual(L.soldeDe(gain.concat(contre), c), 0, c);
+  // La contre-passation de la MISE se rattache au même billet, elle aussi.
+  assert.strictEqual(L.referenceBillet('contrepassation', 'mise:5'), '5');
+  assert.strictEqual(L.referenceBillet('contrepassation', 'remboursement:5'), '5');
+});
+
+test('referenceBillet est EXHAUSTIVE : les six mouvements et leurs contre-passations se ramènent au bon billet, ou à null', () => {
+  // On BALAIE `MOTIFS`, on ne code pas six cas à la main : un septième motif ajouté sans lire cette
+  // fonction fait tomber le test au lieu de produire une référence qu'elle ignorerait en silence.
+  const p = C.cashoutCents(2500);
+  const fabriques = {
+    dotation: () => L.mouvementDotation({ userId: 3, montantCents: L.DOTATION_CENTS }),
+    recharge: () => L.mouvementRecharge({ userId: 3, jour: '2026-09-15', montantCents: L.RECHARGE_CENTS }),
+    mise: () => L.mouvementMise({ userId: 3, matchId: 42, miseCents: 100 }),
+    gain: () => L.mouvementGain({ userId: 3, matchId: 42, miseCents: 100, grossCents: p.grossCents,
+                                  feeCents: p.feeCents, netCents: p.netCents, convergee: true }),
+    remboursement: () => L.mouvementRemboursement({ userId: 3, matchId: 42, miseCents: 100 }),
+    contrepassation: () => L.mouvementContrepassation({ transferts: L.mouvementMise({ userId: 3, matchId: 42, miseCents: 100 }) }),
+  };
+  // `dotation` et `recharge` ne parlent d'aucun billet ; les quatre autres parlent du billet 42.
+  const attendu = { dotation: null, recharge: null, mise: '42', gain: '42', remboursement: '42',
+                    contrepassation: '42' };
+  for (const motif of L.MOTIFS) {
+    assert.ok(fabriques[motif], `le motif ${motif} n'a pas de mouvement dans ce test : la liste fermée a bougé`);
+    const mvt = fabriques[motif]();
+    assert.ok(mvt.length > 0);
+    for (const t of mvt) {
+      assert.strictEqual(t.motif, motif);
+      assert.strictEqual(L.referenceBillet(t.motif, t.reference), attendu[motif],
+        `${motif} (${t.reference})`);
+      // Une CHAÎNE de chiffres, jamais un nombre : c'est du texte qu'on comparera à
+      // `matches.id::text`, sans aucun `cast`. Un `bigint` ne tient pas toujours dans un `Number`.
+      if (attendu[motif] !== null) assert.strictEqual(typeof L.referenceBillet(t.motif, t.reference), 'string');
+    }
+    // ET LA CONTRE-PASSATION DE CHACUN. `dotation` et `recharge` restent hors billet ; les trois
+    // motifs de billet se retrouvent par leur préfixe.
+    const contre = L.mouvementContrepassation({ transferts: mvt });
+    const attenduContre = motif === 'contrepassation' ? null : attendu[motif];
+    for (const t of contre)
+      assert.strictEqual(L.referenceBillet(t.motif, t.reference), attenduContre,
+        `contre-passation de ${motif} (${t.reference})`);
+  }
+  // LA LIMITE, NOMMÉE PLUTÔT QUE DÉCOUVERTE : contre-passer une contre-passation produit
+  // `contrepassation:mise:42`, que la règle ne ramène à aucun billet. Ce double geste n'a pas
+  // d'appelant — l'outil de la phase 04a corrige un mouvement d'origine — et l'élargir demanderait
+  // d'élargir aussi `REFERENCE_BILLET_SQL`, donc de re-décider des deux côtés à la fois.
+  // `docs/PHASE-04A.md` le consigne.
+  assert.strictEqual(L.referenceBillet('contrepassation', 'contrepassation:mise:42'), null);
+
+  // Ce qui ne désigne aucun billet rend `null` et ne lance pas : le livre porte du texte libre dans
+  // cette colonne, et une lecture d'agrégat qui lèverait sur une ligne bizarre refuserait un billet
+  // légitime.
+  for (const r of ['', '0', '007', '-1', '1.5', 'quarante-deux', '42:', ':42', '42 ', ' 42',
+                   'gain:42', 'gain:007', '9007199254740993'])
+    assert.strictEqual(L.referenceBillet('gain', r), /^[1-9][0-9]*$/.test(r) ? r : null, `gain ${r}`);
+  for (const r of ['', 'gain:', 'gain:0', 'gain:007', 'dotation:3', 'recharge:3:2026-09-15',
+                   'GAIN:42', 'gain:42:1', 'x:42', '42'])
+    assert.strictEqual(L.referenceBillet('contrepassation', r), null, `contrepassation ${r}`);
+  for (const r of [42, null, undefined, {}, ['42']])
+    assert.strictEqual(L.referenceBillet('gain', r), null, String(r));
+  // Un identifiant de billet plus grand que `Number.MAX_SAFE_INTEGER` traverse sans perte, parce
+  // qu'il ne devient jamais un nombre.
+  assert.strictEqual(L.referenceBillet('gain', '9007199254740993'), '9007199254740993');
+  // Un motif hors liste LANCE : la même règle que partout ailleurs dans ce fichier.
+  for (const mauvais of ['', 'MISE', 'depot', null, undefined])
+    assert.throws(() => L.referenceBillet(mauvais, '42'), /motif hors liste/, String(mauvais));
+});
+
+test('REFERENCE_BILLET_SQL est la MÊME règle, écrite une seule fois, et prête pour le schéma', () => {
+  // Même patron que `COMPTE_RE_SQL` : la chaîne est la source, le reste en dérive, et une garde
+  // textuelle d'un module ultérieur comparera le texte du schéma à cette chaîne. Il ne doit jamais
+  // exister deux écritures de la même règle — c'est le patron du `respawn()` défini deux fois, et
+  // ici la seconde vivrait dans un fichier `.sql` que personne ne relit.
+  assert.strictEqual(typeof L.REFERENCE_BILLET_SQL, 'string');
+  assert.ok(L.REFERENCE_BILLET_SQL.startsWith('case when ') && L.REFERENCE_BILLET_SQL.endsWith(' else null end'),
+    L.REFERENCE_BILLET_SQL);
+  assert.ok(!L.REFERENCE_BILLET_SQL.includes('\n'), 'une expression sur une seule ligne se compare sans normaliser');
+  // AUCUN `cast`, aucune conversion : on comparera du TEXTE à `matches.id::text`. Un
+  // `reference::bigint` lèverait `22P02` sur `gain:42`, et c'est tout le sujet de cette règle.
+  for (const interdit of ['::bigint', '::int', '::numeric', 'cast('])
+    assert.ok(!L.REFERENCE_BILLET_SQL.includes(interdit), interdit);
+  // Les trois motifs de billet et le motif de correction y sont nommés, et les identifiants y
+  // portent la même forme que dans la grammaire des comptes : pas de zéro de tête, jamais.
+  for (const m of ['mise', 'gain', 'remboursement', 'contrepassation'])
+    assert.ok(L.REFERENCE_BILLET_SQL.includes(`'${m}'`) || L.REFERENCE_BILLET_SQL.includes(`${m}|`)
+              || L.REFERENCE_BILLET_SQL.includes(`|${m}:`), m);
+  assert.ok(L.REFERENCE_BILLET_SQL.includes('[1-9][0-9]*'), L.REFERENCE_BILLET_SQL);
+  assert.ok(L.COMPTE_RE_SQL.includes('[1-9][0-9]*'), 'les deux règles doivent refuser le même zéro de tête');
+  // Le groupe des motifs est NON CAPTURANT : Postgres rend, par `substring(texte from motif)`, la
+  // première parenthèse CAPTURANTE. Capturer le motif d'origine rendrait « gain » là où on attend
+  // « 42 », et la lecture serait vide au lieu d'être fausse — donc silencieuse.
+  const m = /substring\(reference from '([^']+)'\)/.exec(L.REFERENCE_BILLET_SQL);
+  assert.ok(m, 'l\'extraction de la contre-passation n\'a pas été retrouvée dans l\'expression SQL');
+  assert.ok(m[1].includes('(?:'), 'le groupe des motifs doit être non capturant');
+  // Et l'expression extraite est CELLE QUE JAVASCRIPT APPLIQUE : on la rejoue sur les références que
+  // les mouvements produisent vraiment, et elle doit rendre ce que `referenceBillet` rend.
+  const sql = new RegExp(m[1]);
+  for (const ref of ['mise:42', 'gain:42', 'remboursement:42', 'dotation:3', 'recharge:3:2026-09-15',
+                     'contrepassation:mise:42', 'gain:007', 'gain:', '42']) {
+    const par = sql.exec(ref);
+    assert.strictEqual(par === null ? null : par[1], L.referenceBillet('contrepassation', ref), ref);
+  }
+});
+
+test('plafondVerdict est MONOTONE, et ramène l\'exposition réalisée à ZÉRO avant de comparer', () => {
+  const plafondCents = L.PLAFOND_JOUEUR_CENTS, billet = 39000;
+  // ACCUMULER DES PERTES N'ACHÈTE AUCUNE MARGE. L'exposition est nette — les billets perdus
+  // s'imputent sur les gagnés — mais une exposition négative reportée serait un compte d'épargne à
+  // moissonner : perdre cent parties achèterait le droit d'en gagner une très grosse.
+  const plancher = L.plafondVerdict({ expositionRealiseeCents: 0, expositionBilletCents: billet, plafondCents });
+  for (const perte of [-1, -1000, -100000, -L.PLAFOND_MAISON_CENTS]) {
+    const v = L.plafondVerdict({ expositionRealiseeCents: perte, expositionBilletCents: billet, plafondCents });
+    assert.deepStrictEqual({ ...v }, { ...plancher }, `${perte} a acheté de la marge`);
+    assert.strictEqual(v.expositionCents, billet);
+  }
+  // LA MONOTONIE : croître l'exposition ne fait JAMAIS repasser le verdict au vert.
+  let dejaFranchi = false;
+  let precedent = -1;
+  for (let realisee = -50000; realisee <= 250000; realisee += 137) {
+    const v = L.plafondVerdict({ expositionRealiseeCents: realisee, expositionBilletCents: billet, plafondCents });
+    assert.ok(v.expositionCents >= precedent, 'l\'exposition a reculé alors qu\'elle croissait');
+    precedent = v.expositionCents;
+    if (dejaFranchi) assert.ok(v.franchi, `le verdict est repassé au vert à ${realisee}`);
+    dejaFranchi = dejaFranchi || v.franchi;
+    assert.strictEqual(v.franchi, Math.max(0, realisee) + billet > plafondCents);
+    assert.strictEqual(v.plafondCents, plafondCents);
+  }
+  assert.ok(dejaFranchi, 'le plafond n\'a jamais été franchi : le balayage ne prouve rien');
+  // Monotone AUSSI en la taille du billet : une table plus chère ne peut pas rendre vert ce qu'une
+  // table moins chère rendait rouge.
+  let vu = false;
+  for (const { seats } of MODES_LEDGER) for (const miseCents of MISES_LEDGER) {
+    const v = L.plafondVerdict({ expositionRealiseeCents: 130000,
+                                 expositionBilletCents: pireCasDe(miseCents, seats), plafondCents });
+    if (v.franchi) vu = true;
+    else assert.ok(!vu || pireCasDe(miseCents, seats) < 26000);
+  }
+  // LA COMPARAISON EST STRICTE : il faut que le QUATRIÈME billet maximal passe, sans quoi
+  // `PLAFOND_TABLES_PAR_JOUR` en vaudrait trois et le second ancrage serait faux d'une table.
+  assert.strictEqual(L.plafondVerdict({ expositionRealiseeCents: 3 * billet,
+    expositionBilletCents: billet, plafondCents }).franchi, false);
+  assert.strictEqual(L.plafondVerdict({ expositionRealiseeCents: 3 * billet + 1,
+    expositionBilletCents: billet, plafondCents }).franchi, true);
+  // Le verdict est gelé : un appelant qui corrigerait `expositionCents` en place réécrirait la
+  // mesure au lieu de re-décider.
+  assert.ok(Object.isFrozen(plancher));
+  for (const mauvais of [1.5, NaN, Infinity, '0', null, undefined])
+    assert.throws(() => L.plafondVerdict({ expositionRealiseeCents: mauvais,
+      expositionBilletCents: 0, plafondCents }), /expositionRealiseeCents invalide/, String(mauvais));
+  for (const mauvais of [-1, 1.5, NaN, '0', null])
+    for (const champ of ['expositionBilletCents', 'plafondCents'])
+      assert.throws(() => L.plafondVerdict({ expositionRealiseeCents: 0, expositionBilletCents: 0,
+        plafondCents, [champ]: mauvais }), new RegExp(`${champ} invalide`), `${champ} ${mauvais}`);
+});
+
+test('LE PLAFOND EST UNE SOMME : on le franchit en POSANT DES ÉCRITURES, jamais en touchant un compteur', () => {
+  // La doctrine de `user_stats`, appliquée une fois de plus : un compteur qu'on incrémente est une
+  // case qu'on écrase, une somme sur des lignes immuables ne peut pas être fausse. Le corollaire est
+  // celui-ci, et il est testable : aucune colonne n'existe à lire, et RELIRE redonne le même chiffre.
+  const miseCents = 1000, seats = 50, billet = pireCasDe(miseCents, seats);
+  const p = C.cashoutCents(C.purseBound(miseCents, seats).maxCents);
+  let livre = [];
+  const references = [];
+  for (let id = 1; id <= L.PLAFOND_TABLES_PAR_JOUR; id++) {
+    references.push(String(id));
+    livre = livre.concat(L.mouvementMise({ userId: 1, matchId: id, miseCents }),
+      L.mouvementGain({ userId: 1, matchId: id, miseCents, grossCents: p.grossCents,
+                        feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+    const realisee = L.expositionDe(livre, references);
+    assert.strictEqual(realisee, id * billet, `après ${id} victoires maximales`);
+    // Le billet SUIVANT : il passe tant qu'on n'a pas consommé les quatre tables de la fenêtre.
+    const v = L.plafondVerdict({ expositionRealiseeCents: realisee, expositionBilletCents: billet,
+                                 plafondCents: L.PLAFOND_JOUEUR_CENTS });
+    assert.strictEqual(v.franchi, id >= L.PLAFOND_TABLES_PAR_JOUR, `billet ${id + 1}`);
+  }
+  assert.strictEqual(L.expositionDe(livre, references), L.PLAFOND_JOUEUR_CENTS,
+    'quatre tables maximales valent exactement le plafond par joueur');
+
+  // RELIRE REDONNE LE MÊME CHIFFRE, et l'ordre des écritures n'y change rien : c'est une somme, pas
+  // une machine à états. Le livre est fait d'objets GELÉS, donc la relecture ne peut pas le muter.
+  const relu = L.expositionDe(livre, references);
+  assert.strictEqual(relu, L.expositionDe(livre, references));
+  const melange = livre.slice().reverse();
+  assert.strictEqual(L.expositionDe(melange, references), relu, 'la somme dépend de l\'ordre des lignes');
+  for (const t of livre) assert.ok(Object.isFrozen(t), 'une écriture du livre n\'est pas gelée');
+
+  // ET IL N'EXISTE AUCUNE COLONNE À LIRE : le module n'exporte aucun compteur, aucun état, aucune
+  // fonction qui écrirait une exposition quelque part. Cinq constantes et quatre fonctions pures.
+  for (const nom of ['expositionBilletMaxCents', 'referenceBillet', 'expositionDe', 'plafondVerdict'])
+    assert.strictEqual(typeof L[nom], 'function', nom);
+  for (const absent of ['exposition', 'incrementerExposition', 'poserExposition', 'resetExposition',
+                        'expositionCourante', 'EXPOSITION'])
+    assert.strictEqual(L[absent], undefined, `${absent} est un compteur : l'exposition est une somme`);
+  // Une CINQUIÈME victoire maximale franchit le plafond, et le chiffre reste une somme d'écritures.
+  livre = livre.concat(L.mouvementMise({ userId: 1, matchId: 5, miseCents }),
+    L.mouvementGain({ userId: 1, matchId: 5, miseCents, grossCents: p.grossCents,
+                      feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  references.push('5');
+  assert.strictEqual(L.expositionDe(livre, references), 5 * billet);
+  assert.ok(L.plafondVerdict({ expositionRealiseeCents: L.expositionDe(livre, references),
+    expositionBilletCents: 0, plafondCents: L.PLAFOND_JOUEUR_CENTS }).franchi);
+});
+
+test('decouvertAutorise est FAUX hors des deux familles nommées, sur TOUTE forme que la grammaire engendre', () => {
+  // La garde qui empêchera un futur `maison:reserve` d'hériter du découvert par distraction. Jusqu'ici
+  // `decouvertAutorise` n'avait jamais été confrontée à l'ESPACE des comptes, seulement aux deux
+  // littéraux de `COMPTES_EMETTEURS` et à trois voisins choisis à la main.
+  const grammaire = new RegExp(L.COMPTE_RE_SQL);
+  let vus = 0;
+  const formes = [];
+  // Les trois familles paramétrées, balayées sur des identifiants de toutes les magnitudes qu'un
+  // `bigserial` produit — jusqu'au-delà de `Number.MAX_SAFE_INTEGER`, que le compte porte en texte.
+  const ids = ['1', '2', '7', '10', '99', '12345', '2147483647', '9007199254740993',
+               '9223372036854775807'];
+  for (const n of ids) {
+    formes.push(`joueur:${n}:disponible`, `joueur:${n}:quarantaine`, `enjeu:${n}`);
+  }
+  formes.push(L.MAISON_DOTATION, L.MAISON_COMMISSION, L.MAISON_CONTREPARTIE);
+  for (const compte of formes) {
+    assert.ok(grammaire.test(compte), `${compte} n'est pas engendré par la grammaire`);
+    const attendu = L.COMPTES_EMETTEURS.includes(compte);
+    assert.strictEqual(L.decouvertAutorise(compte), attendu, compte);
+    vus++;
+  }
+  assert.strictEqual(vus, ids.length * 3 + 3);
+  // DEUX comptes seulement, et ils sont nommés : le compte d'ÉMISSION et celui de CONTREPARTIE,
+  // dont le solde négatif EST la mesure qu'on cherche.
+  assert.strictEqual(formes.filter(c => L.decouvertAutorise(c)).length, 2);
+  assert.deepStrictEqual(L.COMPTES_EMETTEURS.slice(), [L.MAISON_DOTATION, L.MAISON_CONTREPARTIE]);
+  // Et LES SÉQUESTRES N'EN SONT PAS, sur toute la famille : c'est ce qui fait qu'un second gain sur
+  // un même billet devrait débiter un séquestre déjà vide, donc se fait refuser. « Un billet a au
+  // plus un gain » ne repose alors pas uniquement sur un index.
+  for (const n of ids) assert.ok(!L.decouvertAutorise(`enjeu:${n}`), n);
+  // Un compte hors grammaire LANCE, il ne rend pas « faux » : un troisième compte de maison qui
+  // n'existe pas encore doit se faire refuser à la grammaire AVANT d'arriver ici.
+  for (const futur of ['maison:reserve', 'maison:tresorerie', 'maison:depot', 'maison:retrait',
+                       'reel:maison:contrepartie', 'fictif:maison:dotation', 'maison:contrepartie:1',
+                       'MAISON:DOTATION', 'maison:contrepartie ', ''])
+    assert.throws(() => L.decouvertAutorise(futur), /hors grammaire/, futur);
+});
+
 console.log('Le grand livre : la réconciliation');
 // Un scénario minimal : un billet réglé, sa mise et son gain. C'est cette forme-là que
 // `ledgerReconcile` devra retrouver à la fin de chaque scénario d'`api/test.js` dans les modules
