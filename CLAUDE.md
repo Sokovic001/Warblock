@@ -348,8 +348,12 @@ tout solde y est modifiable depuis la console.
   de la phase 03 n'existe, et il ne lira que des lignes dont le rejeu a **convergé**.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
   de flottant, jamais d'écrasement de solde. **Faite, les cinq modules livrés** —
-  `docs/PHASE-03.md` — **avec une réserve écrite et non levée : le job Postgres n'a jamais été
-  vert.** Ce qu'elle décide, pour qu'on ne le redécouvre pas en cours de route : le solde est la
+  `docs/PHASE-03.md` — **et la réserve est LEVÉE depuis le 2026-09-15 : le job Postgres est vert,
+  seize vérifications passées contre une vraie base** (run 34894629071). Ce qu'il a fallu pour y
+  arriver mérite d'être su : le workflow ne se déclenchait que sur `main`, donc le job n'avait
+  jamais tourné une seule fois ; et à son premier passage il a refusé deux cas parce que le HARNAIS
+  ouvrait des billets sans avoir doté ses joueurs — la règle du découvert a fonctionné du premier
+  coup, sur le seul chemin où personne ne l'avait encore vue travailler. Ce qu'elle décide, pour qu'on ne le redécouvre pas en cours de route : le solde est la
   **somme** d'écritures immuables et jamais une colonne ; une écriture est une **ligne-transfert**
   (montant strictement positif, compte débité différent du compte crédité), si bien que la partie
   double est structurelle et non assertée ; la grammaire des comptes et les motifs vivent dans
