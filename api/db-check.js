@@ -103,6 +103,11 @@ const DANS_UNE_HEURE = new Date(Date.now() + 3600_000);
 const MAINTENANT = new Date();
 const SECRETE = 'a'.repeat(32);
 
+// Le fabricant ne pose QUE la ligne d'`users` : c'est un décor. Un cas qui a besoin d'argent écrit
+// sa propre dotation par `mouvementDotation`, parce que le montant fait souvent partie de ce que le
+// cas démontre — `ledgerSolde` en éprouve un de 1234 pour prouver que le pilote rend un nombre, et
+// une dotation posée d'office ici fausserait son assertion. Deux cas l'avaient oubliée, et la règle
+// du découvert les a refusés : « joueur:N porte 0 et ce mouvement lui demande 50 ».
 async function creerJoueur(client, nom) {
   const r = await client.query(
     `insert into users (auth_id, email, name, name_key)
@@ -262,6 +267,7 @@ async function main() {
       await client.query('begin');
       const u = await creerJoueur(client, 'Cle');
       const m = await ouvrirBillet(client, u);
+      await ledgerWrite(client, L.mouvementDotation({ userId: u, montantCents: 5000 }));
       const mise = L.mouvementMise({ userId: u, matchId: m, miseCents: 50 });
       // L'écrivain du pilote, tel quel : c'est lui qu'on éprouve, pas une requête réécrite pour
       // l'occasion. Un harnais qui recopie ce qu'il vérifie ne vérifie rien.
@@ -546,6 +552,10 @@ async function main() {
       await client.query('begin');
       const base = pgDb(URL_BASE);
       const u = await creerJoueur(client, 'Purge');
+      // Ce cas monte PLUSIEURS billets, chacun avec sa mise : la dotation doit couvrir toutes les
+      // mises que `monter` va débiter, sinon c'est la règle du découvert qui refuse et le cas
+      // accuse la purge de ce que le montage n'a pas payé.
+      await ledgerWrite(client, L.mouvementDotation({ userId: u, montantCents: 5000 }));
       const vieux = new Date(Date.now() - (L.TRACE_RETENTION_JOURS + 1) * 24 * 3600 * 1000);
       const recent = new Date(Date.now() - 3600_000);
       // Un billet réglé, sa trace, sa mise et son gain : les quatre conditions réunies.
