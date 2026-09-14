@@ -1146,6 +1146,12 @@ const RAPPORT = (extra = {}) => C.reportFrom({
 });
 // L'instant auquel un rapport HONNÊTE arrive : le sas, la partie, et trois secondes de réseau.
 const ARRIVEE = r => T0 + (C.LOBBY.wait + r.seconds + 3) * 1000;
+// Le solde d'un compte, lu sur les écritures et jamais sur une colonne. `soldeDe` et `reconcilier`
+// vivent plus bas dans ce fichier, avec le grand livre ; ces tests-ci en ont besoin plus tôt, et
+// une somme sur des lignes-transfert tient en une ligne.
+const soldeLu = (db, compte) => db.ledger.reduce((n, l) =>
+  n + (l.compte_credit === compte ? l.montant_cents : 0)
+    - (l.compte_debit === compte ? l.montant_cents : 0), 0);
 const rendre = (app, id, rapport, opts = {}) =>
   appel(app, { method: 'POST', path: `/api/match/${id}/result`, token: 'ok:u1:Loic', body: rapport, ...opts });
 const CLES_REGLEMENT = ['matchId', 'status', 'issue', 'controle', 'motif', 'grossCents', 'feeCents',
@@ -1516,6 +1522,90 @@ await test('LA SACOCHE PAYÉE N\'EST PAS LA MISE : un encaissement qui sort avec
   // qu'elle n'est plus la mise qu'elle n'est plus bornée.
   assert.ok(rep.corps.purseCents <= C.purseBound(b.corps.stakeCents, b.corps.seats).maxCents);
 });
+await test('LE PLANCHER D\'HORLOGE SUR LA ROUTE : un encaissement rendu à l\'instant du billet est refusé, et personne n\'est enfermé', async () => {
+  // LE CHEMIN QUI PORTE LE PLUS GROS PAIEMENT DU DOSSIER N'AVAIT AUCUN PLANCHER. `margeHorlogeS`
+  // vaut 120 pour un sas de 25, donc l'inéquation du contrôle `chronometre`, lue dans l'autre sens,
+  // n'exigeait AUCUNE attente réelle d'un encaissement Resurgence. La partie étant une fonction pure
+  // de `seed_public`, que le client reçoit avec son billet, chercher hors ligne la trace qui
+  // maximise l'argent emporté ne demandait donc qu'un processeur et de la patience.
+  const { db, app, horloge } = bancDeBillet({ randomSeed: () => 4 });
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const p = partieDe(b, { encaisserSiRiche: true });
+  assert.strictEqual(p.terminal, 'encaissement');
+  await poserTrace(app, b.corps.id, p.segments);
+
+  // Zéro seconde après l'ouverture du billet. La première moitié du test montre le trou : le
+  // chronomètre de la 02a laisse passer ce rapport à cet instant précis.
+  horloge.t = Date.parse(b.corps.openedAt);
+  assert.ok(p.rapport.seconds <= 0 - C.LOBBY.wait + C.ENVELOPPE.margeHorlogeS,
+    `la partie du test dure ${p.rapport.seconds} s : le chronomètre la refuserait déjà, et le test ne prouverait plus rien`);
+  assert.ok(p.rapport.seconds > C.ENVELOPPE.margePlancherS - C.LOBBY.wait,
+    `la partie du test dure ${p.rapport.seconds} s : trop courte pour que le plancher ait quoi que ce soit à exiger`);
+
+  const rep = await rendre(app, b.corps.id, p.rapport);
+  // AUCUN 500, ET C'EST LA MOITIÉ QUI COMPTE. Le dépôt a déjà payé une fois un refus arrivé jusqu'à
+  // une colonne `integer` : Postgres levait `22003`, la route rendait 500, et la ligne restait
+  // `open` — le joueur était enfermé dans un billet mort pendant les treize minutes de l'expiration,
+  // puisqu'il n'en a qu'un à la fois. Un refus de verdict n'est pas une panne : il clôt la ligne en
+  // `rejected` et rend le règlement, exactement comme `chronometre`, `victoire` ou `expire`.
+  assert.notStrictEqual(rep.code, 500, 'un refus de plancher est sorti en 500');
+  assert.strictEqual(rep.code, 200, JSON.stringify(rep.corps));
+  assert.strictEqual(rep.corps.status, 'rejected');
+  assert.strictEqual(rep.corps.issue, 'refus');
+  assert.strictEqual(rep.corps.controle, 'plancher', JSON.stringify(rep.corps));
+  assert.ok(rep.corps.motif && rep.corps.motif.length > 10, 'un refus doit dire pourquoi');
+  assert.strictEqual(rep.corps.netCents, 0);
+  assert.strictEqual(rep.corps.grossCents, 0);
+  assert.strictEqual(db.matches[0].status, 'rejected');
+  // Et rien n'est sorti de la caisse. Le séquestre se solde comme sur tout refus — une seule
+  // écriture, `enjeu → maison:contrepartie`, la mise que le joueur perd — mais AUCUNE ligne ne
+  // crédite le joueur, et la maison ne met rien au pot. Ce qui aurait été payé sans ce module se
+  // lit sur la ligne d'à côté.
+  const gains = db.ledger.filter(l => l.motif === 'gain');
+  assert.deepStrictEqual(gains.map(l => [l.compte_debit, l.compte_credit, l.montant_cents]),
+    [[`enjeu:${db.matches[0].id}`, 'maison:contrepartie', b.corps.stakeCents]],
+    'un règlement refusé a fait bouger autre chose que le séquestre');
+  assert.ok(C.cashoutCents(db.matches[0].purse_cents).netCents > 0,
+    'la sacoche rejouée ne payait rien : le test ne prouve pas que le plancher protège de l\'argent');
+  // Le séquestre est vide : la mise est partie chez la maison, elle n'attend plus personne.
+  assert.strictEqual(soldeLu(db, `enjeu:${db.matches[0].id}`), 0, 'le séquestre reste habité après un refus');
+
+  // PERSONNE N'EST ENFERMÉ : la ligne est close, donc le billet suivant s'ouvre dans la foulée.
+  const neuf = await demander(app, { ...DEMANDE, mode: 'resurgence', clientKey: 'apres-plancher' });
+  assert.strictEqual(neuf.code, 200, JSON.stringify(neuf.corps));
+});
+await test('le même encaissement, après l\'attente réelle, est RÉGLÉ et payé : le plancher renchérit, il n\'interdit pas', async () => {
+  // La seconde moitié de la démonstration, et celle qui garde l'arbitrage honnête : ce module ne
+  // ferme pas une porte, il ramène le solveur hors ligne au rythme d'un joueur. Celui qui a
+  // réellement attendu le sas puis joué sa partie touche exactement ce que la table promet — au
+  // BORD EXACT du plancher, et pas trois secondes après, sinon la marge pourrait glisser sans que
+  // rien ne tombe.
+  const { db, app, horloge } = bancDeBillet({ randomSeed: () => 4 });
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  const p = partieDe(b, { encaisserSiRiche: true });
+  await poserTrace(app, b.corps.id, p.segments);
+  horloge.t = Date.parse(b.corps.openedAt)
+    + (C.LOBBY.wait + p.rapport.seconds - C.ENVELOPPE.margePlancherS) * 1000;
+  const rep = await rendre(app, b.corps.id, p.rapport);
+  assert.strictEqual(rep.code, 200, JSON.stringify(rep.corps));
+  assert.strictEqual(rep.corps.status, 'settled');
+  assert.strictEqual(rep.corps.issue, 'encaissement');
+  assert.ok(rep.corps.netCents > 0, 'l\'encaissement honnête n\'a rien payé');
+  assert.strictEqual(rep.corps.netCents, C.cashoutCents(rep.corps.purseCents).netCents);
+  // La durée que le SERVEUR a rejouée est bien celle sur laquelle le plancher a été calculé : sans
+  // cette ligne, le test pourrait mesurer un bord qui n'est pas celui de la partie jugée.
+  assert.strictEqual(db.matches[0].seconds, p.rapport.seconds);
+  // Les trois jambes d'un gain qui paie : la maison met le reliquat au pot, la commission part, et
+  // le net va au joueur. C'est exactement l'exposition que le module 1 sait chiffrer.
+  const gains = db.ledger.filter(l => l.motif === 'gain');
+  assert.strictEqual(gains.length, 3, JSON.stringify(gains));
+  assert.ok(gains.some(l => l.compte_debit === 'maison:contrepartie'),
+    'la maison n\'a rien mis au pot : ce règlement ne l\'expose pas, donc il ne prouve rien');
+  assert.ok(gains.some(l => l.compte_credit === `joueur:${db.users[0].id}:disponible`
+                            && l.montant_cents === rep.corps.netCents),
+    'le net n\'a pas été crédité au joueur');
+  assert.strictEqual(soldeLu(db, `enjeu:${db.matches[0].id}`), 0, 'le séquestre reste habité après un règlement');
+});
 await test('le même billet réglé deux fois rend le PREMIER verdict, sans rien modifier', async () => {
   const { db, app, horloge } = bancDeBillet();
   const b = await demander(app);
@@ -1618,6 +1708,12 @@ await test('L\'ENVELOPPE RESTE, ET ELLE MORD SUR LES FAITS REJOUÉS : un résult
   // Et une partie refusée n'est ni réglée ni ouverte : aucune somme sur `status = 'settled'` ne la
   // verra jamais.
   assert.strictEqual(db.matches.filter(m => m.status === 'settled').length, 0);
+  // C'EST BIEN `chronometre` QUI PARLE, ET PAS `plancher`. Le plancher d'horloge de la 04a aurait
+  // refusé cet instant-là aussi — mais ce règlement ne paie rien, et il ne s'arme que là où de
+  // l'argent sort de la caisse. La marge large de 120 s reste donc la seule à regarder les
+  // règlements qui ne paient pas : un onglet endormi ne doit pas coûter une partie honnête.
+  assert.strictEqual(C.horlogePlancher({ openedAt: T0 }, p.rapport, T0), false,
+    'le plancher aurait refusé cet instant : c\'est bien qu\'il ne s\'est pas armé');
 });
 await test('un rapport hors du domaine d\'un integer est refusé en 400, et le billet reste réglable', async () => {
   // LA PANNE, DE BOUT EN BOUT. `deaths`, `damage` et `declaredNetCents` n'avaient aucune borne

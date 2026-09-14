@@ -2401,6 +2401,169 @@ test('les bornes du verdict viennent du billet, pas du mode d\'aujourd\'hui', ()
   const paye = V_RAPPORT({ seconds: 154, rank: 1, purseCents: 1200 });
   assert.strictEqual(verdict(b, paye, V_RENDU(paye)).netCents, C.cashoutCents(1200).netCents);
 });
+// ---- LE PLANCHER D'HORLOGE (phase 04a, module 2).
+//
+// Le billet de la table la plus chère du dossier : Resurgence à 10 $, cinquante sièges. C'est elle
+// qui porte le pire cas d'exposition, donc c'est sur elle que le plancher se juge.
+const V_RESURGENCE = () => V_BILLET({
+  mode: 'resurgence', seats: C.seatsOf(C.MODES.resurgence),
+  teamSize: C.MODES.resurgence.teamSize, stakeCents: C.toCents(10),
+});
+// L'encaissement maximal de cette table : toute la table dans une seule sacoche, sortie à 30 s.
+const V_ENCAISSEMENT_MAX = b => V_RAPPORT({
+  seconds: 30, kills: 20, deaths: 0, rank: 4, cashedOut: true,
+  purseCents: C.purseBound(b.stakeCents, b.seats).maxCents,
+});
+
+test('LE TROU EST MONTRÉ AVANT D\'ÊTRE FERMÉ : un encaissement Resurgence à 30 s, zéro seconde après le billet', () => {
+  // CE QUE CE TEST PROUVE, ET IL LUI FAUT LES DEUX MOITIÉS. La première montre le trou tel qu'il
+  // existait : aucune des bornes de la 02a ne touche ce rapport, contrôle par contrôle, y compris
+  // le chronomètre — `margeHorlogeS` vaut 120 pour un sas de 25, donc l'inéquation est satisfaite
+  // dès l'instant zéro. La ligne se réglait, et l'attente réelle exigée était NULLE.
+  //
+  // C'est ce qui dimensionne la phase : la partie est une fonction pure de `seed_public`, que le
+  // client reçoit avec son billet, et elle se rejoue en quelques centaines de millisecondes.
+  // Chercher hors ligne la trace qui maximise l'argent emporté ne demande aucun talent. Le plancher
+  // ne ferme pas cette porte — il la ramène au rythme d'un joueur.
+  const b = V_RESURGENCE();
+  const r = V_ENCAISSEMENT_MAX(b);
+  const ecouleS = 0;
+  const vies = C.livesFor(C.MODES.resurgence);
+  assert.ok(r.kills <= (b.seats - b.teamSize) * vies, 'kills : la 02a laissait passer');
+  assert.ok(r.deaths <= vies, 'morts : la 02a laissait passer');
+  assert.ok(r.cubes <= C.CUBE.max, 'cubes : la 02a laissait passer');
+  assert.ok(r.purseCents <= C.purseBound(b.stakeCents, b.seats).maxCents, 'sacoche : la 02a laissait passer');
+  assert.ok(r.seconds <= C.zoneTotalS(C.zonePlan(b.seed, C.MODES.resurgence)) + C.GRACE + C.ENVELOPPE.margeDureeS,
+    'durée : la 02a laissait passer');
+  assert.ok(r.seconds >= C.CASHOUT.lock, 'le verrou d\'encaissement est purgé : la 02a laissait passer');
+  assert.ok(r.seconds <= ecouleS - C.LOBBY.wait + C.ENVELOPPE.margeHorlogeS,
+    'le chronomètre de la 02a laissait passer ce rapport à l\'instant zéro : sans cela, il n\'y aurait pas de trou');
+  // Et voilà ce que ce règlement sortait de la caisse. Le pire cas du domaine, celui dont
+  // `api/ledger.js` dérive son plafond par joueur.
+  assert.strictEqual(C.cashoutCents(r.purseCents).netCents - b.stakeCents, 39000,
+    'la table la plus chère expose la maison de 39 000 centimes par billet');
+
+  // La seconde moitié : le plancher, et lui seul, refuse.
+  const v = verdict(b, r, V_T0 + ecouleS * 1000);
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.controle, 'plancher', JSON.stringify(v));
+  assert.ok(v.motif && v.motif.length > 10, 'un refus doit dire pourquoi');
+  assert.strictEqual(v.netCents, 0, 'un refus ne paie rien');
+  assert.strictEqual(v.grossCents, 0);
+  // La mesure survit au refus, comme sur tous les autres : la sacoche bornée sort quand même.
+  assert.strictEqual(v.sacocheCents, C.purseBound(b.stakeCents, b.seats).maxCents);
+});
+test('le même encaissement, après une attente réelle honnête, est ACCEPTÉ et payé', () => {
+  // Le plancher renchérit, il n'interdit pas : le joueur qui a réellement attendu le sas puis joué
+  // sa partie touche exactement ce que la table promet.
+  const b = V_RESURGENCE();
+  const r = V_ENCAISSEMENT_MAX(b);
+  const v = verdict(b, r, V_RENDU(r));
+  assert.strictEqual(v.ok, true, `${v.controle} — ${v.motif}`);
+  assert.strictEqual(v.issue, 'encaissement');
+  assert.strictEqual(v.netCents, C.cashoutCents(r.purseCents).netCents);
+  assert.strictEqual(v.feeCents + v.netCents, v.grossCents);
+  // LE BORD EXACT, DES DEUX CÔTÉS. Le plancher est `LOBBY.wait + secondes − margePlancherS`, et il
+  // est atteint à la milliseconde : une de moins refuse, la borne elle-même passe. Sans ces deux
+  // assertions, un décalage d'une seconde dans la marge ne ferait tomber aucun test.
+  const bord = V_T0 + (C.LOBBY.wait + r.seconds - C.ENVELOPPE.margePlancherS) * 1000;
+  assert.strictEqual(verdict(b, r, bord).ok, true, 'la borne elle-même est acceptée');
+  assert.strictEqual(verdict(b, r, bord - 1).controle, 'plancher', 'une milliseconde plus tôt est refusée');
+  // Et la fonction pure rend la même chose que le verdict, puisque c'est elle qu'il appelle.
+  assert.strictEqual(C.horlogePlancher(b, r, bord), true);
+  assert.strictEqual(C.horlogePlancher(b, r, bord - 1), false);
+});
+test('un règlement qui ne paie RIEN n\'est jamais refusé par le plancher : la marge large le couvre', () => {
+  // L'ARBITRAGE EST ÉCRIT ICI, et il n'a pas changé depuis la 02a : un onglet en arrière-plan, un
+  // téléphone endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheur, et
+  // refuser une partie honnête coûte un joueur. Le plancher ne s'arme donc que là où de l'argent
+  // sort réellement de la caisse ; partout ailleurs, `margeHorlogeS` et ses 120 secondes couvrent
+  // toujours.
+  const b = V_RESURGENCE();
+  // (1) Une défaite, au bord même de la tolérance large, plus de deux minutes AVANT ce que le
+  //     plancher exigerait d'un règlement qui paie.
+  const perdue = V_RAPPORT({ seconds: 154, rank: 4, deaths: C.livesFor(C.MODES.resurgence) });
+  const tard = V_RENDU(perdue, b, 3 - C.ENVELOPPE.margeHorlogeS);
+  assert.strictEqual(C.horlogePlancher(b, perdue, tard), false, 'le plancher n\'aurait pas été franchi');
+  const d = verdict(b, perdue, tard);
+  assert.strictEqual(d.ok, true, `une défaite refusée pour une horloge : ${d.controle} — ${d.motif}`);
+  assert.strictEqual(d.issue, 'defaite');
+  // (2) Un encaissement dont la commission absorbe tout : un centime de sacoche, zéro de net. Il ne
+  //     sort rien de la caisse, donc il n'a rien à protéger.
+  const miette = V_RAPPORT({ seconds: 30, rank: 4, cashedOut: true, purseCents: 1 });
+  const nul = verdict(b, miette, V_T0);
+  assert.strictEqual(nul.ok, true, `${nul.controle} — ${nul.motif}`);
+  assert.strictEqual(nul.issue, 'encaissement');
+  assert.strictEqual(nul.netCents, 0, 'un centime de sacoche ne paie rien après commission');
+  // (3) LE FIL DU RASOIR : deux centimes de sacoche paient UN centime, et ce centime-là suffit à
+  //     armer le plancher. C'est la preuve que la condition d'armement est bien « ça paie », et pas
+  //     un seuil choisi au jugé.
+  const sou = V_RAPPORT({ seconds: 30, rank: 4, cashedOut: true, purseCents: 2 });
+  assert.strictEqual(C.cashoutCents(2).netCents, 1);
+  assert.strictEqual(verdict(b, sou, V_T0).controle, 'plancher');
+});
+test('la branche victoire garde ses DEUX planchers, et le nouveau ne les double pas', () => {
+  // Le plancher d'horloge s'arme sur tout chemin qui paie, victoire comprise — mais il est écrit
+  // UNE fois, après le calcul du montant, et la branche `victoire` garde ses contrôles à elle, qui
+  // mordent plus tôt et sous leur propre motif. Deux inéquations de même sens dans la même fonction
+  // seraient deux règles à corriger le jour où l'une bouge.
+  const b = V_BILLET();
+  // (1) Le plancher démontrable depuis les règles : (vies − 1) réapparitions pour épuiser le
+  //     dernier adversaire. L'horloge du serveur a tout le temps du monde, et il mord quand même.
+  const eclair = V_RAPPORT({ seconds: 1, rank: 1, purseCents: 500 });
+  assert.strictEqual(verdict(b, eclair, V_T0 + 3600_000 - 1).controle, 'victoire',
+    'le plancher des réapparitions a disparu');
+  // (2) Le plancher d'horloge propre à la victoire, `margeVictoireS`. Il tombe AVANT le nouveau, et
+  //     c'est son motif qui sort : la branche n'a pas changé de comportement.
+  const tot = V_RAPPORT({ seconds: 100, rank: 1, purseCents: 500 });
+  assert.strictEqual(verdict(b, tot, V_T0 + 30_000).controle, 'victoire',
+    'le refus d\'une victoire trop précoce doit rester nommé `victoire`, pas `plancher`');
+  // (3) Et la victoire au bord exact de `margeVictoireS` passe toujours : les deux marges valent 30
+  //     pour la même raison — elles doivent couvrir tout le sas — donc le nouveau contrôle ne
+  //     resserre rien sur ce chemin-là.
+  assert.strictEqual(C.ENVELOPPE.margePlancherS, C.ENVELOPPE.margeVictoireS,
+    'les deux marges répondent à la même question : le sas peut avoir été plus court qu\'il n\'y paraît');
+  assert.ok(C.ENVELOPPE.margePlancherS > C.LOBBY.wait,
+    'une marge de plancher plus courte que le sas refuserait des règlements honnêtes');
+  const juste = V_RAPPORT({ seconds: 154, rank: 1, purseCents: 500 });
+  assert.strictEqual(verdict(b, juste, V_RENDU(juste, b, -C.ENVELOPPE.margeVictoireS)).ok, true);
+  // Et la garde textuelle : un seul appel, et pas dans la branche victoire.
+  const corps = core.slice(core.indexOf('function matchVerdict('), core.indexOf('  return { MAP, PLAYERS,'));
+  assert.ok(corps.length > 2000, 'le corps de matchVerdict n\'a pas été retrouvé');
+  assert.strictEqual((corps.match(/horlogePlancher\(/g) || []).length, 1,
+    'le plancher doit être armé une seule fois, sur le chemin qui paie');
+  const branche = corps.slice(corps.indexOf('if (victoire) {'), corps.indexOf('// Le verrou d\'encaissement'));
+  assert.ok(branche.includes('margeVictoireS') && branche.includes('RESPAWN'),
+    'la branche victoire a perdu l\'un de ses deux planchers, ou la découpe a glissé');
+  assert.ok(!branche.includes('horlogePlancher'),
+    'le plancher est dupliqué dans la branche victoire : deux inéquations de même sens, une seule à corriger le jour où l\'une bouge');
+});
+test('horlogePlancher ne lit AUCUNE horloge : elle la reçoit, comme renonciationOuverte', () => {
+  // La jumelle du contrôle `chronometre`, et la même discipline que la fenêtre de renoncement : une
+  // horloge lue à l'intérieur rendrait la fonction intestable et donnerait deux réponses
+  // différentes des deux côtés du réseau.
+  const d = core.indexOf('function horlogePlancher(');
+  assert.ok(d >= 0, 'horlogePlancher n\'a pas été retrouvée dans WBCore');
+  const texte = core.slice(d, core.indexOf('\n  }', d))
+    .split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  for (const interdit of ['Date.now', 'new Date', 'performance', 'Math.random', 'document', 'THREE'])
+    assert.ok(!texte.includes(interdit), `le plancher lit ${interdit}`);
+  // Mêmes arguments, même réponse, mille fois de suite.
+  const b = V_BILLET(), r = V_RAPPORT({ seconds: 60 });
+  const a = C.horlogePlancher(b, r, V_T0 + 50_000);
+  for (let i = 0; i < 1000; i++) assert.strictEqual(C.horlogePlancher(b, r, V_T0 + 50_000), a);
+  // Elle accepte les trois écritures d'un instant, comme le reste du verdict : le pilote Postgres
+  // rend une `timestamptz` en objet Date, une réponse JSON la rend en chaîne ISO, un test la donne
+  // en nombre. Les trois doivent répondre pareil, sinon le plancher dépendrait de la plomberie.
+  const t = V_T0 + (C.LOBBY.wait + 60 - C.ENVELOPPE.margePlancherS) * 1000;
+  for (const ouvert of [V_T0, new Date(V_T0), new Date(V_T0).toISOString()])
+    for (const maintenant of [t, new Date(t), new Date(t).toISOString()])
+      assert.strictEqual(C.horlogePlancher({ openedAt: ouvert }, r, maintenant), true);
+  // Un plancher qu'on ne sait pas mesurer ne se franchit pas : billet illisible, rapport illisible,
+  // horloge absente rendent tous `false`. C'est le sens prudent — sur un chemin qui paie.
+  for (const cas of [[null, r, t], [{}, r, t], [b, null, t], [b, { seconds: 'x' }, t], [b, r, null], [b, r, 'demain']])
+    assert.strictEqual(C.horlogePlancher(cas[0], cas[1], cas[2]), false, JSON.stringify(cas));
+});
 test('le verdict ne rend aucun motif absent d\'ENVELOPPE, et aucune ligne d\'ENVELOPPE n\'est morte', () => {
   // Ce test est le seul qui relie la liste écrite au code qui l'applique. Ajouter un contrôle sans
   // l'inscrire dans ENVELOPPE, ou laisser une ligne qui ne refuse plus rien, le fait tomber.

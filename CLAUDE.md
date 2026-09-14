@@ -50,9 +50,9 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 405 tests sur le jeu (`node test.js`) et
-  213 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 222 en tout — de bout en bout avec de la vraie
+- **Lancer `npm test` après chaque modification.** 410 tests sur le jeu (`node test.js`) et
+  215 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 224 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -179,6 +179,21 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **L'enveloppe de `matchVerdict` est confrontée au code du jeu**, et plus à l'intuition : les
   chiffres des cinquante parties jouées par la machine — kills, durée, rang, cubes, sacoche — passent
   tous le verdict. Le rang y frôle sa borne, et c'est exactement celle que la 02a avait dû élargir.
+- **Un règlement qui PAIE exige un plancher d'horloge, et lui seul.** Le contrôle `chronometre` est
+  une borne haute ; lue à l'envers, la même inéquation est un plancher, et à 120 s de marge pour un
+  sas de 25 il n'exigeait **rien** — un encaissement Resurgence annoncé à 30 s simulées passait dès
+  l'instant zéro, sur le chemin qui porte le plus gros paiement du dossier. `WBCore.horlogePlancher`
+  est la jumelle pure du contrôle existant : elle ne lit aucune horloge, elle la **reçoit**, comme
+  `renonciationOuverte`. Sa marge est nommée à part — `ENVELOPPE.margePlancherS = 30`, du même ordre
+  que `margeVictoireS` et pour la même raison : elle doit couvrir tout le sas. Le refus `plancher`
+  est armé **une seule fois**, après le calcul du montant et sous `netCents > 0` : il couvre donc
+  l'encaissement **et** la victoire sans dupliquer les deux planchers propres à la branche
+  `victoire`, et il ne touche **jamais** un règlement qui ne sort rien de la caisse — défaite,
+  victoire les poches vides, sacoche d'un centime absorbée par la commission — que `margeHorlogeS`
+  et ses 120 s continuent seules de regarder. **Ce n'est pas de l'anti-triche** : la partie est une
+  fonction pure de `seed_public` et se rejoue en quelques centaines de millisecondes, donc un
+  solveur hors ligne reste possible ; il doit désormais attendre pour encaisser, ce qui le ramène au
+  rythme d'un joueur. Un renchérissement, pas une fermeture.
 - **L'argent se conserve à chaque pas de la vraie simulation** : sacoches + sacoches tombées au sol
   + encaissé = mise × sièges, sur les quatre tables et les cinq modes, sur un banc qui appelle les
   fonctions de `WBSim` telles quelles. C'est cette conservation qui fonde `purseBound`, donc le
@@ -422,6 +437,11 @@ tout solde y est modifiable depuis la console.
     `plafondVerdict`, plus l'épreuve exhaustive de `decouvertAutorise` sur l'espace des comptes.
     **Aucun appelant, aucune route, aucune colonne** : le dépôt ne change pas de comportement d'un
     octet, et la borne n'existe pas encore.
+    *Module 2* : **livré**. La marge d'horloge se resserre là où elle protège de l'argent —
+    `WBCore.horlogePlancher`, `ENVELOPPE.margePlancherS = 30`, le refus `plancher` armé sur tout
+    règlement qui paie, encaissement compris. `SIM_VERSION` ne bouge pas, le sas ne reçoit rien, et
+    `api/app.js` n'a pas changé d'une virgule : un refus de verdict clôt déjà la ligne en `rejected`
+    et rend le règlement, jamais un 500.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.

@@ -2701,6 +2701,7 @@ const WBCore = (function(){
       morts:        'plus de morts que de vies',
       duree:        'une partie plus longue que tout le plan de zone',
       chronometre:  'une durée que l\'horloge du serveur n\'a pas eu le temps de contenir',
+      plancher:     'un règlement qui PAIE annoncé avant que l\'horloge du serveur n\'ait eu la place de contenir le sas puis la partie',
       victoire:     'une victoire annoncée avant que l\'horloge du serveur ne l\'autorise',
       encaissement: 'un encaissement Resurgence avant la fin du verrou de CASHOUT.lock',
       cubes:        'plus de cubes que CUBE.max',
@@ -2714,12 +2715,38 @@ const WBCore = (function(){
     // en phase 02a : accepter une partie douteuse coûte une ligne de statistique qui ne vaut rien,
     // refuser une partie honnête coûte un joueur. Elles se resserreront quand elles protégeront de
     // l'argent, sur les écarts réellement mesurés.
+    //
+    // LA DATE DE PÉREMPTION EST ÉCHUE POUR LA MOITIÉ D'ENTRE ELLES, ET C'EST LA PHASE 04a. Elles
+    // se resserrent là où elles protègent de l'argent, et NULLE PART AILLEURS : `margeDureeS` et
+    // `margeHorlogeS` restent à 120 s, parce qu'un joueur qui perd n'a rien à gagner à mentir sur
+    // son horloge et qu'un onglet en arrière-plan, un téléphone endormi et une horloge locale
+    // fausse restent beaucoup plus fréquents qu'un tricheur.
     margeDureeS: 120,
     margeHorlogeS: 120,
     // Plus serrée que les deux autres, parce qu'une victoire est une revendication sur le pot.
     // Mais strictement plus grande que `LOBBY.wait` : un billet demandé à la fin du sas donne un
     // coup d'envoi plus tôt que `openedAt + LOBBY.wait`, et cet écart-là est honnête.
     margeVictoireS: 30,
+    // ---- LA MARGE DU PLANCHER, ET POURQUOI ELLE EST NOMMÉE À PART.
+    //
+    // `margeHorlogeS` tient une borne HAUTE — « la partie annoncée n'est pas plus longue que le
+    // temps écoulé » — et la même inéquation, lue dans l'autre sens, est un PLANCHER :
+    // `ecouleS >= LOBBY.wait + secondes - marge`. À 120 s de marge pour 25 s de sas, ce plancher
+    // ne demande RIEN : un encaissement Resurgence annoncé à 30 s simulées le franchit dès la
+    // milliseconde qui suit l'ouverture du billet. L'attente réelle exigée était donc nulle sur le
+    // chemin qui porte le plus gros paiement du dossier.
+    //
+    // CE QUE ÇA VAUT, ÉCRIT SANS L'EMBELLIR : la partie est une fonction PURE de `seed_public`,
+    // que le client reçoit avec son billet, et `REPLAY_BUDGET_MS` prouve qu'elle se rejoue en
+    // quelques centaines de millisecondes. Chercher hors ligne la trace qui maximise l'argent
+    // emporté ne demande aucun talent et se parallélise. Ce plancher NE FERME PAS cette porte — il
+    // la ramène au rythme d'un joueur, c'est-à-dire qu'il renchérit, et rien de plus. La seule
+    // doctrine qui la fermerait est ailleurs, et elle n'est pas dans cette phase.
+    //
+    // Le chiffre est du même ordre que `margeVictoireS`, et pour la même raison : il doit couvrir
+    // tout le sas, parce qu'un billet demandé à la fin du sas donne un coup d'envoi plus tôt que
+    // `openedAt + LOBBY.wait`, et ce joueur-là est honnête.
+    margePlancherS: 30,
   };
   // Un instant en millisecondes, quelle que soit la façon dont il est écrit. Le pilote Postgres
   // rend une `timestamptz` en objet Date, une réponse JSON la rend en chaîne ISO, et un test la
@@ -2730,6 +2757,30 @@ const WBCore = (function(){
     if (typeof v === 'string') { const n = Date.parse(v); return Number.isFinite(n) ? n : null; }
     if (v && typeof v.getTime === 'function') { const n = v.getTime(); return Number.isFinite(n) ? n : null; }
     return null;
+  }
+  // ---- LE PLANCHER D'HORLOGE. « Le temps réellement écoulé depuis l'ouverture du billet a-t-il eu
+  // la place de contenir le sas PUIS la partie annoncée ? »
+  //
+  // PURE, et elle ne lit AUCUNE horloge : elle la reçoit, exactement comme `renonciationOuverte`.
+  // C'est ce qui permet au serveur de l'appeler avec la sienne et à un test de l'appeler avec un
+  // nombre, sans que l'une des deux ait à deviner l'autre.
+  //
+  // Ce n'est pas une inéquation nouvelle : c'est la jumelle du contrôle `chronometre`, lue dans
+  // l'autre sens. `chronometre` refuse une partie plus LONGUE que le temps écoulé ; celle-ci refuse
+  // un règlement rendu plus TÔT que le temps écoulé ne l'autorise. Elles diffèrent par leur marge,
+  // et c'est tout le sujet : la large couvre les horloges qui mentent sans enjeu, la serrée garde
+  // les chemins d'où l'argent sort.
+  //
+  // Elle rend `true` quand le temps a eu la place, `false` sinon — et `false` aussi sur un billet
+  // ou un rapport illisible, parce qu'un plancher qu'on ne sait pas mesurer ne se franchit pas.
+  function horlogePlancher(billet, rapport, maintenant){
+    const ouvert = instantMs(billet && billet.openedAt), t = instantMs(maintenant);
+    // `Number(null)` vaut zéro, et un rapport absent deviendrait alors une partie de zéro seconde,
+    // c'est-à-dire un plancher que tout franchit. Le rapport doit être un objet et sa durée un
+    // nombre, sinon on ne sait pas mesurer.
+    const secondes = (rapport && typeof rapport === 'object') ? Number(rapport.seconds) : NaN;
+    if (ouvert === null || t === null || !Number.isFinite(secondes)) return false;
+    return t - ouvert >= (LOBBY.wait + secondes - ENVELOPPE.margePlancherS) * 1000;
   }
   // Le verdict lui-même. Fonction PURE : le billet, le rapport et l'heure entrent, un refus motivé
   // ou un règlement sort. Le billet attendu porte `mode`, `stakeCents`, `seats`, `teamSize`,
@@ -2884,6 +2935,21 @@ const WBCore = (function(){
     // rendre.
     if (!encaissement && !victoire) return regle('defaite', 0, 0, 0);
     const p = cashoutCents(sacocheCents);
+    // ---- LE PLANCHER D'HORLOGE, ARMÉ SUR TOUT CHEMIN QUI PAIE, ET ÉCRIT UNE SEULE FOIS.
+    //
+    // Il est ici, après le calcul du montant et sous la condition `netCents > 0`, pour deux raisons
+    // qui tiennent l'arbitrage de toute cette enveloppe :
+    // — un règlement qui ne sort RIEN de la caisse — une défaite, une victoire les poches vides,
+    //   une sacoche d'un centime que la commission absorbe — n'a rien à protéger, et le refuser
+    //   coûterait un joueur honnête dont l'onglet a dormi. La marge large de `margeHorlogeS` le
+    //   couvre, et continue de le couvrir ;
+    // — l'écrire ici plutôt que dans chaque branche le pose sur l'encaissement ET sur la victoire
+    //   sans le dupliquer. La branche `victoire` garde ses deux planchers à elle — (vies − 1)
+    //   réapparitions, puis `margeVictoireS` — qui mordent plus tôt et sous leur propre motif ;
+    //   celui-ci existe pour l'encaissement Resurgence, qui n'en avait aucun et qui porte le plus
+    //   gros paiement du dossier.
+    if (p.netCents > 0 && !horlogePlancher(b, r, tMs))
+      return refus('plancher', `Règlement de ${r.seconds} s payé ${p.netCents} centimes, annoncé ${Math.round(ecouleS)} s après l'ouverture du billet : il en faut au moins ${LOBBY.wait + r.seconds - ENVELOPPE.margePlancherS} pour contenir le sas puis la partie.`);
     return regle(encaissement ? 'encaissement' : 'victoire', p.grossCents, p.feeCents, p.netCents);
   }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
@@ -2894,7 +2960,7 @@ const WBCore = (function(){
            SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            FLUX, fluxSalt, fluxSeed, makeFlux, melangeSeme, UNIT_N, UNIT_COS, UNIT, unitAt, unitFrom, dist,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, REFUS_SAS, refusDuBillet, refusMessage, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
+           NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, REFUS_SAS, refusDuBillet, refusMessage, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, horlogePlancher, matchVerdict,
            TRACE, TRACE_ALPHABET, traceDir, traceMots, traceEntree, traceQuant, traceViseeMots, traceVisee,
            traceMaxSteps, traceEnregistreur, traceDecode,
            DIGESTS_MOT, DIGESTS_MAX, digestsEncode, digestsDecode, digestsDiff,

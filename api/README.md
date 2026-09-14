@@ -393,7 +393,8 @@ l'accompagne.
 
 Elle refuse ce qui est **impossible**, et rien d'autre. La liste des contrôles vit dans la constante `ENVELOPPE`,
 à côté de la fonction : plus de kills que adversaires × vies, une partie plus longue que tout le
-plan de zone, une durée que son propre chronomètre n'a pas eu le temps de contenir, une victoire
+plan de zone, une durée que son propre chronomètre n'a pas eu le temps de contenir, un règlement qui
+**paie** annoncé avant que l'horloge n'ait eu la place de contenir le sas puis la partie, une victoire
 annoncée avant que son horloge ne l'autorise, un encaissement Resurgence avant la fin du verrou de
 `CASHOUT.lock`, plus de cubes que `CUBE.max`, un rang hors de la table, plus de morts que de vies, une sacoche au-delà de
 `mise × sièges`, un billet expiré. La borne de sacoche joue depuis peu un second rôle, écrit dans
@@ -408,6 +409,37 @@ subsiste. « Plus de kills que d'adversaires » : non, chacun a trois vies, deux
 Les tolérances d'horloge sont **volontairement larges** : un onglet en arrière-plan, un téléphone
 endormi et une horloge locale fausse sont beaucoup plus fréquents qu'un tricheur. Accepter une partie
 douteuse coûte une ligne de statistique, refuser une partie honnête coûte un joueur.
+
+### Le **plancher d'horloge**, et il ne s'arme que là où de l'argent sort (phase 04a)
+
+La 02a avait écrit la date de péremption de ces tolérances — « elles se resserreront quand elles
+protégeront de l'argent » — et elle est échue. Le contrôle `chronometre` est une borne **haute** : la
+partie annoncée doit tenir dans le temps écoulé. Lue dans l'autre sens, la même inéquation est un
+**plancher** : `ecoulé >= LOBBY.wait + secondes − marge`. Avec `margeHorlogeS = 120` pour un sas de
+25 secondes, ce plancher n'exigeait **rien** : un encaissement Resurgence annoncé à 30 secondes
+simulées le franchissait dès l'instant où le billet s'ouvrait, et le seul autre plancher d'horloge
+de la fonction ne s'armait que sur la branche `victoire`.
+
+Ce n'était donc pas une inéquation nouvelle qu'il fallait écrire, c'était la **marge** qu'il fallait
+resserrer là où elle protège de l'argent. `WBCore.horlogePlancher(billet, rapport, maintenant)` est
+la jumelle exacte du contrôle existant, pure et **recevant** son horloge comme
+`renonciationOuverte` ; sa marge est nommée à part, `ENVELOPPE.margePlancherS = 30`, du même ordre
+que `margeVictoireS` et pour la même raison — elle doit couvrir tout le sas, parce qu'un billet
+demandé à la fin du sas donne un coup d'envoi plus tôt que `openedAt + LOBBY.wait`.
+
+Le refus s'appelle `plancher`. Il est armé **une seule fois**, après le calcul du montant et sous la
+condition `netCents > 0`, ce qui le pose sur l'encaissement **et** sur la victoire sans le dupliquer :
+la branche `victoire` garde ses deux contrôles à elle — `(vies − 1) × RESPAWN` puis `margeVictoireS`
+— qui mordent plus tôt et sous leur propre motif. Un règlement qui ne sort **rien** de la caisse —
+une défaite, une victoire les poches vides, une sacoche d'un centime que la commission absorbe — n'est
+jamais refusé par lui : `margeHorlogeS` et ses 120 secondes continuent seules de le regarder.
+
+**Ce que cela ne fait pas, écrit sans l'embellir.** La partie est une fonction pure de `seed_public`,
+que le client reçoit avec son billet, et `REPLAY_BUDGET_MS` prouve qu'elle se rejoue en quelques
+centaines de millisecondes : chercher hors ligne la trace qui maximise l'argent emporté ne demande
+aucun talent et se parallélise. C'est l'attaque la moins chère du dossier, plus forte que l'aimbot et
+l'ESP, et c'est elle qui dimensionne le plafond de la 04a. Ce plancher ne la ferme pas — il la ramène
+au **rythme d'un joueur**. C'est un renchérissement, pas une défense anti-triche.
 
 ### L'aveu de la 02a est levé : le net sort de la partie rejouée
 
@@ -1223,7 +1255,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             213 tests sans rien installer, 222 avec jose
+test.js             215 tests sans rien installer, 224 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1326,8 +1358,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 213 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 222 : les 213, plus la chaîne complète de vérification
+node api/test.js          # 215 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 224 : les 215, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```

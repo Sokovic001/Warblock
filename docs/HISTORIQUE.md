@@ -418,6 +418,59 @@ dans `docs/PHASE-04A.md` : si le module qui branche glissait, cinq constantes et
 resteraient du code que personne n'aurait vu tourner ailleurs que dans `api/test.js`. À ce stade,
 **405 tests sur le jeu et 213 sur l'API** sans rien installer, 222 avec `jose`.
 
+### L'attente réelle exigée d'un encaissement était NULLE — phase 04a, module 2
+
+La 02a avait écrit ses tolérances larges avec leur raison — « aucun argent n'est en jeu, accepter une
+partie douteuse coûte une ligne de statistique, refuser une partie honnête coûte un joueur » — et
+avec leur date de péremption, dans le code : « elles se resserreront quand elles protégeront de
+l'argent ». Ce module est cette date.
+
+Ce qui a été trouvé, et il n'y avait rien à deviner, seulement à relire une inéquation dans l'autre
+sens. `matchVerdict` portait déjà un contrôle nommé `chronometre` : `r.seconds > ecouleS −
+LOBBY.wait + ENVELOPPE.margeHorlogeS`. C'est une borne **haute** — la partie annoncée ne peut pas
+être plus longue que le temps écoulé. Retournée, c'est exactement un **plancher** : `ecouleS >=
+LOBBY.wait + r.seconds − marge`. Or la marge valait 120 et le sas 25 : un encaissement Resurgence
+annoncé à 30 secondes simulées satisfaisait `30 <= ecouleS − 25 + 120` **dès `ecouleS = 0`**.
+L'attente réelle exigée était donc nulle, et le seul autre plancher d'horloge de la fonction ne
+s'armait que dans la branche `victoire` — tout le chemin d'encaissement, celui qui porte le pire cas
+de 39 000 centimes d'exposition, n'en avait aucun.
+
+**Ce n'était donc pas une inéquation nouvelle à écrire, c'était une marge à resserrer là où elle
+protège de l'argent**, et c'est ce qui rend ce module si petit. `WBCore.horlogePlancher(billet,
+rapport, maintenant)` est la jumelle exacte du contrôle existant : pure, elle ne lit aucune horloge,
+elle la **reçoit**, comme `renonciationOuverte`. Sa marge est nommée à part,
+`ENVELOPPE.margePlancherS = 30`, et pas confondue avec la large : `margeDureeS` et `margeHorlogeS`
+restent à 120 pour les chemins qui ne paient rien, parce qu'un joueur qui perd n'a rien à gagner à
+mentir sur son horloge et qu'un onglet en arrière-plan reste beaucoup plus fréquent qu'un tricheur.
+
+Deux décisions d'écriture méritent d'être retenues, parce qu'elles ont chacune failli devenir une
+seconde règle. La première : le refus est armé **une seule fois**, après le calcul du montant et sous
+la condition `netCents > 0`. Cela le pose sur l'encaissement **et** sur la victoire sans le dupliquer
+— la branche `victoire` garde ses deux planchers à elle, `(vies − 1) × RESPAWN` puis `margeVictoireS`,
+qui mordent plus tôt et sous leur propre motif — et cela le retire de tout règlement qui ne sort rien
+de la caisse. Un test tient le fil du rasoir : une sacoche d'un centime paie zéro après commission et
+n'est pas regardée, deux centimes en paient un et arment le plancher. La seconde : `Number(null)` vaut
+zéro, donc un rapport absent serait devenu une partie de zéro seconde, c'est-à-dire un plancher que
+tout franchit. Un rapport illisible rend `false`, comme un billet sans heure d'ouverture.
+
+**Ce que ce module ne fait pas, et il faut le lire comme tel.** Il ne rend pas la partie honnête. La
+partie est une fonction **pure** de `seed_public`, que le client reçoit avec son billet, et
+`REPLAY_BUDGET_MS = 2000` prouve qu'elle se rejoue en quelques centaines de millisecondes : chercher
+hors ligne la trace qui maximise l'argent emporté ne demande aucun talent et se parallélise. C'est
+l'attaque la moins chère du dossier — plus forte que l'aimbot et l'ESP nommés depuis la 02b — et
+c'est elle qui dimensionne le plafond de la 04a. Le plancher la ramène au **rythme d'un joueur** ; il
+ne la ferme pas. La doctrine qui la fermerait — on ne refuse pas la triche, on la joue bornée des
+deux côtés, puisque le serveur exécute le même bloc — reste renvoyée hors phases.
+
+Rien de tout cela ne touche la simulation : `SIM_VERSION` ne bouge pas, le sas ne reçoit pas un
+octet, et `api/app.js` n'a pas changé d'une virgule — un refus de verdict clôt déjà la ligne en
+`rejected` et rend le règlement relu depuis la ligne, jamais un 500, et le billet suivant s'ouvre
+dans la foulée. `api/core.js` n'a pas bougé non plus : `horlogePlancher` est appelée par
+`matchVerdict`, pas par `app.js`, donc elle n'a rien à faire dans la liste `ATTENDUS`, qui ne garde
+que les noms qu'`app.js` consomme lui-même. Aucune clause SQL n'a été touchée, donc le job `db` n'est
+pas concerné par ce module. À ce stade, **410 tests sur le jeu et 215 sur l'API** sans rien
+installer, 224 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -498,7 +551,9 @@ dossier.
 l'impossible — plus de kills que adversaires × vies, une partie plus longue que tout le plan de zone,
 une sacoche au-delà de la table — et rien d'autre. Les tolérances d'horloge valent deux minutes,
 parce qu'un onglet en arrière-plan, un téléphone endormi et une horloge locale fausse sont beaucoup
-plus fréquents qu'un tricheur.
+plus fréquents qu'un tricheur. (Elles les valent **toujours**, mais plus partout : le module 2 de la
+04a leur a ajouté un plancher plus serré sur les seuls règlements qui paient — voir « L'attente
+réelle exigée d'un encaissement était NULLE ».)
 
 Le choix est écrit pour qu'on ne le prenne pas pour un oubli : **tant qu'aucun argent n'est en jeu,
 accepter une partie douteuse coûte une ligne de statistique qui ne vaut rien, et refuser une partie
