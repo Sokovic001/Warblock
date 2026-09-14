@@ -1056,7 +1056,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             193 tests sans rien installer, 202 avec jose
+test.js             204 tests sans rien installer, 213 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1159,8 +1159,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 193 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 202 : les 193, plus la chaîne complète de vérification
+node api/test.js          # 204 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 213 : les 204, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
@@ -1261,9 +1261,55 @@ règlement, et c'est `applyAccount` qui arbitre : centimes vers dollars, avatar 
 réponse tronquée sans effet sur le pseudo. Lire un règlement comme un compte remettrait les quatre
 compteurs à zéro ; un test nommé porte ce piège.
 
-**Le portefeuille de démonstration reste dans le navigateur.** La phase 02a enregistre des parties,
-pas de l'argent : aucun solde ne part au serveur, aucun n'en revient, et `wallet` est toujours une
-variable modifiable depuis la console. C'est la phase 03 qui changera cela, pas celle-ci.
+### Le solde, côté jeu — deux économies sur le même écran (phase 03)
+
+La phrase de la 02a — « le portefeuille reste dans le navigateur » — n'est plus vraie qu'à moitié, et
+c'est le module 5 de la phase 03 qui l'a coupée en deux. **Il y a désormais deux économies, et
+l'écran dit laquelle il montre.**
+
+**Hors ligne, absolument rien n'a changé.** `wallet` est une variable du navigateur, le bandeau dit
+« Demo wallet », le bouton « + reload demo credits » est là, et les quatre cas de repli nommés depuis
+la 02a — pas de compte, `ACCOUNT.api` vide, serveur muet, réponse illisible — rendent une partie
+**identique à celle d'hier, graine comprise**. Ils restent testés comme des cas normaux.
+
+**En ligne, le solde est celui du grand livre.** Il arrive en **centimes entiers** dans
+`balanceCents` et `quarantineCents`, et il ne redevient des dollars qu'**une fois**, dans
+`WBCore.applyAccount`, exactement comme `best` — une garde textuelle interdit un second point de
+conversion. Trois conséquences, chacune avec son test :
+
+- **Le bouton de recharge disparaît.** Connecté, c'est littéralement une route de crédit gratuit
+  servie par le client. Le geste est refusé en plus d'être caché : un bouton `hidden` reste cliquable
+  depuis la console.
+- **Ni la mise ni le gain ne touchent `wallet`.** Le débit a eu lieu côté serveur, à l'ouverture du
+  billet ; le gain est écrit au règlement. Deux fonctions de trois lignes, `demoDebit` et
+  `demoCredit`, sont les **seules** à muter le portefeuille, et elles ne font rien en ligne. Une
+  garde textuelle interdit tout autre `wallet -=`, `wallet +=`, et toute écriture de `wallet` venue
+  d'une réponse serveur en dehors d'`applyAccount`.
+- **Un montant ABSENT n'est pas un montant NUL.** `applyAccount` rend `null` quand la réponse ne
+  porte pas de solde, et le jeu ne l'écrit alors pas. C'est le piège nommé de la 02a — lire un
+  règlement comme un compte — transposé à l'argent, où il coûte le portefeuille entier à l'écran. Le
+  jeu ne lit jamais un solde dans une réponse de règlement ou de renoncement : il redemande
+  `GET /api/me`.
+
+**Le bouton QUITTER du sas dit ce que partir coûte.** Il appelle `WBCore.renonciationOuverte` avec le
+chronomètre du **sas**, jamais avec une horloge lue sur place. Ce chronomètre part du clic, le
+serveur ne date le billet qu'à réception de la requête : il est donc **en avance**, et l'écran ferme
+la promesse un peu **avant** que le serveur ne la ferme. Il ne promet jamais un remboursement qui
+sera refusé. Dans la fenêtre, quitter appelle `POST /api/match/:id/renounce` puis redemande
+`GET /api/me` ; hors fenêtre, il ne réclame rien — le billet reste jouable, et le réclamer pour rien
+coûterait au joueur la temporisation `renonce_recent`. Quitter pendant que la demande de billet est
+encore **en vol** renonce au billet qui arrive : sinon personne ne le renoncerait, et la mise
+resterait au séquestre jusqu'à l'expiration.
+
+**Un refus NOMMÉ arrête le sas ; une panne SILENCIEUSE ne l'arrête pas.** C'est la nuance la plus
+coûteuse de la phase, et elle corrige à moitié une règle de la 02a. Réseau coupé, serveur muet,
+réponse illisible, 500, 429 : la partie part hors ligne comme avant — « un billet qui tarde ne
+retarde jamais le coup d'envoi ». Mais `409 fonds`, `409 livre` et `409 renonce_recent` disent que le
+serveur a **instruit** la demande et l'a rejetée : le sas s'arrête, un message paraît sous le bouton
+de la table, aucune partie ne démarre, et le lobby n'est pas laissé mort — on peut retenter dans la
+seconde. La liste des trois codes est **fermée**, elle vit dans `WBCore.REFUS_SAS`, et un test
+d'`api/test.js` la confronte aux codes que l'API émet vraiment. Le test d'accessibilité d'une table
+au lobby redevient ce qu'il est : une **indication**. C'est le `409 fonds` du serveur qui tranche.
 
 **Ce qui n'a pas pu être vérifié.** Le format exact des échanges avec Crossmint vient de la lecture
 de leur SDK, pas d'un appel réel : le conteneur où ce code a été écrit n'a pas accès à leur domaine.

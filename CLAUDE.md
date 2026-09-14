@@ -50,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 375 tests sur le jeu (`node test.js`) et
-  193 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 395 tests sur le jeu (`node test.js`) et
+  204 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -115,7 +115,24 @@ porte : le reste a besoin d'un navigateur pour tourner.
   angles, et la doctrine pour le reste est la divergence mesurée, jamais punie.
 - Le jeu se joue à l'identique sans compte et sans serveur, graine comprise : quatre cas nommés
   (`ACCOUNT.api` vide, pas de session, serveur muet, réponse illisible) sont testés comme des cas
-  normaux, et un billet qui tarde ne retarde jamais le coup d'envoi.
+  normaux, et un billet qui tarde ne retarde jamais le coup d'envoi. Depuis la phase 03 les quatre
+  vérifient en plus que le **portefeuille de démonstration** fonctionne comme avant : il prend la
+  mise à l'entrée du sas et la rend au départ.
+- **Deux économies vivent sur le même écran, et elles ne se mélangent pas.** Connecté, `wallet` est
+  le solde du grand livre : il arrive en centimes, il ne redevient des dollars qu'**une fois**, dans
+  `applyAccount`, et **rien** d'autre ne l'écrit — `demoDebit` et `demoCredit` sont les deux seules
+  fonctions qui le mutent, elles ne font rien en ligne, et une garde textuelle interdit tout autre
+  `wallet -=`, `wallet +=` ou écriture venue d'une réponse serveur. Le bouton de recharge disparaît
+  en ligne, et le geste est refusé en plus d'être caché. Un montant **absent** rend `null` et ne
+  s'écrit pas : lire un règlement comme un compte ne remet aucun solde à zéro.
+- **Un refus NOMMÉ arrête le sas ; une panne SILENCIEUSE ne l'arrête pas.** `fonds`, `livre` et
+  `renonce_recent` — liste fermée dans `WBCore.REFUS_SAS`, confrontée par `api/test.js` aux codes que
+  l'API émet vraiment — ferment le sas, affichent un message et ne lancent aucune partie, sans
+  laisser le lobby mort. Tout le reste, y compris un 500 et un 429, retombe dans le repli hors ligne.
+- **Le bouton QUITTER du sas dit ce que partir coûte**, en appelant `WBCore.renonciationOuverte` avec
+  le chronomètre du **sas**. Ce chronomètre est en avance sur celui du serveur, donc l'écran ferme la
+  promesse un peu avant : il ne promet jamais un remboursement que le serveur refusera. Confronté au
+  dixième de seconde sur toute la durée d'un sas, et sur toute la plage de latences plausibles.
 - Chaque bloc `<script>` d'`index.html` est du JavaScript valide — un test l'extrait et le fait
   parser par `vm.Script`. Ils sont exactement **trois**, tous **internes** : aucun `src=` ne pointe
   vers un fichier local, sans quoi le fichier unique ne serait plus unique.
@@ -303,36 +320,46 @@ tout solde y est modifiable depuis la console.
   entre deux processus Node, jamais entre deux moteurs. Aucun euro n'entre avant que le grand livre
   de la phase 03 n'existe, et il ne lira que des lignes dont le rejeu a **convergé**.
 - Phase 03 — grand livre en partie double, éprouvé en crédits fictifs. Entiers en centimes, jamais
-  de flottant, jamais d'écrasement de solde. **En cours**, spécification écrite et découpée en cinq
-  modules : `docs/PHASE-03.md`. Ce qu'elle décide, pour qu'on ne le redécouvre pas en cours de
-  route : le solde est la **somme** d'écritures immuables et jamais une colonne ; une écriture est
-  une **ligne-transfert** (montant strictement positif, compte débité différent du compte crédité),
-  si bien que la partie double est structurelle et non assertée ; la grammaire des comptes et les
-  motifs vivent dans `api/ledger.js` et non dans `WBCore`, parce qu'une comptabilité n'est pas une
-  règle du **jeu** et n'a rien à faire dans les 465 Ko que chaque joueur télécharge — seul
-  `renonciationOuverte`, réellement partagé avec le sas, y descend ; la mise est débitée à
-  l'**ouverture** du billet, dans la même transaction, sous verrou de ligne ; le gain d'une ligne
-  divergente va en **quarantaine**, mesuré et jamais dépensable. *Module 1 livré* : `api/ledger.js`
-  existe, entièrement pur — grammaire, motifs, mouvements, `soldeDe`, `ledgerReconcile` — et
-  `WBCore` a reçu la seule règle réellement partagée avec le sas, `renonciationOuverte` et sa
-  fenêtre de dix secondes. *Module 2 livré* : la table `ledger_entries` en insertion seule et en
-  lignes-transfert, l'écrivain unique `ledgerWrite` de `db-pg.js`, les gardes textuelles qui
-  comparent l'expression des comptes et la liste des motifs au texte du schéma, `api/db-check.js` et
-  son job d'intégration continue. *Module 3 livré* : les routes écrivent enfin — dotation et recharge
-  à la connexion, mise débitée à l'ouverture sous verrou, règlement et gain dans la même transaction,
-  quarantaine pour les lignes divergentes, `balanceCents` et `quarantineCents` rendus par somme.
-  *Module 4 livré* : ce que devient un billet que personne ne termine. `POST /api/match/:id/renounce`
-  rend la mise pendant la fenêtre de `WBCore.renonciationOuverte` et pas une milliseconde de plus ;
-  `POST /api/match` refuse en `409 renonce_recent` tant que la fenêtre du dernier billet renoncé n'est
-  pas passée, si bien qu'un tirage de graine coûte la fenêtre entière et pas un aller-retour HTTP ; le
-  veilleur devient un **écrivain d'argent** — il vide chaque séquestre vers `maison:contrepartie`, en
-  une boucle de transactions bornées, une par billet, et il ne rembourse rien ; `match_traces` reçoit
-  enfin sa politique de conservation, `TRACE_RETENTION_JOURS` et une purge à quatre conditions dont
-  chacune est éprouvée en la retirant seule. Le
-  job Postgres n'a toujours jamais tourné : le module 2 livrait la RECETTE, pas le plat, et les
-  modules 3 et 4 s'appuient dessus. Rien n'est fait tant que les
-  cinq modules ne sont pas livrés et que ce job n'a pas été vert une fois — jusque-là, un test qui
-  passe contre la doublure prouve la doublure. **Aucun euro n'entre.**
+  de flottant, jamais d'écrasement de solde. **Faite, les cinq modules livrés** —
+  `docs/PHASE-03.md` — **avec une réserve écrite et non levée : le job Postgres n'a jamais été
+  vert.** Ce qu'elle décide, pour qu'on ne le redécouvre pas en cours de route : le solde est la
+  **somme** d'écritures immuables et jamais une colonne ; une écriture est une **ligne-transfert**
+  (montant strictement positif, compte débité différent du compte crédité), si bien que la partie
+  double est structurelle et non assertée ; la grammaire des comptes et les motifs vivent dans
+  `api/ledger.js` et non dans `WBCore`, parce qu'une comptabilité n'est pas une règle du **jeu** et
+  n'a rien à faire dans les 465 Ko que chaque joueur télécharge — seul `renonciationOuverte`,
+  réellement partagé avec le sas, y descend ; la mise est débitée à l'**ouverture** du billet, dans
+  la même transaction, sous verrou de ligne ; le gain d'une ligne divergente va en **quarantaine**,
+  mesuré et jamais dépensable.
+  *Module 1* : `api/ledger.js`, entièrement pur — grammaire, motifs, mouvements, `soldeDe`,
+  `ledgerReconcile` — et `WBCore` reçoit la seule règle réellement partagée avec le sas,
+  `renonciationOuverte` et sa fenêtre de dix secondes.
+  *Module 2* : la table `ledger_entries` en insertion seule et en lignes-transfert, l'écrivain unique
+  `ledgerWrite` de `db-pg.js`, les gardes textuelles qui comparent l'expression des comptes et la
+  liste des motifs au texte du schéma, `api/db-check.js` et son job d'intégration continue.
+  *Module 3* : les routes écrivent — dotation et recharge à la connexion, mise débitée à l'ouverture
+  sous verrou, règlement et gain dans la même transaction, quarantaine pour les lignes divergentes,
+  `balanceCents` et `quarantineCents` rendus par somme.
+  *Module 4* : ce que devient un billet que personne ne termine. `POST /api/match/:id/renounce` rend
+  la mise pendant la fenêtre de `WBCore.renonciationOuverte` et pas une milliseconde de plus ;
+  `POST /api/match` refuse en `409 renonce_recent` tant que la fenêtre du dernier billet renoncé
+  n'est pas passée, si bien qu'un tirage de graine coûte la fenêtre entière et pas un aller-retour
+  HTTP ; le veilleur devient un **écrivain d'argent** — il vide chaque séquestre vers
+  `maison:contrepartie`, en une boucle de transactions bornées, une par billet, et il ne rembourse
+  rien ; `match_traces` reçoit sa politique de conservation, `TRACE_RETENTION_JOURS` et une purge à
+  quatre conditions dont chacune est éprouvée en la retirant seule.
+  *Module 5* : **le jeu lit son solde du serveur.** Connecté, `wallet` vient de `GET /api/me` et de
+  `POST /api/match`, en centimes jusqu'au bout du réseau, converti une seule fois dans
+  `applyAccount` ; le bouton de recharge disparaît ; ni la mise ni le gain ne touchent `wallet` ; le
+  bouton QUITTER du sas dit ce que partir coûte en lisant `renonciationOuverte` avec le chronomètre
+  du sas ; un refus **nommé** (`fonds`, `livre`, `renonce_recent`) arrête le sas quand une panne
+  **silencieuse** laisse toujours partir la partie hors ligne. Hors ligne, rien n'a changé : le
+  portefeuille de démonstration reste une variable du navigateur, et il le dit à l'écran.
+  **CE QUI N'EST PAS FAIT, et qu'il ne faut pas déclarer fait : le job `services: postgres` n'a
+  jamais tourné.** La recette existe — `api/db-check.js`, le job d'intégration continue — le plat
+  non. Jusqu'à ce qu'il soit vert une fois, **un test qui passe contre la doublure prouve la
+  doublure**, et le verrou de ligne qui empêche deux onglets de dépenser le même solde n'est éprouvé
+  nulle part. **Aucun euro n'entre** : les comptes sont en crédits fictifs, dotés par la maison.
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre

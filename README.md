@@ -24,7 +24,7 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 375 tests sur le jeu + 193 sur l'API, sans dépendance
+npm test        # 395 tests sur le jeu + 204 sur l'API, sans dépendance
 ```
 
 Les règles du jeu vivent dans deux blocs purs à l'intérieur de `index.html`, sans DOM ni WebGL :
@@ -46,13 +46,15 @@ index.html              le jeu entier
 test.js                 harnais Node du jeu
 corpus-grille.json      corpus gelé : la preuve que le code a bougé sans changer
 api/                    serveur Node, testable sans base : comptes et profils (phase 01),
-                        billet de partie (phase 02a), rejeu de la partie (phase 02b)
+                        billet de partie (phase 02a), rejeu de la partie (phase 02b),
+                        grand livre en partie double (phase 03)
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage
 docs/HISTORIQUE.md      journal de développement : décisions, pistes abandonnées, bugs
 docs/PHASE-02.md        la phase 02a : billet, verdict, statistiques par agrégat
 docs/PHASE-02B.md       la phase 02b : pas fixe, bloc SIM, trace des entrées, rejeu serveur
+docs/PHASE-03.md        la phase 03 : le grand livre en partie double, en crédits fictifs
 docs/DEMANDES.md        les demandes d'origine, dans l'ordre
 docs/DEPLOY.md          mise en ligne
 docs/ICONS-PROMPTS.md   prompts de génération d'icônes
@@ -76,11 +78,17 @@ Tables : $0,50 · $1 · $5 · $10.
 Deux chantiers avant d'envisager de l'argent réel, détaillés dans
 [docs/DEPLOY.md](docs/DEPLOY.md) :
 
-1. **Le grand livre.** Le serveur **rejoue** désormais la partie et recalcule lui-même durée, kills,
-   rang et sacoche (phase 02b) : le vol de temps est fermé. Restent le vol de *précision* — aimbot et
-   ESP, entiers et structurels — et le solde, qui est encore une variable du navigateur. Aucun euro
-   n'entre avant la phase 03, et faire tourner une vraie Postgres au moins une fois en est un
-   prérequis.
+1. **Le grand livre existe, et il n'a jamais vu une base.** Depuis la phase 03, le solde d'un
+   joueur connecté est la **somme d'écritures immuables en centimes entiers** tenue par le serveur :
+   dotation à la création du compte, mise débitée à l'ouverture du billet, gain écrit au règlement,
+   quarantaine pour une partie dont le rejeu a divergé. Le jeu lit ce solde et ne l'écrit plus ; hors
+   ligne, le portefeuille de démonstration reste une variable du navigateur, et il le dit à l'écran.
+   Ce qui reste ouvert, et qui n'est pas un détail : **aucune vraie Postgres n'a jamais tourné.**
+   `api/db-check.js` et son job d'intégration continue sont écrits, jamais verts — un test qui passe
+   contre la doublure prouve la doublure, et le verrou de ligne qui empêche deux onglets de dépenser
+   le même solde n'est éprouvé nulle part ailleurs. Reste aussi le vol de *précision* — aimbot et
+   ESP, entiers et structurels. **Aucun euro n'entre** : les crédits sont fictifs, dotés par la
+   maison.
 2. **Cadre légal.** Miser de l'argent réel sur ce type de jeu relève du droit des jeux d'argent
    dans la plupart des juridictions. À faire trancher par un avocat spécialisé avant tout
    branchement de paiement.

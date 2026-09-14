@@ -207,6 +207,95 @@ pas les trois qu'on a touchés. Le même journal a d'ailleurs sous-compté les c
 phase — cinq écrites, sept posées, parce que `sim_version` et `first_result_at` sont arrivées après
 la rédaction de la phrase. Corrigé ici.
 
+### Le veilleur devient un écrivain d'argent — phase 03, module 4
+
+`api/app.js` et `api/db-pg.js` ont porté pendant deux phases la même phrase sur le veilleur : « Il
+n'écrit AUCUN montant — il ne fait que fermer une porte. » Elle était juste tant qu'aucun montant
+n'était engagé nulle part. Depuis que la mise est débitée à l'**ouverture** du billet, un billet que
+personne ne termine laisse un séquestre **habité** : de l'argent posé sur `enjeu:<match_id>` que
+plus rien ne solde, et l'invariant « aucun séquestre ne reste habité » devient faux sur le chemin le
+plus fréquent de tous — l'onglet qu'on ferme.
+
+Le veilleur vide donc chaque séquestre vers `maison:contrepartie`, et **il ne rembourse jamais** :
+passé la fenêtre de renoncement, rien ne rend la mise, sans quoi le vol que la phase existe pour
+fermer se rouvrirait par la porte d'à côté. Deux conséquences de forme, et la première a coûté une
+réécriture : `expireMatches` closait jusqu'à cinq cents lignes en **une** instruction, elle devient
+une boucle de transactions bornées, **une par billet** — un mouvement du grand livre ne se pose pas
+en masse, et un échec sur une ligne ne doit pas annuler les autres. La seconde : le veilleur rejoint
+la liste nommée des appelants autorisés de l'écrivain du grand livre.
+
+Ce qui se retient : **les deux commentaires ont été RÉÉCRITS, pas laissés à contredire le code.**
+Une phrase d'architecture qui survit à la décision qu'elle décrivait est découverte six mois plus
+tard par quelqu'un qui la relit et la croit.
+
+### La garde « aucun `delete from match_traces` » a été AFFAIBLIE, sciemment — phase 03, module 4
+
+`api/test.js` interdisait tout `delete` sur `match_traces`, et il **passait**. La phase 03 devait
+donner à cette table sa politique de conservation, donc écrire le premier `delete` du dépôt sur la
+pièce qui prouve un paiement. Une garde qu'on retire pour faire passer le code qu'on vient d'écrire
+est exactement l'écart que la recette de la 02b a trouvé ailleurs.
+
+Elle n'a donc pas été retirée, elle a **changé de forme** : « le seul `delete` de cette table est la
+purge nommée, et sa clause porte les quatre conditions ». Les quatre — ligne réglée définitivement,
+écriture du grand livre posée, séquestre vide, délai de rétention écoulé — sont éprouvées **une par
+une**, en retirant chacune seule sur un cas dégénéré construit exprès. La conséquence à connaître,
+et c'est le bon défaut : **la trace d'un billet dont le résultat n'est jamais arrivé n'est jamais
+effacée**, puisque sa ligne n'est ni `settled` ni `rejected`. C'est précisément la pièce qu'on
+voudra relire.
+
+### « Un billet qui tarde ne retarde jamais le coup d'envoi » ne vaut plus pour un REFUS — phase 03, module 5
+
+La règle de la 02a est écrite dans quatre documents et tenue par quatre tests : une demande de
+billet qui échoue laisse la partie partir **hors ligne**, sur la graine du navigateur. Elle a été
+écrite quand un billet n'était qu'une identité de partie ; elle est **fausse à moitié** depuis que le
+billet porte un débit.
+
+La coupure est là : une **panne** — réseau coupé, serveur muet, réponse illisible, 500 — ne dit rien
+de ce que le joueur a le droit de faire, et lui refuser sa partie pour un wifi qui tousse serait un
+mauvais échange. Un **refus explicite et nommé** dit précisément le contraire : le serveur a
+instruit la demande et l'a rejetée. Jouer quand même ferait de la partie payante une partie
+gratuite — sans mise au séquestre, donc une partie qui ne pourrait rien payer à personne.
+
+Trois codes seulement arrêtent le sas — `fonds`, `livre`, `renonce_recent` — et la liste est
+**fermée**, dans `WBCore.REFUS_SAS`, confrontée par un test d'`api/test.js` aux codes que l'API émet
+vraiment. Un 429 et un 500 n'y sont pas, et c'est délibéré : ils ne nomment rien. Effet de bord
+assumé et écrit : le test d'accessibilité d'une table au lobby redevient ce qu'il est, une
+**indication** — c'est le `409 fonds` du serveur qui tranche.
+
+### Le portefeuille de démonstration ne disparaît pas, il se dédouble — phase 03, module 5
+
+La tentation était de faire de `wallet` le solde du serveur, point. C'aurait cassé la promesse la
+plus ancienne du dépôt : on ouvre `index.html` et on joue, sans compte et sans serveur. Il y a donc
+maintenant **deux économies sur le même écran**, et le choix qui les tient est de les nommer à
+l'écran plutôt que de les unifier dans le code : hors ligne le bandeau dit « Demo wallet » et garde
+son bouton de recharge, connecté il dit « Credits », perd le bouton et affiche la quarantaine.
+
+Deux détails ont failli passer, et ils sont l'essentiel :
+
+- **Un montant absent n'est pas un montant nul.** `applyAccount` rend `null` quand la réponse ne
+  porte pas de solde, et l'appelant ne l'écrit alors pas. Sans cela, lire un règlement comme un
+  compte — le piège nommé de la 02a, qui coûtait quatre compteurs de statistiques — aurait vidé le
+  portefeuille à l'écran. Les statistiques, elles, tombent volontairement à zéro sur un objet qui
+  n'en porte pas : la règle n'est pas la même parce que le coût n'est pas le même, et c'est écrit à
+  côté des deux.
+- **Le bouton de recharge caché reste cliquable depuis la console.** `hidden` est une décision
+  d'affichage, pas une garde. Le geste est donc refusé en plus d'être caché.
+
+### Le chronomètre du client doit MENTIR DANS LE BON SENS — phase 03, module 5
+
+Le bouton QUITTER du sas annonce ce que partir coûte, et c'est le **serveur** qui arbitrera. Deux
+horloges, donc, et la question n'est pas « laquelle est juste » mais « de quel côté se trompe-t-on ».
+Le chronomètre du sas part du clic ; le serveur ne date le billet qu'à réception de la requête. Le
+client est donc toujours **en avance**, et l'écran ferme la promesse un peu **avant** le serveur : il
+ne promet jamais un remboursement qui sera refusé. Une seule règle, `WBCore.renonciationOuverte`,
+appelée par les deux avec leur propre horloge — la fonction ne lit aucune horloge, elle la reçoit,
+et c'est ce qui permet cet arrangement sans deux définitions de la fenêtre.
+
+Un trou trouvé en écrivant le branchement, et qui coûtait une mise entière : le joueur peut quitter
+le sas **pendant que la demande de billet est encore en vol**. Le serveur ouvre alors le billet et
+débite ; personne ne renonce pour lui, et la mise reste au séquestre jusqu'à l'expiration. Le module
+renonce donc au billet qui arrive en retard, sur sa propre génération de requête.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -486,6 +575,39 @@ passe contre la doublure prouve la doublure.
 - **Toujours aucun euro, et cette phase n'ouvre aucune table en argent réel.** Le vol de temps
   devient impossible ; le vol de précision — aimbot, ESP — reste entier, et il est structurel.
 
+## État après la phase 03
+
+- Le jeu n'a toujours pas changé de nature : un seul `index.html`, sans build, sans bundler, sans
+  React, **jouable sans compte ni serveur, graine comprise**. Trois blocs `<script>`, tous internes.
+- **Le solde d'un joueur connecté est une SOMME d'écritures immuables en centimes entiers**, et il
+  n'existe nulle part de colonne à écraser. Une écriture est une **ligne-transfert** — montant
+  strictement positif, compte débité différent du compte crédité — donc la partie double est
+  structurelle et la somme du livre est nulle par construction. Une correction est une
+  **contre-passation** : aucun `update`, aucun `delete` sur `ledger_entries`.
+- **La mise est débitée à l'ouverture du billet**, dans la même transaction que lui et sous verrou
+  de ligne ; le règlement écrit la ligne et le gain ensemble ; un billet clos vide son séquestre. Le
+  gain d'une ligne dont le rejeu a **divergé** va en quarantaine : visible, chiffré, jamais
+  dépensable.
+- **Une mise ne se rend que pendant la fenêtre de renoncement**, dix secondes à l'horloge du serveur,
+  arbitrées par `WBCore.renonciationOuverte` et par elle seule. Passé cette fenêtre, le veilleur clôt
+  sans rembourser et vide le séquestre vers `maison:contrepartie`. Le prix est écrit : le joueur
+  honnête dont l'onglet meurt à la onzième seconde perd sa mise.
+- **Le jeu lit son solde du serveur et ne l'écrit plus.** Deux économies vivent sur le même écran, et
+  l'écran dit laquelle il montre : « Demo wallet » et son bouton de recharge hors ligne,
+  « Credits » sans bouton en ligne. Treize refus nommés, tous en 400 ou 409, dont trois arrêtent le
+  sas au lieu de laisser partir une partie gratuite.
+- **395 tests sur le jeu, 204 sur l'API** sans rien installer, 213 avec `jose`. Aucune base, aucun
+  réseau, aucun navigateur : tout est injecté.
+- **LA DETTE LA PLUS SILENCIEUSE DU DOSSIER N'EST PAS SOLDÉE.** `api/db-check.js` et son job
+  `services: postgres` existent ; le job n'a **jamais été vert**. La phase a livré la recette, pas le
+  plat, et elle a en plus ajouté par-dessus les deux propriétés les plus difficiles à prouver du
+  dépôt — le verrou de ligne qui sérialise deux onglets, et une clause de purge qui croise trois
+  tables. **Un test qui passe contre la doublure prouve la doublure**, et cette phrase reste vraie
+  au bout de la phase 03 comme elle l'était au bout de la 02b.
+- **Toujours aucun euro.** Les comptes sont en crédits fictifs, dotés par la maison. La phase rend le
+  **solde** inviolable ; elle ne rend pas la **partie** honnête — le vol de précision, aimbot et ESP,
+  reste entier et structurel.
+
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
@@ -495,15 +617,24 @@ passe contre la doublure prouve la doublure.
   pas, et une visée parfaite ne se distingue pas d'un très bon joueur — et l'ESP est devenu
   **structurel** : dans une architecture de rejeu, le client possède tout ce qu'il dessine, donc il
   connaît le contenu de tout le butin de la carte dès la première seconde. Tant que les dix-neuf
-  adversaires sont des bots, la seule victime en est la maison, à chaque partie. Le solde, lui, reste
-  une variable du navigateur jusqu'à la phase 03.
-- **Aucune base n'a jamais tourné, et c'est devenu un PRÉREQUIS de la phase 03.** Les contraintes qui
-  arbitrent l'unicité et l'écriture unique d'un règlement n'ont été éprouvées que contre une
-  doublure, et la phase 02b a ajouté sept colonnes et une table dont un **paiement** dépend. Un test
-  qui passe contre la doublure prouve la doublure. Faire tourner une vraie Postgres une fois, ne
-  serait-ce qu'à la main, se fait **avant** le grand livre, pas après.
-- **`match_traces` n'a aucune politique de conservation.** Combien de temps garde-t-on la pièce qui
-  prouve une partie, et qui a le droit de la relire : renvoyé à la phase 03.
+  adversaires sont des bots, la seule victime en est la maison, à chaque partie. **Le solde, lui, a
+  cessé d'être une variable du navigateur à la phase 03** — connecté, il est la somme des écritures
+  du grand livre, et le jeu ne fait plus que la lire.
+- **Aucune base n'a jamais tourné. C'était un PRÉREQUIS de la phase 03, et il n'a pas été tenu.**
+  La phase a livré la RECETTE — `api/db-check.js`, un job `services: postgres` dans l'intégration
+  continue — et le plat n'a jamais été servi : la machine de travail n'avait ni Postgres, ni Docker,
+  et le job n'a jamais été vert. Pire, la phase a empilé par-dessus les deux propriétés les plus
+  difficiles à prouver du dossier : le **verrou de ligne** `select id from users where id = $1 for
+  update`, qu'une doublure mono-fil sérialise gratuitement, et la clause de la purge des traces, qui
+  croise trois tables et recalcule un solde en SQL. **Un test qui passe contre la doublure prouve la
+  doublure**, et cette phrase est plus chère aujourd'hui qu'elle ne l'était hier. Le premier qui
+  pousse sur GitHub doit REGARDER le job `db` et rapporter ce qu'il dit.
+- ~~**`match_traces` n'a aucune politique de conservation.**~~ **Refermé par la phase 03, module 4 :**
+  `TRACE_RETENTION_JOURS` vaut 400, et la purge n'efface une trace que si les **quatre** conditions
+  sont réunies — ligne réglée définitivement, écriture du grand livre posée, séquestre vide, délai
+  écoulé — chacune éprouvée en la retirant seule. Ce qui reste ouvert derrière, et qui n'est pas la
+  même chose : **qui a le droit de relire une trace.** Il n'existe ni rôle d'administration, ni
+  journal d'audit ; à nommer avant la phase 04, avec « qui a le droit de contre-passer ».
 - **Un déploiement se draine, il n'écrase pas les billets ouverts.** Décision d'exploitation, à
   ranger à côté de « la maison est la contrepartie de chaque pot ». Ce qui arrive quand on ne la
   prend pas est désormais visible : le rejeu refuse en `sim_version` et la partie n'est jamais
@@ -524,8 +655,15 @@ passe contre la doublure prouve la doublure.
   couverte, pas sa dramaturgie — les bots y sont remplacés par une conduite de quelques lignes. Le
   trou se referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
   ennuyeuses reste un humain qui joue une partie entière.
-- **La session de jeu réelle due après le module 1 n'a toujours pas eu lieu**, et la phase 02b est
-  finie sans elle. Elle a **quatre** changements de ressenti à juger : le pas fixe (module 1), la
+- **La session de jeu réelle due après le module 1 de la 02b n'a toujours pas eu lieu**, et la phase
+  03 est finie sans elle non plus. Elle a maintenant un **cinquième** point à juger, arrivé avec le
+  module 5 de la phase 03 : **deux économies sur le même écran**, connecté et hors ligne. Ce que
+  `node test.js` peut faire, il le fait — les deux fonctions du portefeuille sont exécutées, le
+  module du billet est exécuté, le libellé du bouton QUITTER est exécuté au dixième de seconde sur
+  toute la durée d'un sas — mais **il ne peut structurellement pas voir un bug d'écran**. Le lobby a
+  été ouvert dans un navigateur, hors ligne et en ligne, jusqu'à une partie qui tourne et un écran
+  de fin ; ce qui n'a pas été vu, faute de serveur déployé, c'est un vrai aller-retour avec une vraie
+  API. Les **quatre** changements de ressenti de la 02b, eux, restent à juger : le pas fixe (module 1), la
   personnalité des bots qui a changé d'un coup (module 2), la portée réelle des tirs — la collision
   balayée fait toucher des tirs qui frôlaient, surtout de près et surtout avec les armes rapides
   (module 4) — et la quantification des entrées du joueur, visée au 1024e de tour (module 6). Les
@@ -533,6 +671,20 @@ passe contre la doublure prouve la doublure.
   test ne peut départager les quatre, et le seul juge est un humain qui joue une partie entière, sur
   téléphone comme sur ordinateur. **C'est la dette la plus ancienne du dossier et elle est encore
   là.**
+- **Qui a le droit de contre-passer.** Une contre-passation est le seul chemin de correction du
+  grand livre, et personne n'a écrit qui peut l'emprunter : ni journal d'audit, ni rôle
+  d'administration. Le premier incident réel se réglera à la main dans `psql`, un dimanche soir, et
+  c'est ce jour-là que la règle « aucun `update` » tombe. À nommer avant la phase 04, avec la
+  suppression de compte et le changement de pseudo tracés.
+- **Le sort de la quarantaine**, et le seuil sur `ecart_cents` : renvoyés à la phase 06, sur des
+  données réelles. La phase 03 produit ce qui manquait pour trancher — un rendement de quarantaine
+  **en centimes** et non plus en nombre de lignes — et n'ajoute délibérément aucun motif de
+  libération : un membre de liste fermée que personne n'écrit est une case en attente d'être créée de
+  travers.
+- **Le coût de la maison est désormais chiffrable, et il est plus gros qu'il n'y paraît.**
+  `maison:contrepartie` le mesure partie par partie. Le risque n'est pas le chiffre, c'est de le
+  voir apparaître et de le prendre pour un bug : sur une table à 10 $ en resurgence, cinquante
+  sièges, une sortie parfaite fait verser 49 000 centimes à la maison pour 10 000 encaissés.
 - **Cadre légal** avant tout argent réel, et la décision d'exploitation ci-dessus — la maison est
   la contrepartie de chaque pot — à trancher avant la phase 04.
 - **Icône définitive** : plusieurs directions explorées, décision non figée.

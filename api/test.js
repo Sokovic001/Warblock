@@ -3783,6 +3783,116 @@ await test('LE VOL QUE CETTE PHASE FERME : jouer, perdre, n\'envoyer NI trace NI
   reconcilier(db, 'le billet que personne n\'a terminé');
 });
 
+await test('LES TROIS REFUS QUI ARRÊTENT LE SAS EXISTENT VRAIMENT, et le jeu ne les invente pas', async () => {
+  // Le jeu ne se comporte pas de la même façon devant une PANNE et devant un REFUS : une panne le
+  // laisse partir hors ligne comme depuis la 02a, un refus nommé arrête le sas et ne lance aucune
+  // partie. La liste des refus qui arrêtent vit dans `WBCore.REFUS_SAS`, côté jeu, parce que c'est
+  // le jeu qui décide quoi en faire — mais elle décrit des codes que le SERVEUR émet. Deux listes
+  // qui décrivent la même chose se confrontent, sinon la seconde ment un jour en silence.
+  const fs = require('node:fs'), path = require('node:path');
+  const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent']);
+  for (const code of C.REFUS_SAS)
+    assert.ok(new RegExp("code: '" + code + "'").test(app),
+      `le jeu arrête son sas sur un refus « ${code} » que l'API n'émet nulle part`);
+  // Et chacun des trois sort bien en 409 : le jeu ne s'arrête que sur une réponse qui a un STATUT,
+  // et un 500 est traité comme une panne. Le statut se lit sur l'`envoyer` le plus proche EN AMONT
+  // du code, ce qui est exactement ce que le lecteur humain fait — et ce qu'un `[^}]*` ne sait pas
+  // faire, la réponse portant des littéraux gabarits avec leurs propres accolades.
+  const statutDe = code => {
+    let statut = null;
+    for (const m of app.matchAll(/envoyer\(res, (\d{3})|code: '([a-z_]+)'/g)) {
+      if (m[1]) statut = m[1];
+      else if (m[2] === code) return statut;
+    }
+    return null;
+  };
+  for (const code of C.REFUS_SAS)
+    assert.strictEqual(statutDe(code), '409', `« ${code} » ne sort pas en 409`);
+  // Le détecteur est éprouvé avant de servir, sur un refus dont on sait qu'il est un 404.
+  assert.strictEqual(statutDe('billet'), '404', 'le détecteur de statut ne détecte rien');
+  // LE SENS INVERSE, et c'est celui qui compte : un refus de `POST /api/match` qui n'est PAS dans la
+  // liste laisse la partie partir hors ligne. Ce n'est pas un oubli, c'est la règle — mais elle doit
+  // être relue le jour où un refus de plus arrive sur cette route.
+  const ouverture = app.slice(app.indexOf('async function ouvrirBillet('), app.indexOf('async function recevoirTrace('));
+  const codes = [...new Set([...ouverture.matchAll(/code: '([a-z_]+)'/g)].map(m => m[1]))].sort();
+  assert.deepStrictEqual(codes, ['fonds', 'livre', 'renonce_recent'],
+    'un refus de plus sur POST /api/match : décider s\'il arrête le sas ou non, et l\'écrire');
+});
+
+await test('LA FRONTIÈRE AVEC LA 02a TIENT SUR TOUS LES CHEMINS D\'ARGENT, y compris les deux nouveaux', async () => {
+  // Le test ci-dessus constate la frontière sur le règlement et sur la clôture d'un billet périmé.
+  // La phase 03 a depuis ajouté DEUX écrivains d'argent — la route de renoncement, seul chemin du
+  // dépôt qui rende une mise, et le veilleur, qui vide chaque séquestre — plus un effaceur, la
+  // purge des traces. Une frontière qui ne tient que sur les chemins d'hier ne tient pas : on la
+  // CONSTATE donc sur les trois, un billet 02a par chemin.
+  //
+  // Ce qu'une ligne 02a est, et pourquoi le livre ne doit pas y toucher : ses faits ont été
+  // DÉCLARÉS par le client, jamais rejoués. `trace_steps` nul en est la marque. Le grand livre ne
+  // lit que des lignes que le serveur a refaites lui-même.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  const apresDotation = db.ledger.length;
+  const semer = (id, cle) => {
+    const m = { id, user_id: uid, mode: 'solo', stake_cents: 50, seats: 20, team_size: 1,
+                brawler: BRAWLER, seed_public: GRAINES[31], seed_secret: SECRETS[31],
+                sim_version: 1, client_key: cle, status: 'open', first_result_at: null,
+                trace_steps: null,
+                opened_at: new Date(horloge.t), expires_at: new Date(horloge.t + 600 * 1000) };
+    db.matches.push(m);
+    return m;
+  };
+  const renoncee = semer(801, '02a-renonce');
+  const veillee = semer(802, '02a-veilleur');
+  const purgee = semer(803, '02a-purge');
+  // Une trace sur la ligne à purger : sans elle, la purge n'aurait rien à ne pas faire.
+  db.traces.push({ match_id: 803, seq: 0, sim_version: 1, steps: 10, data: 'aaa',
+                   created_at: '2026-01-01T00:00:00Z' });
+
+  // (1) LA ROUTE DE RENONCEMENT, dans sa fenêtre. Le montant rendu est ce que le SÉQUESTRE porte,
+  // et il ne porte rien : la ligne est close, et pas un centime n'a bougé.
+  const r = await renoncer(app, '801');
+  assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+  assert.strictEqual(r.corps.status, 'renounced');
+  assert.strictEqual(r.corps.refundedCents, 0, 'une ligne 02a a été remboursée : elle n\'avait rien misé');
+  assert.strictEqual(renoncee.status, 'renounced');
+
+  // (2) LE VEILLEUR. Il clôt et il vide — sauf qu'il n'y a rien à vider. La ligne à purger est
+  // réglée d'abord, sinon elle expirerait dans le même balayage et n'aurait plus rien à purger.
+  horloge.t += 3600 * 1000;
+  purgee.status = 'settled';
+  purgee.settled_at = new Date(horloge.t - L.TRACE_RETENTION_JOURS * 24 * 3600 * 1000 - 1);
+  const balayage = await app.veiller();
+  assert.strictEqual(balayage.closes, 1, JSON.stringify(balayage));
+  assert.deepStrictEqual(balayage.echecs, []);
+  assert.strictEqual(veillee.status, 'expired');
+
+  // (3) LA PURGE. La troisième de ses quatre conditions est « le grand livre a posé son écriture »,
+  // et une ligne 02a n'en a jamais : sa trace n'est donc JAMAIS effacée, ce qui est le bon défaut —
+  // c'est exactement la pièce qu'on voudra relire.
+  const purge = await db.purgeTraces({ maintenant: new Date(horloge.t) });
+  assert.deepStrictEqual({ effacees: purge.effacees, parties: purge.parties }, { effacees: 0, parties: 0 },
+    'la trace d\'une ligne que le grand livre n\'a jamais touchée a été effacée');
+  assert.strictEqual(db.traces.length, 1);
+
+  // LE VERDICT : aucune écriture, sur aucun des trois, par aucun des chemins.
+  for (const ref of ['801', '802', '803'])
+    assert.deepStrictEqual(db.ledger.filter(l => l.reference === ref), [],
+      `le grand livre a écrit sur la ligne 02a ${ref}`);
+  assert.strictEqual(db.ledger.length, apresDotation,
+    'le grand livre a bougé alors que seules des lignes 02a ont été traitées');
+  zeroGlobal(db, 'trois lignes 02a, trois chemins d\'argent');
+
+  // ET LA FRONTIÈRE SE VOIT, elle ne se devine pas : passer une de ces lignes à la réconciliation
+  // produit le grief nommé « aucun engagement ». C'est ce que `ledgerReconcile` doit dire d'une
+  // ligne qui n'a rien à faire dans le grand livre — un silence serait indistinguable d'un
+  // appariement réussi, et le jour où une ligne 02a recevrait une écriture, personne ne le verrait.
+  const griefs = L.ledgerReconcile(renoncee, livreDe(db));
+  assert.strictEqual(griefs.length, 1, griefs.join(' | '));
+  assert.match(griefs[0], /aucun engagement/);
+});
+
 await test('LES DEUX BORNES EXACTES DE LA FENÊTRE : à la neuvième seconde on rembourse, à la onzième on refuse et on n\'écrit rien', async () => {
   // La fenêtre vaut dix secondes, et pas les vingt-cinq de `LOBBY.wait` : le jeu décolle dès que la
   // salle est pleine. On n'écrit pas 10 ici — on interroge `WBCore.renonceFenetreS`, faute de quoi

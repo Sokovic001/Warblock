@@ -48,6 +48,9 @@
   .wallet{display:flex;align-items:center;gap:14px;padding:8px 16px;border:3px solid #000;border-radius:14px;background:var(--panel);box-shadow:0 4px 0 #000}
   .wallet b{font-size:26px;color:var(--cash);text-shadow:2px 2px 0 #000}
   .wallet button{background:#fff2;border:2px solid #000;border-radius:10px;color:#fff;padding:5px 10px;font-size:11px;letter-spacing:.06em}
+  /* Ce que le rejeu a mis en quarantaine : visible, chiffre, jamais depensable. Le taire ferait
+     disparaitre de l'argent aux yeux du joueur ; le fondre dans le solde en ferait un solde. */
+  #walletHold{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#ffd27a;font-family:Arial,sans-serif;font-weight:700}
   .toprow{display:flex;gap:12px;flex-wrap:wrap;justify-content:center}
   .wallet.online{gap:12px;padding:10px 20px} .wallet.online b{font-size:32px;color:#fff;display:block;line-height:1;text-shadow:2px 2px 0 #000}
   .wallet.online small{display:block;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#cfe3ff;font-family:Arial,sans-serif;font-weight:700;margin-top:2px}
@@ -183,6 +186,10 @@
   #rightCol,#bottomBar{display:contents}   /* transparent wrappers: the desktop layout is untouched */
   /* ---------- PLAY BAR ---------- */
   #playbar{width:min(1080px,100%);display:flex;align-items:center;gap:14px;justify-content:center}
+  /* Le refus du serveur, quand il y en a un. Rouge, centre sous le bouton, et jamais present
+     autrement : un bandeau vide en permanence apprend au joueur a ne plus le lire. */
+  #lobbyMsg{width:min(1080px,100%);margin-top:8px;text-align:center;font-size:12px;letter-spacing:.04em;
+    color:#ffd7dd;background:#8e1f2ecc;border:3px solid #000;border-radius:12px;padding:8px 14px}
   #playBtn{background:linear-gradient(180deg,#ffe066,#ffb31f);color:#000;border:4px solid #000;border-radius:18px;padding:12px 30px;box-shadow:0 6px 0 #7a3b00;transition:transform .1s}
   #playBtn:hover:not(:disabled){transform:translateY(-3px)} #playBtn:disabled{filter:grayscale(1);opacity:.55}
   #playBtn b{display:block;font-size:20px;letter-spacing:.02em}
@@ -791,7 +798,11 @@
   <div id="titleRow" style="text-align:center"><h1>WAR<span>BLOCK</span></h1><div class="eyebrow" style="margin-top:8px">showdown · 20 brawlers · one survivor · winner takes the pot</div></div>
   <div class="toprow">
     <button class="wallet profile" id="profileBtn"><span class="pav" id="pAv"></span><span class="pinfo"><small>PROFILE</small><b id="pName">Player</b></span></button>
-    <div class="wallet"><span class="eyebrow">Demo wallet</span><b id="walletAmt">$0</b><button id="topup">+ reload demo credits</button></div>
+    <!-- Deux economies vivent sur cet ecran depuis la phase 03, et il doit dire laquelle il montre :
+         hors ligne un portefeuille de DEMONSTRATION garde dans le navigateur, avec son bouton de
+         recharge ; connecte, le solde du grand livre du serveur, sans bouton — c'est `renderWallet`
+         qui bascule les deux. Dans les deux cas ce sont des credits fictifs : aucun euro n'entre. -->
+    <div class="wallet" id="walletBox"><span class="eyebrow" id="walletLbl">Demo wallet</span><b id="walletAmt">$0</b><small id="walletHold" hidden></small><button id="topup">+ reload demo credits</button></div>
     <div class="wallet online" title="Simulated population — every opponent in this build is a bot"><span class="dot"></span><div><b id="onlineAmt">0</b><small>players online</small></div></div>
   </div>
   <div class="ticker"><div class="tlabel"><span class="dot"></span>LIVE WINS</div><div class="titems"><div class="track" id="tItems"></div></div></div>
@@ -803,6 +814,9 @@
   <div id="bottomBar">
     <div class="row" id="tierRow"><div class="eyebrow" id="tierLbl">4 · Pick a table &amp; drop in</div><div class="tiers" id="tiers"></div></div>
     <div id="playbar"><button id="playBtn"></button></div>
+    <!-- Ce que le serveur a refuse, dit en clair. Un sas interrompu sans un mot laisserait le
+         joueur devant un lobby qui ne s'explique pas : c'est l'etat mort que la phase interdit. -->
+    <div id="lobbyMsg" hidden></div>
   </div>
   <div id="build">V1 · demo credits only</div>
   <div class="lobbyBtns">
@@ -1152,10 +1166,24 @@ const WBCore = (function(){
   // Le profil du serveur remplace le brouillon local dès qu'on est connecté. Deux pièges ici, et
   // c'est pour eux que la fonction est pure : le serveur compte en CENTIMES entiers alors que le
   // jeu compte en dollars, et un avatar inconnu du client ne doit pas vider la case.
+  //
+  // DEPUIS LA PHASE 03 ELLE PORTE AUSSI L'ARGENT, et elle est le SEUL point de conversion du solde.
+  // Les deux montants voyagent en centimes entiers jusqu'au bout du réseau et ne redeviennent des
+  // dollars qu'ici, par `fromCents`, exactement comme `best` — un second point de conversion est
+  // interdit par une garde textuelle de `test.js`.
+  //
+  // ET UN MONTANT ABSENT N'EST PAS UN MONTANT NUL. C'est le piège nommé de la 02a, transposé à
+  // l'argent : le règlement d'une partie n'est pas un compte, et le lire comme tel remettrait le
+  // solde à zéro à l'écran. Les statistiques, elles, tombent volontairement à zéro sur un objet qui
+  // n'en porte pas — sinon une statistique fausse ne pourrait jamais redescendre — mais un
+  // portefeuille qui disparaît de l'écran est un bug que le joueur ne pardonne pas, et le serveur
+  // n'envoie jamais un compte à moitié. Absent ou illisible rend donc `null`, et l'appelant garde
+  // ce qu'il avait.
   function applyAccount(profile, compte, avatars){
     const base = profile || { name: NAME.fallback, avatar: '', stats: {} };
     const s = (compte && compte.stats) || {};
     const entier = v => Math.max(0, Math.floor(Number(v) || 0));
+    const montant = v => (typeof v === 'number' && Number.isFinite(v)) ? fromCents(entier(v)) : null;
     return {
       ...base,
       name: nameOr(compte && compte.name, base.name),
@@ -1166,6 +1194,11 @@ const WBCore = (function(){
         kills: entier(s.kills),
         best: fromCents(entier(s.best)),
       },
+      // Le solde DÉPENSABLE, et ce qui est retenu parce que le rejeu a divergé. Séparés, parce que
+      // les additionner ferait de la quarantaine un solde, c'est-à-dire exactement ce qu'elle
+      // n'est pas ; et rendus tous les deux, parce que la taire ferait disparaître de l'argent.
+      wallet: montant(compte && compte.balanceCents),
+      quarantine: montant(compte && compte.quarantineCents),
     };
   }
   // ---- Music tension, 0..1. Drives tempo and how many layers play. Kept pure so the curve can be
@@ -2369,6 +2402,8 @@ const WBCore = (function(){
   //   demande      delai            hors-ligne   serveur muet : on ne l'attend pas
   //   demande      illisible        hors-ligne   une réponse qu'on ne sait pas lire n'en est pas une
   //   demande      coup-denvoi      hors-ligne   le chronomètre du sas a gagné : on lâche la demande
+  //   demande      renonce          hors-ligne   le joueur quitte le sas : la demande ne sert plus
+  //   billet       renonce          hors-ligne   le serveur a clos ce billet, il ne resservira pas
   //   hors-ligne   coup-denvoi      partie       sans billet, la partie part quand même
   //   billet       coup-denvoi      partie       avec billet
   //   partie       fin-en-ligne     rapport      il y a un billet, donc un rapport à rendre
@@ -2392,6 +2427,12 @@ const WBCore = (function(){
   // — le fait d'avoir un billet vit dans l'événement, pas dans l'état (`sas-en-ligne` contre
   //   `sas-hors-ligne`, `fin-en-ligne` contre `fin-hors-ligne`). Un second axe dans l'état
   //   doublerait la table pour une information que l'appelant a déjà sous la main.
+  // — `renonce` est arrivé avec la phase 03, et il n'est PAS un doublon de `coup-denvoi`. Quitter
+  //   le sas laissait jusqu'ici le billet en main, ce qui était juste : il restait ouvert côté
+  //   serveur, et y revenir le retrouvait. Depuis que la mise est débitée à l'OUVERTURE, quitter
+  //   pendant la fenêtre demande au serveur de CLORE ce billet et de rendre la mise — le garder en
+  //   main le ferait ressortir au coup d'envoi suivant, avec un statut `renounced` que `ticketFor`
+  //   refuserait de toute façon, mais sans qu'aucun billet neuf ne soit demandé.
   const MATCH_STEPS = ['hors-ligne', 'demande', 'billet', 'partie', 'rapport', 'fini'];
   function matchFlow(step, event){
     const from = MATCH_STEPS.includes(step) ? step : 'hors-ligne';
@@ -2406,6 +2447,8 @@ const WBCore = (function(){
       case 'demande:delai':             return 'hors-ligne';
       case 'demande:illisible':         return 'hors-ligne';
       case 'demande:coup-denvoi':       return 'hors-ligne';
+      case 'demande:renonce':           return 'hors-ligne';
+      case 'billet:renonce':            return 'hors-ligne';
       case 'hors-ligne:coup-denvoi':    return 'partie';
       case 'billet:coup-denvoi':        return 'partie';
       case 'partie:fin-en-ligne':       return 'rapport';
@@ -2414,6 +2457,43 @@ const WBCore = (function(){
       case 'rapport:echec':             return 'fini';
       default:                          return from;
     }
+  }
+  // ---- UN REFUS NOMMÉ N'EST PAS UNE PANNE, et c'est la nuance la plus coûteuse de la phase 03.
+  //
+  // Depuis la 02a la règle est écrite partout : « un billet qui tarde ne retarde JAMAIS le coup
+  // d'envoi ». Réseau coupé, serveur muet, réponse illisible — la partie part hors ligne, sur la
+  // graine du navigateur, exactement comme avant qu'un serveur n'existe. Cette règle vaut pour une
+  // PANNE, et pour une bonne raison : une panne ne dit rien de ce que le joueur a le droit de
+  // faire, et lui refuser sa partie pour un wifi qui tousse serait un mauvais échange.
+  //
+  // Un refus EXPLICITE ET NOMMÉ dit précisément le contraire : le serveur a compris la demande, il
+  // l'a instruite, et il la rejette. Partir quand même ferait de la partie payante une partie
+  // gratuite — et depuis que la mise est débitée à l'ouverture du billet, « gratuite » veut dire
+  // « sans mise au séquestre », donc une partie qui ne pourrait rien payer à personne.
+  //
+  // LA LISTE EST FERMÉE, et elle ne contient que des refus qui parlent du DROIT de jouer : pas de
+  // crédits, le grand livre a refusé l'écriture, le joueur vient de renoncer. Un 429 ou un 500 n'y
+  // sont pas : ils ne disent rien, donc ils retombent dans le repli hors ligne comme une panne.
+  const REFUS_SAS = ['fonds', 'livre', 'renonce_recent'];
+  function refusDuBillet(status, data) {
+    // Statut 0 : il n'y a pas eu de réponse du tout. Ce n'est pas un refus, c'est une absence.
+    if (!Number(status)) return null;
+    const code = data && typeof data.code === 'string' ? data.code : '';
+    return REFUS_SAS.includes(code) ? code : null;
+  }
+  // Ce qu'on montre au joueur, et rien de plus. Même doctrine qu'`authMessage` : on dit ce qu'il
+  // peut faire, jamais le détail technique. Aucun de ces trois cas ne laisse le lobby mort — dans
+  // les trois, rien n'a été débité et le joueur peut retenter.
+  function refusMessage(code, data) {
+    const d = data || {};
+    if (code === 'fonds')  return 'Not enough credits for this table. Pick a smaller buy-in.';
+    if (code === 'livre')  return 'That entry could not be recorded. Nothing was charged — try again.';
+    if (code === 'renonce_recent') {
+      const s = Number(d.windowSeconds);
+      const n = Number.isFinite(s) && s > 0 ? Math.ceil(s) : renonceFenetreS();
+      return `You just left a room. You can enter a new one ${n} seconds after that one opened.`;
+    }
+    return 'The server turned this entry down. Try again in a moment.';
   }
   // Ce qu'un rapport de fin de partie a le droit de contenir. La liste sert deux fois : elle dit
   // à `reportFrom` quoi recopier, et à `checkReport` quoi refuser.
@@ -2784,7 +2864,7 @@ const WBCore = (function(){
            SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
            FLUX, fluxSalt, fluxSeed, makeFlux, melangeSeme, UNIT_N, UNIT_COS, UNIT, unitAt, unitFrom, dist,
            toCents, fromCents, seatsOf, RAKE_NUM, RAKE_DEN, feeCents, potCents, payoutCents, cashoutCents, purseBound,
-           NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
+           NET, seedFor, ticketFor, MATCH_STEPS, matchFlow, REFUS_SAS, refusDuBillet, refusMessage, PG_INT4_MAX, REPORT_FIELDS, reportFrom, checkReport, ENVELOPPE, matchVerdict,
            TRACE, TRACE_ALPHABET, traceDir, traceMots, traceEntree, traceQuant, traceViseeMots, traceVisee,
            traceMaxSteps, traceEnregistreur, traceDecode,
            DIGESTS_MOT, DIGESTS_MAX, digestsEncode, digestsDecode, digestsDiff,
@@ -3914,11 +3994,41 @@ const phases=()=>G.modeCfg.fast?C.ZONE_PHASES_FAST:C.ZONE_PHASES;
 const profile={ name:'', avatar:'', stats:{matches:0,wins:0,kills:0,best:0} };
 function randomName(){ return BOT_NAMES[Math.floor(Math.random()*BOT_NAMES.length)]+Math.floor(10+Math.random()*89); }
 profile.name=randomName();
-let wallet=C.START_WALLET, lastStake=0.5, selBrawler='bolt', selMode='solo', selGame='maxwin', selStake=0.5;
+// DEUX ECONOMIES, UNE SEULE VARIABLE. Hors ligne, `wallet` est le portefeuille de demonstration :
+// une variable du navigateur, que la console reecrit en un mot, et l'ecran le DIT. Connecte, c'est
+// le solde du grand livre du serveur, converti une seule fois par `applyAccount`, et plus personne
+// ici ne l'incremente ni ne le decremente — le serveur debite a l'ouverture du billet et credite au
+// reglement, et le jeu ne fait que lire ce qu'il rend. `quarantine` porte ce qu'une partie dont le
+// rejeu a diverge a mis de cote : montre, jamais depensable, et toujours zero hors ligne.
+let wallet=C.START_WALLET, quarantine=0, lastStake=0.5, selBrawler='bolt', selMode='solo', selGame='maxwin', selStake=0.5;
+// LE PORTEFEUILLE DE DEMONSTRATION, ET LUI SEUL. En ligne ces deux fonctions ne font rien : la mise
+// a deja ete debitee cote serveur au moment ou le billet s'est ouvert, et le gain est credite par le
+// reglement. La decrementer ici en plus ferait payer deux fois a l'ecran ce que le livre n'a compte
+// qu'une, et la crediter ici paierait un gain que le serveur n'a peut-etre pas accorde.
+function demoDebit(montant){ if(!Auth.online()) wallet-=montant; }
+function demoCredit(montant){ if(!Auth.online()) wallet+=montant; }
+// L'ECRAN DIT DE QUELLE ECONOMIE IL PARLE. Hors ligne : « Demo wallet » et le bouton de recharge.
+// En ligne : le solde du serveur, la quarantaine s'il y en a, et AUCUN bouton de recharge — connecte,
+// c'est litteralement une route de credit gratuit servie par le client, exactement le mecanisme
+// qu'il faudrait supprimer en phase 04. Dans les deux cas ce sont des credits fictifs.
+function renderWallet(){
+  const enLigne=Auth.online();
+  $('walletLbl').textContent=enLigne?'Credits':'Demo wallet';
+  $('walletBox').title=enLigne
+    ?'Fictional credits held by the server. No real money is involved.'
+    :'Demo credits kept in this browser. No real money is involved.';
+  $('topup').hidden=enLigne;
+  $('walletAmt').textContent=money(wallet);
+  const hold=$('walletHold'), retenu=enLigne&&quarantine>0;
+  hold.hidden=!retenu;
+  hold.textContent=retenu?money(quarantine)+' held for review':'';
+  // L'ecran de fin affiche le meme nombre : un solde qui arrive apres coup doit s'y voir aussi.
+  const ew=$('endWallet'); if(ew) ew.textContent=money(wallet);
+}
 
 // ---------- lobby ----------
 function renderLobby(){
-  $('walletAmt').textContent=money(wallet);
+  renderWallet();
   const bl=$('brawlers'); bl.innerHTML='';
   Object.values(B).forEach(b=>{
     const d=document.createElement('button'); d.className='bcard'+(b.id===selBrawler?' sel':''); d.style.setProperty('--c',b.color);
@@ -3981,7 +4091,16 @@ function renderLobby(){
   renderProfile();
   refreshOnline(true); // fill every counter now that all the cards exist, so nothing flashes empty
 }
-$('topup').onclick=e=>{ e.stopPropagation(); wallet=C.START_WALLET; renderLobby(); };
+// LA RECHARGE N'EXISTE QUE HORS LIGNE. Le bouton est cache des qu'on est connecte, et le geste
+// refuse quand meme : un bouton cache reste cliquable depuis la console, et cette ligne-la serait
+// alors une route de credit gratuit servie par le client. Hors ligne elle ne credite rien de reel,
+// elle remet une variable du navigateur a sa valeur de depart.
+$('topup').onclick=e=>{ e.stopPropagation(); if(Auth.online()) return; wallet=C.START_WALLET; renderLobby(); };
+// Ce que le serveur a refuse, affiche sous le bouton de la table. Vide, le bandeau disparait.
+function lobbyMsg(texte){
+  const m=$('lobbyMsg'); if(!m) return;
+  m.textContent=texte||''; m.hidden=!texte;
+}
 // ---------- avatars ----------
 // Drawn as SVG from the same colours and hats as the 3D brawlers, so a face always matches its
 // brawler. Ten heads × two expressions = twenty picks, no image files.
@@ -4190,7 +4309,11 @@ const Auth=(function(){
   }
   function forget(){
     clearTimeout(timer); session=null; flow=null; store(null);
-    step=C.authNext(step,'signout'); render();
+    // SE DECONNECTER, C'EST REVENIR AU PORTEFEUILLE DE DEMONSTRATION. Laisser a l'ecran le solde
+    // que le serveur venait de rendre en ferait un portefeuille local dote par le grand livre, et
+    // le joueur jouerait hors ligne avec des credits qui n'ont plus rien derriere eux.
+    wallet=C.START_WALLET; quarantine=0;
+    step=C.authNext(step,'signout'); render(); renderWallet();
   }
   // ---- notre API de profils ----
   // Tant que `ACCOUNT.api` est vide, le serveur n'existe pas encore : on se connecte quand meme, et
@@ -4209,13 +4332,26 @@ const Auth=(function(){
     return call(mine(path),{method:method||(body!==undefined?'POST':'GET'),headers:head,
       body:body!==undefined?JSON.stringify(body):undefined});
   }
+  // UN SEUL POINT D'ADOPTION D'UN COMPTE, et c'est ici. Tout ce qui vient du reseau passe par
+  // `applyAccount`, qui a deja arbitre : centimes vers dollars en un seul point de conversion,
+  // avatar inconnu conserve, reponse tronquee sans effet sur le pseudo.
+  //
+  // ET UN MONTANT ABSENT NE S'ECRIT PAS. `applyAccount` rend `null` quand la reponse ne porte pas
+  // de solde, et cette ligne-ci ne l'ecrit alors pas : c'est ce qui fait qu'aucune reponse autre
+  // qu'un compte ne peut vider le portefeuille a l'ecran. Le jeu n'envoie jamais de solde et n'en
+  // lit jamais dans une reponse de reglement ou de renoncement — il redemande /api/me.
+  function adopter(data){
+    const p=C.applyAccount(profile,data,AVATARS);
+    profile.name=p.name; profile.avatar=p.avatar; profile.stats=p.stats;
+    if(p.wallet!==null) wallet=p.wallet;
+    if(p.quarantine!==null) quarantine=p.quarantine;
+    renderProfile(); renderWallet(); render();
+  }
   async function sync(){
     if(!has()||!ACCOUNT.api) return;
     const r=await call(mine('/api/me'),{headers:{authorization:'Bearer '+session.jwt}});
     if(!r.ok) return;
-    const p=C.applyAccount(profile,r.data,AVATARS);
-    profile.name=p.name; profile.avatar=p.avatar; profile.stats=p.stats;
-    renderProfile(); render();
+    adopter(r.data);
   }
   async function pushProfile(){
     if(!has()||!ACCOUNT.api) return;
@@ -4224,7 +4360,9 @@ const Auth=(function(){
       body:JSON.stringify({name:profile.name,avatar:profile.avatar})});
     // Le serveur arbitre les pseudos : s'il refuse, c'est qu'il est pris, et le joueur doit le savoir.
     if(r.status===409){ msg('That name is already taken. Pick another one.','bad'); openProfile(true); return; }
-    if(r.ok&&r.data){ const p=C.applyAccount(profile,r.data,AVATARS); profile.name=p.name; profile.avatar=p.avatar; renderProfile(); }
+    // `PATCH /api/me` rend exactement la meme forme que `GET` — statistiques et montants compris —
+    // donc on l'adopte par le meme chemin plutot que d'en recopier la moitie ici.
+    if(r.ok&&r.data) adopter(r.data);
   }
   // ---- l'ecran ----
   function msg(text,kind){
@@ -4338,6 +4476,15 @@ const Match=(function(){
   // Une demande en vol que le coup d'envoi a laissee derriere lui ne doit pas reveiller la partie
   // suivante. Le numero de generation suffit : il change des qu'on relance ou qu'on lance.
   let gen=0;
+  // La generation dont le billet, s'il finit par arriver, est a renoncer immediatement. Zero veut
+  // dire « personne n'attend cela ». Voir `quitterLeSas` : le joueur peut partir pendant que la
+  // demande est encore en vol, et le serveur, lui, ouvrira le billet et debitera la mise.
+  let quitte=0;
+  // Ce que le sas doit faire d'un refus NOMME. Le module ne touche pas au DOM — c'est sa
+  // discipline depuis la 02a, et c'est ce qui permet a test.js de l'executer sans navigateur —
+  // donc il previent, et c'est l'ecran qui arrete le sas et affiche le message.
+  let refuse=null;
+  function surRefus(fn){ refuse=fn; }
   // La cle d'idempotence, tiree par le client : sans elle, un POST dont la reponse se perd est
   // indistinguable d'un POST jamais arrive. Une cle NEUVE par tentative, comme l'API le demande.
   function cleNeuve(){
@@ -4354,10 +4501,29 @@ const Match=(function(){
   async function demander(modeKey,stake,brawler){
     const n=++gen;
     const r=await Auth.send('/api/match',{mode:modeKey,stake,brawler,clientKey:cleNeuve()});
+    // LE JOUEUR A QUITTE LE SAS PENDANT QUE LA DEMANDE ETAIT EN VOL, et ce cas se traite AVANT la
+    // garde de generation. Le serveur, lui, a peut-etre ouvert le billet et debite la mise : jeter
+    // cette reponse-la ferait perdre l'identifiant du seul billet que personne ne renoncera, et le
+    // joueur paierait une partie qu'il n'a pas jouee. On renonce donc pour lui.
+    if(quitte===n){
+      quitte=0;
+      if(r.ok&&r.data&&r.data.id) renoncerBillet(r.data.id);
+      return;
+    }
     // Le coup d'envoi est peut-etre deja parti, ou une autre demande a pris la place : cette
     // reponse-la ne concerne plus personne.
     if(n!==gen||step!=='demande') return;
-    if(!r.ok){ step=C.matchFlow(step,r.status?'echec':'delai'); return; }
+    if(!r.ok){
+      // UN REFUS NOMME N'EST PAS UNE PANNE, et c'est WBCore qui tranche lequel des deux on tient.
+      // Une panne laisse partir la partie hors ligne, comme depuis la 02a. Un refus explicite dit
+      // que le serveur a instruit la demande et l'a rejetee : jouer quand meme ferait de la partie
+      // payante une partie gratuite. Dans les deux cas l'etat repasse hors ligne — il n'y a pas de
+      // billet — mais dans le second, l'ecran arrete le sas au lieu de le laisser filer.
+      const refus=C.refusDuBillet(r.status,r.data);
+      step=C.matchFlow(step,r.status?'echec':'delai');
+      if(refus&&refuse) refuse(refus,r.data);
+      return;
+    }
     // « Reponse illisible » n'est pas une question de JSON : c'est un billet dont on ne saurait
     // rien faire. `seedFor` est deja le juge de cette question, on ne lui invente pas un double.
     if(C.seedFor(r.data,null)===null||!r.data.id){ step=C.matchFlow(step,'illisible'); return; }
@@ -4374,6 +4540,38 @@ const Match=(function(){
     for(let i=0;i<C.MATCH_STEPS.length;i++){ const s=C.matchFlow(step,'coup-denvoi'); if(s===step) break; step=s; }
     enJeu=C.ticketFor(ticket,modeKey,stakeCents);
     return enJeu;
+  }
+  // QUITTER LE SAS. Jusqu'a la phase 03 il n'y avait rien a faire ici : la mise etait rendue par le
+  // navigateur et le billet restait ouvert cote serveur, donc y revenir le retrouvait. Depuis que
+  // la mise est debitee a l'OUVERTURE du billet, partir sans rien dire la laisse au sequestre
+  // jusqu'a l'expiration. La seule chose qui la rende est la route de renoncement, et elle n'est
+  // ouverte que pendant sa fenetre.
+  //
+  // C'EST L'APPELANT QUI DIT SI LA FENETRE EST OUVERTE, parce que c'est lui qui tient le
+  // chronometre du sas — le module ne lit aucune horloge, pas plus que `WBCore.renonciationOuverte`
+  // dont l'ecran tire la reponse. Hors fenetre, on ne demande rien : le billet reste jouable, et le
+  // reclamer pour rien couterait au joueur la temporisation `renonce_recent`.
+  function quitterLeSas(dansLaFenetre){
+    if(step==='demande'){
+      // La demande est en vol : on marque SA generation, et c'est `demander` qui renoncera.
+      quitte=dansLaFenetre?gen:0;
+      step=C.matchFlow(step,'renonce');
+      return;
+    }
+    const b=ticket;
+    // LE BILLET NE RESTE PAS EN MAIN. Le serveur va le clore ; le garder le ferait ressortir au
+    // coup d'envoi suivant, et le sas ne demanderait pas le billet neuf dont il a besoin.
+    if(b&&dansLaFenetre) ticket=null;
+    step=C.matchFlow(step,'renonce');
+    if(b&&dansLaFenetre) renoncerBillet(b.id);
+  }
+  async function renoncerBillet(id){
+    const r=await Auth.send('/api/match/'+encodeURIComponent(id)+'/renounce',{});
+    // LE SOLDE NE SE LIT PAS DANS CETTE REPONSE, IL SE REDEMANDE. Un renoncement n'est pas un
+    // compte, exactement comme un reglement n'en est pas un : le lire comme tel est le piege nomme
+    // de la 02a, et il coute cette fois le portefeuille entier a l'ecran. `Auth.sync` redemande
+    // /api/me, et c'est `applyAccount` qui arbitre.
+    if(r.ok) Auth.sync();
   }
   // Fin de partie. Le rapport ne part que s'il y a un billet qui decrit CETTE partie ; sinon
   // personne n'attend rien et l'enchainement se termine sur place.
@@ -4433,7 +4631,7 @@ const Match=(function(){
     // avatar inconnu conserve, reponse tronquee sans effet sur le pseudo.
     Auth.sync();
   }
-  return { sas, coupDenvoi, fin };
+  return { sas, coupDenvoi, fin, quitterLeSas, surRefus };
 })();
 /*MATCH-END*/
 const rulesEl=$('rules');
@@ -6168,11 +6366,17 @@ function buildMapImage(){
 // ---------- pre-match waiting room ----------
 let W=null;
 function enterWaiting(stake){
-  lobbyStop();
+  lobbyStop(); lobbyMsg('');
   const mode=C.MODES[selMode], seats=C.seatsOf(mode), tier=C.tierFor(stake);
-  wallet-=stake; lastStake=stake;                                   // charged on entry, refunded if you leave
+  // HORS LIGNE SEULEMENT. En ligne le debit a eu lieu cote serveur, a l'ouverture du billet, et le
+  // solde affiche est celui que le serveur rend avec — le decrementer ici en plus ferait payer
+  // deux fois a l'ecran ce que le grand livre n'a compte qu'une.
+  demoDebit(stake); lastStake=stake;
   const queue=C.queueFor(C.onlineTotal(),selMode,stake), rate=C.joinRate(queue,seats);
-  W={stake,mode,seats,rate,t:0,seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,names:BOT_NAMES.slice().sort(()=>Math.random()-0.5),ni:0};
+  // `enLigne` est fige a l'entree : ce que le bouton QUITTER promet ne doit pas changer parce que
+  // le jeton a expire au milieu du sas.
+  W={stake,mode,seats,rate,t:0,seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,enLigne:Auth.online(),
+     names:BOT_NAMES.slice().sort(()=>Math.random()-0.5),ni:0};
   // On demande son billet au serveur ici, et on n'en reparle plus : le sas d'attente garde son
   // chronometre, la partie partira a l'heure avec ou sans reponse. Sans compte ou sans
   // `ACCOUNT.api`, rien n'est demande du tout et rien ne change.
@@ -6193,6 +6397,7 @@ function wFeed(txt){ const d=document.createElement('div'); d.textContent=txt; c
 function waitTick(){
   if(!W) return;
   W.t+=0.1;
+  wLeaveLabel();
   const seated=C.seatsAt(W.t,W.seats,W.rate);
   while(W.seated<seated){ W.seated++; wFeed(`${W.names[W.ni++%W.names.length]} joined · ${W.seated}/${W.seats}`); }
   if(!W.full&&W.seated>=W.seats){ W.full=true; W.drop=Math.min(W.drop,W.t+C.LOBBY.dropIn); wFeed('Room full — dropping in'); roomFullChime(); }
@@ -6207,7 +6412,59 @@ function waitTick(){
   const arc=$('wArc'), L=2*Math.PI*52; arc.style.strokeDashoffset=L*(1-left/(W.full?C.LOBBY.dropIn:C.LOBBY.wait));
   if(left<=0){ const st=W.stake; clearInterval(W.timer); waitStop(); W=null; $('waiting').classList.remove('on'); startMatch(st); }
 }
-$('wLeave').onclick=()=>{ if(!W) return; musicStop(); waitStop(); clearInterval(W.timer); wallet+=W.stake; W=null; $('waiting').classList.remove('on'); $('lobby').style.display='flex'; lobbyStart(); renderLobby(); resetTicker(); };
+// Tout ce qui ramene du sas au lobby passe par ici : le bouton QUITTER, et le refus nomme du
+// serveur. Un seul chemin de sortie, sinon l'un des deux oublie un minuteur ou une musique et le
+// lobby revient a moitie vivant.
+function sortirDuSas(texte){
+  if(!W) return;
+  musicStop(); waitStop(); clearInterval(W.timer);
+  W=null;
+  $('waiting').classList.remove('on'); $('lobby').style.display='flex';
+  lobbyStart(); renderLobby(); resetTicker(); lobbyMsg(texte||'');
+}
+$('wLeave').onclick=()=>{
+  if(!W) return;
+  // L'ORDRE COMPTE : la fenetre se lit AVANT que le chronometre du sas ne disparaisse avec `W`.
+  const rendu=sasRemboursable();
+  // En ligne, ni credit ni debit ici : la mise est au sequestre du serveur, et c'est sa route de
+  // renoncement qui la rend — puis `Auth.sync` redemande le solde. Hors ligne, le portefeuille de
+  // demonstration rend la mise qu'il avait prise a l'entree.
+  demoCredit(W.stake);
+  Match.quitterLeSas(rendu);
+  sortirDuSas('');
+};
+// UN REFUS NOMME ARRETE LE SAS, ET NE LANCE AUCUNE PARTIE. C'est la nuance de la phase 03 : une
+// panne silencieuse laisse partir la partie hors ligne comme avant — « un billet qui tarde ne
+// retarde jamais le coup d'envoi » — mais un refus explicite dit que le serveur a instruit la
+// demande et l'a rejetee, et jouer quand meme ferait de la partie payante une partie gratuite.
+//
+// LE LOBBY NE RESTE PAS MORT : on y revient, le message dit pourquoi, et rien n'a ete debite —
+// aucun de ces trois refus n'ecrit quoi que ce soit cote serveur.
+//
+// CE QUE CELA NE COUVRE PAS, ecrit plutot que decouvert : un refus qui arriverait APRES le coup
+// d'envoi ne peut plus rien arreter, le sas n'existe plus. La fenetre est bornee — le sas dure au
+// moins 13,4 secondes et `call` a son propre delai — et la partie qui part alors n'a ni billet ni
+// mise engagee, donc elle ne paiera rien a personne.
+// Rien a rendre au portefeuille de demonstration : un refus n'arrive que connecte, et connecte il
+// n'a pas pris la mise a l'entree du sas.
+Match.surRefus((code,data)=>{ sortirDuSas(C.refusMessage(code,data)); });
+// CE QUE PARTIR COUTE, ET LA REGLE QUI LE DIT EST CELLE DU SERVEUR. `renonciationOuverte` vit dans
+// WBCore precisement pour cela : l'ecran doit annoncer ce que le serveur arbitrera, et deux
+// definitions de cette fenetre seraient la troisieme copie du patron condamne pour `terminal`.
+//
+// ON L'APPELLE AVEC LE CHRONOMETRE DU SAS, jamais avec une horloge lue ici. Ce chronometre est en
+// AVANCE sur celui du serveur — il part du clic, le serveur ne date le billet qu'a reception de la
+// requete, et la latence ne va que dans ce sens — donc l'ecran ferme la promesse un peu AVANT que
+// le serveur ne la ferme. Il ne promet jamais un remboursement qui sera refuse.
+function sasRemboursable(){
+  return !!W && C.renonciationOuverte({openedAt:0},W.t*1000);
+}
+function wLeaveLabel(){
+  const b=$('wLeave'); if(!b||!W) return;
+  // Hors ligne, le portefeuille de demonstration rend toujours la mise : il n'y a rien a arbitrer.
+  if(!W.enLigne){ b.textContent='LEAVE · REFUND STAKE'; return; }
+  b.textContent=sasRemboursable()?'LEAVE · REFUND STAKE':'LEAVE · STAKE IS LOST';
+}
 // the podium reuses the lobby preview renderer
 function podLoop(){
   if(!W){ return; }
@@ -6419,7 +6676,10 @@ function endMatch(won,info){
   if(won){
     const take=C.cashoutPayout(p.pouch);
     netGagne=take.net;
-    wallet+=take.net; profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
+    // HORS LIGNE SEULEMENT. Connecte, c'est le reglement du serveur qui paie — il rejoue la partie
+    // et recalcule le net lui-meme — et le solde revient par `Auth.sync`. Crediter ici en plus
+    // afficherait un gain que le grand livre n'a peut-etre pas accorde.
+    demoCredit(take.net); profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
     title = cash ? 'BANKED!' : 'VICTORY!';
     ribbon = cash
       ? (info.cashedOut?'CASHED OUT EARLY':(mode.teamSize>1?'LAST TEAM STANDING':'SOLE SURVIVOR'))
@@ -6458,7 +6718,7 @@ function endMatch(won,info){
   $('endPouchCap').textContent=pouchCap; $('endPouch').textContent=pouchVal;
   $('endCubeTxt').textContent=p.cubes+' / '+C.CUBE.max;
   $('endCubeBar').style.setProperty('--w',Math.round(clamp(p.cubes/C.CUBE.max,0,1)*100)+'%');
-  $('endWallet').textContent=money(wallet);
+  renderWallet();
   $('endMoneyLabel').textContent=moneyLabel;
   const sign=moneyValue.match(/^([+−-])?(.*)$/);
   $('endMoneyValue').innerHTML=(sign[1]?`<span class="sign">${sign[1]}</span>`:'')+sign[2];
@@ -6471,8 +6731,11 @@ function endMatch(won,info){
   // fonction a sous la main. Les deux montants passent par `toCents`, le seul point de conversion :
   // un dollar flottant n'entre pas en base.
   //
-  // Le portefeuille de demonstration ne bouge pas d'un centime dans cette phase : `wallet` reste
-  // une variable du navigateur, aucun solde ne part au serveur et aucun n'en revient.
+  // ET AUCUN SOLDE NE PART AU SERVEUR, dans cette phase pas plus que dans la precedente. Ce qui a
+  // change depuis la phase 03 est l'autre sens : connecte, le solde REVIENT du serveur, une fois le
+  // reglement ecrit, par le `Auth.sync` que `Match.rendre` declenche — et `applyAccount` est le seul
+  // point ou il redevient des dollars. Hors ligne, `wallet` reste une variable du navigateur, que
+  // seuls `demoDebit` et `demoCredit` touchent, et l'ecran dit que c'est une demonstration.
   //
   // LA TRACE PART AVEC LE RAPPORT, ET APRES LA PARTIE — jamais pendant. Elle est deja enregistree,
   // il ne reste qu'a la couper en segments, ce qui est le seul travail que l'enregistrement coute

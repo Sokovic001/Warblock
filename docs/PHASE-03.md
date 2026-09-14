@@ -576,6 +576,21 @@ Trois conséquences précises, parce que **deux économies vivent sur le même �
 Le test d'accessibilité d'une table au lobby redevient ce qu'il est — une **indication**. C'est le
 `409 fonds` du serveur qui tranche.
 
+*Précisions apportées par le module 5, parce que ce document a été écrit avant que les modules 3 et 4
+n'ajoutent leurs refus.* (1) Ce ne sont pas un mais **trois** refus qui arrêtent le sas : `fonds`,
+plus `livre` (le grand livre a refusé l'écriture, module 3) et `renonce_recent` (la temporisation du
+chercheur de graine, module 4). Les trois disent la même chose — le serveur a instruit la demande et
+l'a rejetée — et les traiter différemment n'aurait aucun sens. La liste est **fermée**, elle vit dans
+`WBCore.REFUS_SAS`, et un test d'`api/test.js` la confronte aux codes que l'API émet vraiment ; un
+429 et un 500 n'y sont volontairement pas, ils ne nomment rien et retombent donc dans le repli hors
+ligne. (2) Un trou que ce document ne nommait pas, et qui coûte une mise entière : **le joueur peut
+quitter le sas pendant que la demande de billet est encore en vol.** Le serveur ouvre alors le billet
+et débite ; personne ne renonce pour lui, et la mise reste au séquestre jusqu'à l'expiration. Le jeu
+renonce donc au billet qui arrive en retard, sur la génération de requête qui l'attendait. (3) Quitter
+le sas **hors** fenêtre ne réclame rien du tout : le billet reste ouvert et jouable côté serveur, et
+appeler la route pour se faire refuser coûterait au joueur la temporisation `renonce_recent`. Le jeu
+le lâche seulement de sa main, pour que le sas suivant en demande un neuf.
+
 ### La frontière avec la 02a est un test, pas une phrase
 
 Le grand livre ne lit **aucune** ligne dont les faits ont été déclarés par le client. La frontière

@@ -1674,9 +1674,17 @@ test('le contrat du client ne touche ni à l\'horloge, ni au hasard, ni au navig
   // appels. Une seule de ces fonctions qui lirait Date.now() rendrait un rapport intestable.
   const bloc = core.slice(core.indexOf('// ---- Le contrat du client'), core.indexOf('  return { MAP, PLAYERS,'));
   assert.ok(bloc.length > 1000, 'le bloc du contrat n\'a pas été retrouvé dans CORE');
+  // La recherche porte sur l'IDENTIFIANT ENTIER, pas sur la sous-chaîne. `windowSeconds`, le champ
+  // que le serveur renvoie avec `renonce_recent`, contient les six lettres de `window` sans être le
+  // moindre accès au navigateur : une garde qui le refuserait obligerait à renommer un champ du
+  // protocole pour lui plaire, et c'est le genre de contorsion qui finit par la faire désarmer.
+  const mot = t => new RegExp('(^|[^A-Za-z0-9_$.])' + t.replace(/\./g, '\\.') + '(?![A-Za-z0-9_$])');
   for (const interdit of ['Date.now', 'Math.random', 'document', 'window', 'THREE', 'performance', 'fetch', 'localStorage'])
-    assert.ok(!bloc.split('\n').some(l => l.includes(interdit) && !l.trim().startsWith('//')),
+    assert.ok(!bloc.split('\n').some(l => mot(interdit).test(l) && !l.trim().startsWith('//')),
       `${interdit} n'a rien à faire dans le contrat du client`);
+  // Et la garde attrape toujours ce pour quoi elle existe : le prouver ici évite de la croire.
+  for (const faux of ['const t = Date.now();', 'if (window.x) return;', 'return Math.random();'])
+    assert.ok(['Date.now', 'window', 'Math.random'].some(i => mot(i).test(faux)), faux);
 });
 
 console.log('Le plan de zone, tiré de la seule graine');
@@ -2604,7 +2612,11 @@ function bancMatch({ online = true } = {}) {
     },
   };
   const Match = new Function('C', 'Auth', MATCH_SRC + '\nreturn Match;')(C, Auth);
-  return { Match, envois, syncs: () => syncs };
+  // Le module ne touche pas au DOM : il PRÉVIENT, et c'est l'écran qui arrête le sas. Le banc
+  // ramasse donc ces avertissements comme il ramasse les envois.
+  const refus = [];
+  Match.surRefus((code, data) => refus.push({ code, data }));
+  return { Match, envois, refus, syncs: () => syncs };
 }
 // Laisser tourner les promesses déjà résolues : le module enchaîne deux `await` au plus.
 const souffler = () => new Promise(r => setImmediate(r));
@@ -2809,6 +2821,488 @@ test('les statistiques venues du serveur passent par applyAccount, jamais par un
   const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
   assert.ok(!module.includes('profile.stats'), 'le règlement ne doit jamais écrire les statistiques lui-même');
   assert.ok(module.includes('Auth.sync()'), 'après un règlement, le profil se redemande au serveur');
+});
+
+console.log('Le jeu lit son solde du serveur, et les deux économies ne se mélangent pas');
+// LE MODULE QUI PORTE TOUT LE RISQUE DE LA PHASE 03. Deux économies vivent désormais sur le même
+// écran : le portefeuille de DÉMONSTRATION hors ligne, une variable du navigateur qui le dit ; et
+// le solde du GRAND LIVRE en ligne, que le serveur seul écrit. `node test.js` ne peut pas voir un
+// bug d'écran — c'est écrit dans la spécification et dans les risques — donc ce qu'il peut faire,
+// il le fait entièrement : il exécute les deux fonctions du portefeuille, il exécute le module du
+// billet, il exécute le libellé du bouton QUITTER, et il tient par garde textuelle ce qui reste.
+const AVA = C.avatarList(Object.keys(C.BRAWLERS));
+const LOCAL = () => ({ name: 'Loic', avatar: AVA[2].id, stats: { matches: 3, wins: 1, kills: 9, best: 5 } });
+test('applyAccount porte le solde et la quarantaine, en CENTIMES jusqu\'au bout du réseau', () => {
+  const p = C.applyAccount(LOCAL(), { balanceCents: 4950, quarantineCents: 120 }, AVA);
+  assert.strictEqual(p.wallet, 49.5);
+  assert.strictEqual(p.quarantine, 1.2);
+  // Le domaine, pas un échantillon : la conversion ne perd pas un centime, dans les deux sens.
+  for (const c of [0, 1, 7, 49, 50, 99, 500, 1000, 5000, 123456]) {
+    const q = C.applyAccount(LOCAL(), { balanceCents: c, quarantineCents: c }, AVA);
+    assert.strictEqual(C.toCents(q.wallet), c, `solde ${c}`);
+    assert.strictEqual(C.toCents(q.quarantine), c, `quarantaine ${c}`);
+  }
+  // Et la dotation du serveur tombe exactement sur le portefeuille de départ du jeu : deux
+  // économies sur le même écran doivent partir du même nombre. `api/test.js` tient l'autre bout.
+  assert.strictEqual(C.applyAccount(LOCAL(), { balanceCents: C.toCents(C.START_WALLET) }, AVA).wallet,
+    C.START_WALLET);
+  // Un montant qui n'en est pas un ne devient jamais un nombre : ni une chaîne, ni un booléen, ni
+  // l'infini. C'est la même doctrine que `toCents`, qui rend `null` plutôt qu'un zéro silencieux.
+  for (const faux of ['4950', null, undefined, NaN, Infinity, -Infinity, {}, [], true, false])
+    assert.strictEqual(C.applyAccount(LOCAL(), { balanceCents: faux }, AVA).wallet, null,
+      String(faux) + ' ne doit pas devenir un solde');
+  // Les deux ne se mélangent jamais : les additionner ferait de la quarantaine un solde.
+  assert.strictEqual(C.applyAccount(LOCAL(), { balanceCents: 5000 }, AVA).quarantine, null);
+  assert.strictEqual(C.applyAccount(LOCAL(), { quarantineCents: 5000 }, AVA).wallet, null);
+});
+test('GARDE TEXTUELLE : le solde ne se convertit qu\'UNE fois, et le point est applyAccount', () => {
+  // Exactement la garde qui protège déjà `best`, étendue aux deux montants de la phase 03. Un
+  // second point de conversion est la frontière où l'on se trompe : c'est pour cela que la couche
+  // monétaire n'en a qu'un.
+  assert.ok(/wallet: montant\(compte && compte\.balanceCents\)/.test(core),
+    'le solde doit passer par le même convertisseur que `best`');
+  assert.ok(/quarantine: montant\(compte && compte\.quarantineCents\)/.test(core));
+  assert.ok(/const montant = v => \(typeof v === 'number' && Number\.isFinite\(v\)\) \? fromCents\(entier\(v\)\) : null;/.test(core),
+    'et ce convertisseur doit appeler fromCents, pas diviser par 100 à la main');
+  // LE BLOC `Game` NE CONNAÎT PAS LES CHAMPS DU RÉSEAU. Il ne nomme ni `balanceCents` ni
+  // `quarantineCents` ni `fromCents` : il n'a donc aucun moyen d'ouvrir un second point de
+  // conversion, et un futur « juste ici, une fois » se verra dans ce test avant d'être écrit.
+  for (const interdit of ['balanceCents', 'quarantineCents', 'fromCents'])
+    assert.ok(!JEU.includes(interdit), `${interdit} n'a rien à faire hors d'applyAccount`);
+});
+test('LIRE UN RÈGLEMENT COMME UN COMPTE NE REMET AUCUN SOLDE À ZÉRO', () => {
+  // Le piège nommé de la 02a, transposé à l'argent — et il coûte cette fois le portefeuille entier
+  // à l'écran. Un règlement porte le verdict d'UNE partie et aucun solde ; les statistiques, elles,
+  // tombent volontairement à zéro (sinon une statistique fausse ne redescendrait jamais), mais un
+  // portefeuille qui disparaît est un bug que personne ne pardonne. Absent rend donc `null`.
+  const reglement = { matchId: '12', status: 'settled', issue: 'victoire', controle: null, motif: null,
+                      grossCents: 1000, feeCents: 200, netCents: 800, purseCents: 1000,
+                      declaredNetCents: 800, ecartCents: 0, settledAt: '2026-03-01T18:05:00Z' };
+  const p = C.applyAccount(LOCAL(), reglement, AVA);
+  assert.strictEqual(p.wallet, null, 'un règlement n\'est pas un compte : il ne porte aucun solde');
+  assert.strictEqual(p.quarantine, null);
+  assert.deepStrictEqual(p.stats, { matches: 0, wins: 0, kills: 0, best: 0 });
+  // Et aucun des montants du règlement n'est confondu avec un solde : `netCents` vaut 800 et ne
+  // doit surtout pas devenir un portefeuille de 8 dollars.
+  assert.notStrictEqual(p.wallet, 8);
+  // Le même piège sur la réponse de renoncement, qui elle PORTE les deux montants : le jeu ne la
+  // lit pas non plus comme un compte, il redemande /api/me. La fonction, elle, saurait les lire —
+  // ce test dit que la valeur est juste, pas que le jeu emprunte ce chemin.
+  const renonce = { matchId: '12', status: 'renounced', refundedCents: 50,
+                    balanceCents: 5000, quarantineCents: 0 };
+  const q = C.applyAccount(LOCAL(), renonce, AVA);
+  assert.strictEqual(q.wallet, 50);
+  assert.strictEqual(q.quarantine, 0, 'zéro est un montant, et il s\'écrit');
+  // Le module du billet ne prend PAS ce chemin : il redemande le compte au serveur.
+  const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
+  const renoncer = module.slice(module.indexOf('async function renoncerBillet('), module.indexOf('  // Fin de partie.'));
+  assert.ok(renoncer.length > 100 && renoncer.length < 900, 'renoncerBillet n\'a pas été retrouvée');
+  assert.ok(renoncer.includes('Auth.sync()'), 'après un renoncement, le solde se redemande');
+  const codeRenoncer = renoncer.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(!codeRenoncer.includes('applyAccount'), 'le module ne lit pas un compte dans une réponse de renoncement');
+});
+// LES DEUX FONCTIONS DU PORTEFEUILLE DE DÉMONSTRATION, EXÉCUTÉES. Elles sont trois lignes, et
+// c'est exactement pour cela qu'elles méritent d'être extraites et lancées plutôt que relues : une
+// garde textuelle dirait que le `if` est écrit, pas qu'il décide.
+const PORTE_SRC = JEU.slice(JEU.indexOf('function demoDebit('), JEU.indexOf('function renderWallet('));
+function bancPortefeuille(online, depart) {
+  assert.ok(PORTE_SRC.length > 100 && PORTE_SRC.length < 1200, 'demoDebit/demoCredit n\'ont pas été retrouvées');
+  return new Function('Auth', 'depart', PORTE_SRC
+    + '\nlet wallet = depart;'
+    + '\nreturn { debit: m => { demoDebit(m); return wallet; },'
+    + '\n         credit: m => { demoCredit(m); return wallet; } };')({ online: () => online }, depart);
+}
+test('EN LIGNE, ni la mise ni le gain ne touchent `wallet` — hors ligne, les deux le font', () => {
+  // Le débit a eu lieu côté serveur, à l'ouverture du billet, et le solde est celui que le serveur
+  // rend. Le décrémenter ici en plus ferait payer deux fois à l'écran ce que le livre n'a compté
+  // qu'une ; le créditer ici afficherait un gain que le grand livre n'a peut-être pas accordé.
+  const ligne = bancPortefeuille(true, 50);
+  assert.strictEqual(ligne.debit(0.5), 50, 'en ligne, la mise ne descend pas du portefeuille');
+  assert.strictEqual(ligne.credit(8), 50, 'en ligne, le gain ne monte pas non plus');
+  // Hors ligne, absolument rien ne change : c'est la promesse du fichier unique.
+  const seul = bancPortefeuille(false, 50);
+  assert.strictEqual(seul.debit(0.5), 49.5);
+  assert.strictEqual(seul.credit(8), 57.5);
+  // Et sur les quatre tables, en dollars comme le jeu les compte.
+  for (const t of C.TIERS) {
+    const w = bancPortefeuille(false, C.START_WALLET);
+    assert.strictEqual(C.toCents(w.debit(t.stake)), C.toCents(C.START_WALLET) - C.toCents(t.stake), t.label);
+    assert.strictEqual(C.toCents(w.credit(t.stake)), C.toCents(C.START_WALLET), t.label);
+  }
+});
+test('GARDE TEXTUELLE : rien d\'autre que les deux fonctions de démonstration n\'écrit `wallet`', () => {
+  // Trois interdits en un, et c'est celle que la spécification réclame mot pour mot : aucun
+  // `wallet -=`, aucun `wallet +=` sur le chemin EN LIGNE, et aucune écriture de `wallet` depuis
+  // une réponse serveur en dehors d'`applyAccount`.
+  const lignes = JEU.split('\n').map(l => l.trim()).filter(l => !l.startsWith('//'));
+  const muta = lignes.filter(l => /\bwallet\s*[-+]=/.test(l));
+  assert.deepStrictEqual(muta, [
+    'function demoDebit(montant){ if(!Auth.online()) wallet-=montant; }',
+    'function demoCredit(montant){ if(!Auth.online()) wallet+=montant; }',
+  ], 'le portefeuille se mute ailleurs que dans les deux fonctions de démonstration');
+  // Les seules AFFECTATIONS, et chacune se justifie : la déclaration, le retour au portefeuille de
+  // démonstration (recharge hors ligne, déconnexion), et ce qu'`applyAccount` a rendu.
+  const aff = lignes.filter(l => /\bwallet\s*=[^=]/.test(l));
+  assert.strictEqual(aff.length, 4, 'une affectation de `wallet` de plus :\n' + aff.join('\n'));
+  assert.ok(aff[0].startsWith('let wallet=C.START_WALLET, quarantine=0,'), aff[0]);
+  assert.ok(/if\(Auth\.online\(\)\) return; wallet=C\.START_WALLET;/.test(aff[1]),
+    'la recharge doit refuser en ligne avant d\'écrire quoi que ce soit : ' + aff[1]);
+  assert.strictEqual(aff[2], 'wallet=C.START_WALLET; quarantine=0;');
+  assert.strictEqual(aff[3], 'if(p.wallet!==null) wallet=p.wallet;',
+    'le seul solde venu du réseau est celui qu\'applyAccount a rendu');
+  // Et ce `p`-là vient bien d'`applyAccount`, dans la seule fonction qui adopte un compte.
+  const reseau = JEU.slice(JEU.indexOf('  // ---- notre API de profils ----'), JEU.indexOf('  // ---- l\'ecran ----'));
+  const adopte = reseau.slice(reseau.indexOf('function adopter(data){'), reseau.indexOf('async function sync()'));
+  assert.ok(adopte.includes('const p=C.applyAccount(profile,data,AVATARS);'), 'adopter n\'a pas été retrouvée');
+  assert.ok(adopte.includes('if(p.wallet!==null) wallet=p.wallet;'));
+  assert.ok(adopte.includes('if(p.quarantine!==null) quarantine=p.quarantine;'),
+    'la quarantaine suit la même règle : absente, elle ne s\'écrit pas');
+  // LE JEU N'ENVOIE JAMAIS DE SOLDE. Aucun corps de requête ne porte de montant de compte.
+  const module = JEU.slice(JEU.indexOf('const Match=(function()'), JEU.indexOf('const rulesEl='));
+  for (const interdit of ['wallet', 'START_WALLET', 'balance', 'solde', 'quarantine'])
+    assert.ok(!module.includes(interdit), `${interdit} n'a rien à faire dans le module du billet`);
+});
+test('LE BOUTON DE RECHARGE DISPARAÎT EN LIGNE, et le portefeuille de démo dit qu\'il en est un', () => {
+  const rw = JEU.slice(JEU.indexOf('function renderWallet(){'), JEU.indexOf('// ---------- lobby ----------'));
+  assert.ok(rw.length > 300, 'renderWallet n\'a pas été retrouvée');
+  assert.ok(rw.includes("$('topup').hidden=enLigne;"), 'le bouton de recharge doit disparaître en ligne');
+  assert.ok(/enLigne\?'Credits':'Demo wallet'/.test(rw),
+    'hors ligne, le portefeuille doit continuer de DIRE à l\'écran qu\'il est de démonstration');
+  // La quarantaine se voit dès qu'elle porte un centime : la taire ferait disparaître de l'argent
+  // aux yeux du joueur, la fondre dans le solde en ferait un solde dépensable.
+  assert.ok(rw.includes('quarantine>0'), 'la quarantaine doit s\'afficher quand elle n\'est pas nulle');
+  // Et le geste lui-même est refusé, pas seulement caché : un bouton `hidden` reste cliquable
+  // depuis la console, et cette ligne-là serait alors une route de crédit gratuit.
+  assert.ok(/\$\('topup'\)\.onclick=e=>\{ e\.stopPropagation\(\); if\(Auth\.online\(\)\) return;/.test(JEU));
+  // Aucune promesse d'argent réel nulle part : ce sont des crédits fictifs, et l'écran le dit.
+  for (const l of JEU.split('\n')) {
+    if (l.trim().startsWith('//')) continue;
+    assert.ok(!/\b(real money|euros?|withdraw|deposit)\b/i.test(l) || /No real money/.test(l),
+      'l\'écran laisse croire qu\'un euro entre : ' + l.trim());
+  }
+});
+// LE LIBELLÉ DU BOUTON QUITTER, EXÉCUTÉ. Il annonce ce que le SERVEUR arbitrera, donc il doit
+// appeler la règle du serveur — `WBCore.renonciationOuverte` — avec le chronomètre du sas.
+const QUITTER_SRC = JEU.slice(JEU.indexOf('function sasRemboursable(){'), JEU.indexOf('// the podium reuses'));
+function bancQuitter(t, enLigne) {
+  assert.ok(QUITTER_SRC.length > 200 && QUITTER_SRC.length < 900, 'wLeaveLabel n\'a pas été retrouvée');
+  const bouton = { textContent: '' };
+  const ouverte = new Function('C', '$', 'W', QUITTER_SRC + '\nwLeaveLabel();\nreturn sasRemboursable();')(
+    C, () => bouton, { t, enLigne });
+  return { texte: bouton.textContent, ouverte };
+}
+test('le bouton QUITTER dit ce que partir coûte, et il le lit sur le chronomètre du sas', () => {
+  const fenetre = C.renonceFenetreS();
+  assert.strictEqual(fenetre, 10, 'la fenêtre a changé de valeur : ce test la suit, il ne la fige pas');
+  // Sur toute la durée d'un sas, au dixième de seconde — le pas du minuteur — le bouton dit vrai.
+  for (let i = 0; i <= C.LOBBY.wait * 10; i++) {
+    const t = i / 10;
+    const r = bancQuitter(t, true);
+    assert.strictEqual(r.ouverte, t * 1000 <= fenetre * 1000, `t=${t}`);
+    assert.strictEqual(r.texte, r.ouverte ? 'LEAVE · REFUND STAKE' : 'LEAVE · STAKE IS LOST', `t=${t}`);
+  }
+  // Les deux bords, exactement : la fenêtre est fermée au premier dixième d'après.
+  assert.ok(bancQuitter(fenetre, true).ouverte);
+  assert.ok(!bancQuitter(fenetre + 0.1, true).ouverte);
+  // HORS LIGNE, RIEN NE CHANGE : le portefeuille de démonstration rend toujours la mise, et le
+  // bouton ne va pas se mettre à menacer un joueur qui ne doit rien à personne.
+  for (const t of [0, 5, 10, 12, 24.9])
+    assert.strictEqual(bancQuitter(t, false).texte, 'LEAVE · REFUND STAKE', `hors ligne, t=${t}`);
+  // L'ÉCRAN FERME LA PROMESSE AVANT LE SERVEUR, et c'est la propriété qui compte : le chronomètre
+  // du client part du clic, le serveur ne date le billet qu'à réception de la requête, donc son
+  // `maintenant − openedAt` est TOUJOURS plus petit. Confronté sur toute la plage de latences
+  // plausibles : dès que l'écran promet, le serveur accepterait.
+  for (let i = 0; i <= C.LOBBY.wait * 10; i++) {
+    const t = i / 10;
+    if (!bancQuitter(t, true).ouverte) continue;
+    for (const latenceMs of [0, 1, 50, 200, 1000, 3000]) {
+      const ouvertAu = latenceMs;                        // openedAt, vu du chronomètre du sas
+      assert.ok(C.renonciationOuverte({ openedAt: ouvertAu }, t * 1000),
+        `l'écran promet un remboursement que le serveur refuserait : t=${t}, latence=${latenceMs}`);
+    }
+  }
+});
+test('un sas quitté et un refus nommé passent par le MÊME chemin de retour au lobby', () => {
+  // Le lobby ne doit jamais rester mort. Deux sorties de sas et une seule fonction : sinon l'une
+  // des deux oublie un minuteur ou une musique, et le lobby revient à moitié vivant.
+  const sortie = JEU.slice(JEU.indexOf('function sortirDuSas(texte){'), JEU.indexOf("$('wLeave').onclick="));
+  assert.ok(sortie.length > 200, 'sortirDuSas n\'a pas été retrouvée');
+  for (const attendu of ['musicStop()', 'waitStop()', 'clearInterval(W.timer)', 'W=null',
+                         "$('waiting').classList.remove('on')", "$('lobby').style.display='flex'",
+                         'lobbyStart()', 'renderLobby()', 'resetTicker()', 'lobbyMsg('])
+    assert.ok(sortie.includes(attendu), `le retour au lobby oublie ${attendu}`);
+  // Et le refus emprunte bien ce chemin-là, avec le message que WBCore compose.
+  assert.ok(/Match\.surRefus\(\(code,data\)=>\{ sortirDuSas\(C\.refusMessage\(code,data\)\); \}\);/.test(JEU),
+    'un refus nommé doit arrêter le sas et dire pourquoi');
+  // Le bouton QUITTER lit la fenêtre AVANT de perdre le chronomètre avec `W`.
+  const clic = JEU.slice(JEU.indexOf("$('wLeave').onclick="), JEU.indexOf('// UN REFUS NOMME ARRETE LE SAS'));
+  assert.ok(clic.indexOf('const rendu=sasRemboursable();') < clic.indexOf('Match.quitterLeSas(rendu)'),
+    'la fenêtre doit se lire avant que `W` ne disparaisse');
+  assert.ok(clic.indexOf('Match.quitterLeSas(rendu)') < clic.indexOf('sortirDuSas('), clic);
+});
+test('un refus NOMMÉ n\'est pas une panne, et la liste est fermée', () => {
+  // La règle est dans WBCore avec son test, parce que c'est elle qui décide si une partie payante
+  // peut devenir une partie gratuite. Trois codes, et trois seulement.
+  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent']);
+  for (const code of C.REFUS_SAS)
+    assert.strictEqual(C.refusDuBillet(409, { code }), code, code);
+  // Statut 0 : il n'y a pas eu de réponse du tout. Ce n'est pas un refus, c'est une absence — et
+  // c'est exactement le cas « serveur muet » que la 02a fait partir hors ligne.
+  assert.strictEqual(C.refusDuBillet(0, { code: 'fonds' }), null,
+    'sans réponse, il n\'y a rien à refuser : la partie part hors ligne');
+  // Un refus que le serveur ne nomme pas ne dit rien de ce que le joueur a le droit de faire :
+  // 429, 500, un code inconnu, un corps absent — tous retombent dans le repli hors ligne.
+  for (const cas of [[429, null], [500, null], [503, { erreur: 'x' }], [409, { code: 'sim_version' }],
+                     [400, { code: 'corps' }], [404, { code: 'billet' }], [409, { code: 'expire' }],
+                     [409, { code: {} }], [409, { code: ['fonds'] }], [409, {}]])
+    assert.strictEqual(C.refusDuBillet(cas[0], cas[1]), null, JSON.stringify(cas));
+  // Ne lance sur rien : un corps hostile ne doit pas casser le sas.
+  for (const rien of [null, undefined, 42, 'x', [], Object.create(null)])
+    assert.strictEqual(C.refusDuBillet(409, rien), null, Object.prototype.toString.call(rien));
+});
+test('un refus se dit au joueur en clair, et jamais en détail technique', () => {
+  assert.match(C.refusMessage('fonds', {}), /Not enough credits/);
+  assert.match(C.refusMessage('livre', {}), /Nothing was charged/);
+  // La temporisation dit COMBIEN de temps, et elle prend le nombre du serveur quand il le donne.
+  assert.match(C.refusMessage('renonce_recent', { windowSeconds: 10 }), /10 seconds/);
+  assert.match(C.refusMessage('renonce_recent', { windowSeconds: 7 }), /7 seconds/);
+  // Sans nombre lisible, elle retombe sur la fenêtre de WBCore — jamais sur `NaN seconds`.
+  for (const faux of [undefined, null, 'x', NaN, 0, -3])
+    assert.match(C.refusMessage('renonce_recent', { windowSeconds: faux }),
+      new RegExp(C.renonceFenetreS() + ' seconds'), String(faux));
+  // Un code inconnu reste lisible : un message vide laisserait le lobby muet, donc mort.
+  for (const code of ['', 'inconnu', undefined, null])
+    assert.ok(C.refusMessage(code, {}).length > 10, String(code));
+  // Et jamais le détail technique : ni code, ni statut, ni nom de table.
+  for (const code of ['fonds', 'livre', 'renonce_recent', 'inconnu'])
+    for (const fuite of ['409', 'ledger', 'enjeu:', 'postgres', 'undefined', 'NaN'])
+      assert.ok(!C.refusMessage(code, { windowSeconds: 10 }).includes(fuite), code + ' / ' + fuite);
+});
+test('matchFlow : renoncer rend le billet, et n\'est pas un coup d\'envoi', () => {
+  // Deux transitions nouvelles, et elles ne doublent pas `coup-denvoi` : quitter le sas ne lance
+  // rien. Depuis `billet`, le coup d'envoi mène à `partie` ; le renoncement mène à `hors-ligne`,
+  // parce que le serveur va CLORE ce billet et que le suivant devra être demandé.
+  assert.strictEqual(C.matchFlow('billet', 'renonce'), 'hors-ligne');
+  assert.strictEqual(C.matchFlow('demande', 'renonce'), 'hors-ligne');
+  assert.strictEqual(C.matchFlow('billet', 'coup-denvoi'), 'partie');
+  // Et l'événement ne fait rien ailleurs : une partie en cours ne se renonce pas.
+  for (const etat of ['hors-ligne', 'partie', 'rapport', 'fini'])
+    assert.strictEqual(C.matchFlow(etat, 'renonce'), etat, etat);
+  // Depuis `hors-ligne`, le sas repart et demande son billet : le lobby n'est pas mort.
+  assert.strictEqual(C.matchFlow(C.matchFlow('billet', 'renonce'), 'sas-en-ligne'), 'demande');
+});
+testAsync('UN 409 FONDS ARRÊTE LE SAS, et ne lance AUCUNE partie', () => {
+  // La distinction de la phase 03, exécutée. Le serveur a instruit la demande et l'a rejetée :
+  // partir quand même ferait de la partie payante une partie gratuite.
+  const { Match, envois, refus } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      envois[0].repondre({ ok: false, status: 409, data: { erreur: 'Pas assez de crédits pour cette table.',
+        code: 'fonds', balanceCents: 20, quarantineCents: 0, requiredCents: 50 } });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(refus.length, 1, 'le sas doit être prévenu');
+      assert.strictEqual(refus[0].code, 'fonds');
+      assert.strictEqual(refus[0].data.requiredCents, 50, 'le corps du refus arrive tel quel');
+      assert.ok(C.refusMessage(refus[0].code, refus[0].data).length > 10, 'et il y a un message à montrer');
+      assert.strictEqual(envois.length, 1, 'un refus ne se retente pas tout seul');
+      // LE LOBBY N'EST PAS MORT : le sas suivant redemande un billet, tout de suite.
+      Match.sas('solo', 0.5, 'bolt');
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2, 'après un refus, on peut retenter');
+      envois[1].repondre({ ok: true, status: 200, data: BILLET('90', 4242) });
+      return souffler();
+    })
+    .then(() => assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 4242,
+      'et la table suivante se joue normalement'));
+});
+testAsync('un refus de fonds ne laisse AUCUN billet à jouer', () => {
+  // Le pendant du test précédent : ici l'écran atteint quand même le coup d'envoi — ce qui
+  // n'arrive pas, puisqu'il quitte le sas — et il n'y a toujours rien à jouer.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: false, status: 409, data: { code: 'fonds' } }); return souffler(); })
+    .then(() => {
+      assert.strictEqual(Match.coupDenvoi('solo', 50), null, 'aucun billet, donc aucune partie payante');
+      assert.strictEqual(envois.length, 1);
+    });
+});
+testAsync('les deux autres refus nommés arrêtent le sas de la même façon', () => {
+  const cas = [
+    { code: 'livre', corps: { erreur: 'x', code: 'livre', detail: null } },
+    { code: 'renonce_recent', corps: { erreur: 'x', code: 'renonce_recent', windowSeconds: 10 } },
+  ];
+  return cas.reduce((chaine, c) => chaine.then(() => {
+    const { Match, envois, refus } = bancMatch();
+    return Promise.resolve()
+      .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+      .then(() => { envois[0].repondre({ ok: false, status: 409, data: c.corps }); return souffler(); })
+      .then(() => {
+        assert.deepStrictEqual(refus.map(r => r.code), [c.code], c.code);
+        assert.strictEqual(Match.coupDenvoi('solo', 50), null, c.code);
+      });
+  }), Promise.resolve());
+});
+testAsync('LES QUATRE CAS DE REPLI rendent une partie IDENTIQUE, graine comprise', () => {
+  // Les quatre cas nommés depuis la 02a, testés COMME DES CAS NORMAUX — c'est la promesse du
+  // fichier unique, et la phase 03 ne l'entame pas d'un pouce. Aucun des quatre n'est un refus
+  // nommé, donc aucun n'arrête le sas : « un billet qui tarde ne retarde jamais le coup d'envoi ».
+  const GRAINE = 20260914;
+  const cas = [
+    { nom: 'pas de compte, ou ACCOUNT.api vide', online: false, reponse: null },
+    { nom: 'serveur muet', online: true, reponse: { ok: false, status: 0, data: null } },
+    { nom: 'réponse illisible', online: true, reponse: { ok: true, status: 200, data: { bonjour: 1 } } },
+    { nom: 'panne du serveur', online: true, reponse: { ok: false, status: 500, data: null } },
+  ];
+  return cas.reduce((chaine, c) => chaine.then(() => {
+    const { Match, envois, refus } = bancMatch({ online: c.online });
+    return Promise.resolve()
+      .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+      .then(() => {
+        if (!c.online) { assert.deepStrictEqual(envois, [], c.nom + ' : rien ne part'); return souffler(); }
+        envois[0].repondre(c.reponse);
+        return souffler();
+      })
+      .then(() => {
+        assert.deepStrictEqual(refus, [], c.nom + ' : ce n\'est pas un refus, le sas ne s\'arrête pas');
+        const billet = Match.coupDenvoi('solo', 50);
+        assert.strictEqual(billet, null, c.nom);
+        // LA GRAINE EST CELLE DU NAVIGATEUR, à l'identique : la partie est exactement celle
+        // d'hier, la carte, le gaz, les caisses et les vingt brawlers compris.
+        assert.strictEqual(C.seedFor(billet, GRAINE), GRAINE, c.nom);
+        // Et le portefeuille de démonstration fonctionne comme avant : il prend la mise et la rend.
+        const w = bancPortefeuille(false, C.START_WALLET);
+        assert.strictEqual(w.debit(0.5), C.START_WALLET - 0.5, c.nom);
+        assert.strictEqual(w.credit(0.5), C.START_WALLET, c.nom);
+        // Rien à rendre non plus à la fin : sans billet, ni trace ni rapport.
+        Match.fin(FIN, TRACE_ENVOI);
+        return souffler();
+      })
+      .then(() => assert.strictEqual(envois.length, c.online ? 1 : 0, c.nom + ' : aucun rapport'));
+  }), Promise.resolve());
+});
+testAsync('quitter le sas PENDANT la fenêtre renonce au billet, et redemande le solde', () => {
+  const banc = bancMatch();
+  const { Match, envois } = banc;
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('91', 4242) }); return souffler(); })
+    .then(() => {
+      assert.strictEqual(banc.syncs(), 0);
+      Match.quitterLeSas(true);
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2);
+      assert.strictEqual(envois[1].path, '/api/match/91/renounce');
+      assert.deepStrictEqual(envois[1].body, {}, 'la route ne lit aucun champ, mais le corps se poste');
+      envois[1].repondre({ ok: true, status: 200, data: { matchId: '91', status: 'renounced',
+        refundedCents: 50, balanceCents: 5000, quarantineCents: 0 } });
+      return souffler();
+    })
+    .then(() => {
+      // LE SOLDE SE REDEMANDE, il ne se lit pas dans la réponse : un renoncement n'est pas un compte.
+      assert.strictEqual(banc.syncs(), 1, 'le solde doit se redemander au serveur');
+      // LE BILLET NE RESSERT PAS : le serveur l'a clos, et le sas suivant en demande un neuf.
+      Match.sas('solo', 0.5, 'bolt');
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 3);
+      assert.strictEqual(envois[2].path, '/api/match', 'le sas suivant doit demander SON billet');
+      envois[2].repondre({ ok: true, status: 200, data: BILLET('92', 777) });
+      return souffler();
+    })
+    .then(() => assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 777,
+      'et c\'est le billet neuf qui se joue, pas le billet renoncé'));
+});
+testAsync('UN BILLET RENONCÉ NE RESSORT JAMAIS, même si le suivant n\'arrive pas', () => {
+  // Le billet renoncé est CLOS côté serveur. Le garder en main le ferait ressortir au coup d'envoi
+  // suivant : même carte, même gaz, sur un billet que le serveur refuserait de régler — et le sas
+  // ne demanderait pas le billet neuf dont il a besoin. C'est le patron du billet resservi de la
+  // 02b, transposé au renoncement, et il faut un serveur MUET pour le voir.
+  const { Match, envois } = bancMatch();
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('96', 4242) }); return souffler(); })
+    .then(() => { Match.quitterLeSas(true); return souffler(); })
+    .then(() => {
+      envois[1].repondre({ ok: true, status: 200, data: { matchId: '96', status: 'renounced',
+        refundedCents: 50, balanceCents: 5000, quarantineCents: 0 } });
+      Match.sas('solo', 0.5, 'bolt');
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois[2].path, '/api/match');
+      envois[2].repondre({ ok: false, status: 0, data: null });   // le serveur ne répond plus
+      return souffler();
+    })
+    .then(() => {
+      const billet = Match.coupDenvoi('solo', 50);
+      assert.strictEqual(billet, null, 'le billet renoncé est ressorti');
+      assert.strictEqual(C.seedFor(billet, 111111), 111111, 'la partie repart sur la graine locale');
+      // Et sa fin ne rend rien : il n'y a pas de billet, donc pas de rapport.
+      Match.fin(FIN, TRACE_ENVOI);
+      return souffler();
+    })
+    .then(() => assert.strictEqual(envois.length, 3, 'aucun rapport sur un billet renoncé'));
+});
+testAsync('quitter le sas APRÈS la fenêtre ne promet rien, et ne réclame rien', () => {
+  // Hors fenêtre, le serveur refuserait — et le réclamer pour rien coûterait au joueur la
+  // temporisation `renonce_recent`, donc dix secondes avant de pouvoir rejouer.
+  const banc = bancMatch();
+  const { Match, envois } = banc;
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: true, status: 200, data: BILLET('93', 4242) }); return souffler(); })
+    .then(() => { Match.quitterLeSas(false); return souffler(); })
+    .then(() => {
+      assert.strictEqual(envois.length, 1, 'aucun renoncement ne part hors fenêtre');
+      assert.strictEqual(banc.syncs(), 0, 'et rien ne bouge côté solde');
+      // Le billet reste ouvert côté serveur : y revenir le retrouve, et il se joue encore.
+      assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 4242);
+    });
+});
+testAsync('quitter pendant que la demande est EN VOL renonce au billet qui arrive', () => {
+  // Le trou que le débit à l'ouverture creuse, et il coûte une mise entière : le serveur ouvre le
+  // billet et débite pendant que le joueur est déjà reparti. Sans ce chemin, personne ne renonce
+  // pour lui et la mise reste au séquestre jusqu'à l'expiration.
+  const banc = bancMatch();
+  const { Match, envois } = banc;
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      assert.strictEqual(envois.length, 1);
+      Match.quitterLeSas(true);                    // le joueur part, la demande est encore en vol
+      envois[0].repondre({ ok: true, status: 200, data: BILLET('94', 4242) });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2, 'le billet arrivé en retard doit être renoncé');
+      assert.strictEqual(envois[1].path, '/api/match/94/renounce');
+      // Et il n'est jamais entré en jeu : le coup d'envoi n'a rien à sortir.
+      assert.strictEqual(Match.coupDenvoi('solo', 50), null);
+    });
+});
+testAsync('un billet qui arrive après un départ HORS fenêtre n\'est pas réclamé', () => {
+  const banc = bancMatch();
+  const { Match, envois } = banc;
+  return Promise.resolve()
+    .then(() => { Match.sas('solo', 0.5, 'bolt'); return souffler(); })
+    .then(() => {
+      Match.quitterLeSas(false);
+      envois[0].repondre({ ok: true, status: 200, data: BILLET('95', 4242) });
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 1, 'hors fenêtre, rien ne part');
+      assert.strictEqual(Match.coupDenvoi('solo', 50), null, 'et ce billet-là n\'est pas joué');
+    });
 });
 
 console.log('La boucle : le pas fixe d\'un côté, l\'image de l\'autre');
