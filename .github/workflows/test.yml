@@ -1,8 +1,12 @@
 name: tests
 
+# Les branches de travail sont déclenchantes, et pas seulement `main`. Le job `db` est le SEUL
+# endroit où le grand livre rencontre une vraie Postgres : le laisser derrière une fusion sur `main`
+# revenait à ne l'exécuter qu'après avoir eu besoin de lui. Une phase entière s'est écrite sans que
+# ses contraintes de colonne aient jamais été subies par autre chose qu'une doublure.
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
   pull_request:
 
 jobs:
