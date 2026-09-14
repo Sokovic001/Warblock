@@ -2515,7 +2515,7 @@ test('le sas d\'attente ne regarde jamais le réseau pour lancer la partie', () 
   assert.match(sas, /Match\.sas\(selMode,stake,selBrawler\)/);
   assert.ok(!/await/.test(sas), 'enterWaiting ne doit rien attendre');
   const tick = JEU.slice(JEU.indexOf('function waitTick('), JEU.indexOf('$(\'wLeave\')'));
-  assert.ok(tick.includes('startMatch(st)'), 'waitTick n\'a pas été retrouvée');
+  assert.ok(tick.includes('startMatch(st,eco)'), 'waitTick n\'a pas été retrouvée');
   for (const interdit of ['await', 'fetch', 'Auth.', 'ticket', 'billet'])
     assert.ok(!tick.includes(interdit), `le décompte du sas ne doit pas connaître ${interdit}`);
 });
@@ -3166,6 +3166,23 @@ test('un sas quitté et un refus nommé passent par le MÊME chemin de retour au
     'le crédit de sortie doit lire l\'économie figée à l\'entrée');
   assert.ok(!/(^|[^)])\s*demoCredit\(W\.stake\);/m.test(clic.replace('if(!W.enLigne) demoCredit(W.stake);', '')),
     'un demoCredit(W.stake) non gardé est revenu dans le bouton QUITTER');
+  // ET L'ÉCRAN DE FIN LIT LA MÊME ÉCONOMIE QUE LE SAS, figée cette fois au coup d'envoi. Le sas
+  // gelait la sienne dans `W.enLigne` ; l'écran de fin, lui, interrogeait `Auth.online()` à la
+  // seconde où la partie se termine. Un jeton mort PENDANT la partie faisait donc tomber le gain
+  // dans le portefeuille de démonstration alors que la mise était partie au grand livre à
+  // l'ouverture du billet : jusqu'à quarante fois la mise en Resurgence, sur le seul écran qui
+  // annonce un gain. Les deux bouts de la partie doivent nommer la même économie.
+  assert.ok(/function startMatch\(stake,enLigne\)\{/.test(JEU),
+    'startMatch doit recevoir l\'économie du sas, pas la redemander');
+  assert.ok(/matchEnLigne=!!enLigne;/.test(JEU),
+    'startMatch doit figer l\'économie de la partie');
+  assert.ok(/const st=W\.stake, eco=W\.enLigne;[\s\S]*startMatch\(st,eco\);/.test(JEU),
+    'le coup d\'envoi doit passer `W.enLigne` à startMatch avant que `W` ne disparaisse');
+  const fin = JEU.slice(JEU.indexOf('const take=C.cashoutPayout(p.pouch);'), JEU.indexOf("title = cash ? 'BANKED!'"));
+  assert.ok(fin.includes('if(!matchEnLigne) demoCredit(take.net);'),
+    'le crédit de l\'écran de fin doit lire l\'économie figée au coup d\'envoi');
+  assert.ok(!/(^|[^)])\s*demoCredit\(take\.net\);/m.test(fin.replace('if(!matchEnLigne) demoCredit(take.net);', '')),
+    'un demoCredit(take.net) non gardé est revenu dans l\'écran de fin');
   // Et le renoncement refusé a son propre canal de retour : le sas n'existe plus quand la réponse
   // arrive, donc `sortirDuSas` n'a plus rien à faire, mais le joueur doit apprendre ce qu'est
   // devenue sa mise.

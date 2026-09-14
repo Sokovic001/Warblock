@@ -4031,6 +4031,12 @@ profile.name=randomName();
 // reglement, et le jeu ne fait que lire ce qu'il rend. `quarantine` porte ce qu'une partie dont le
 // rejeu a diverge a mis de cote : montre, jamais depensable, et toujours zero hors ligne.
 let wallet=C.START_WALLET, quarantine=0, lastStake=0.5, selBrawler='bolt', selMode='solo', selGame='maxwin', selStake=0.5;
+// L'ECONOMIE DE LA PARTIE, FIGEE A SON COUP D'ENVOI, pour la meme raison que `W.enLigne` fige celle
+// du sas : ce qui paie a la fin doit etre ce qui a paye au debut. `Auth.online()` repond a l'instant
+// ou on l'interroge, et l'ecran de fin l'interrogeait a la fin — donc un jeton mort PENDANT la
+// partie faisait tomber le gain dans le portefeuille de demonstration, alors que la mise, elle,
+// etait partie au grand livre a l'ouverture du billet. Jusqu'a quarante fois la mise en Resurgence.
+let matchEnLigne=false;
 // LE PORTEFEUILLE DE DEMONSTRATION, ET LUI SEUL. En ligne ces deux fonctions ne font rien : la mise
 // a deja ete debitee cote serveur au moment ou le billet s'est ouvert, et le gain est credite par le
 // reglement. La decrementer ici en plus ferait payer deux fois a l'ecran ce que le livre n'a compte
@@ -6502,7 +6508,7 @@ function waitTick(){
   $('wFill').style.width=(W.seated/W.seats*100)+'%';
   $('wPot').textContent=money(C.payout(W.stake,W.seated,C.RAKE).winner);
   const arc=$('wArc'), L=2*Math.PI*52; arc.style.strokeDashoffset=L*(1-left/(W.full?C.LOBBY.dropIn:C.LOBBY.wait));
-  if(left<=0){ const st=W.stake; clearInterval(W.timer); waitStop(); W=null; $('waiting').classList.remove('on'); startMatch(st); }
+  if(left<=0){ const st=W.stake, eco=W.enLigne; clearInterval(W.timer); waitStop(); W=null; $('waiting').classList.remove('on'); startMatch(st,eco); }
 }
 // Tout ce qui ramene du sas au lobby passe par ici : le bouton QUITTER, et le refus nomme du
 // serveur. Un seul chemin de sortie, sinon l'un des deux oublie un minuteur ou une musique et le
@@ -6602,8 +6608,13 @@ function podLoop(){
   requestAnimationFrame(podLoop);
 }
 
-function startMatch(stake){
+function startMatch(stake,enLigne){
   // the stake was already taken when you entered the waiting room
+  //
+  // L'ECONOMIE VIENT DU SAS et ne se redemande pas ici. Le seul appelant la lui passe depuis
+  // `W.enLigne`, fige au clic sur ENTER : c'est elle qui a decide qui a paye la mise, et c'est donc
+  // elle, et pas l'etat du jeton a la derniere seconde, qui doit decider qui paie le gain.
+  matchEnLigne=!!enLigne;
   const tier=C.tierFor(stake);
   const mode=C.MODES[selMode];
   // La graine de secours reste celle que le jeu a toujours tiree. Elle sert telle quelle sans
@@ -6803,7 +6814,8 @@ function endMatch(won,info){
     // HORS LIGNE SEULEMENT. Connecte, c'est le reglement du serveur qui paie — il rejoue la partie
     // et recalcule le net lui-meme — et le solde revient par `Auth.sync`. Crediter ici en plus
     // afficherait un gain que le grand livre n'a peut-etre pas accorde.
-    demoCredit(take.net); profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
+    if(!matchEnLigne) demoCredit(take.net);
+    profile.stats.wins++; profile.stats.best=Math.max(profile.stats.best,take.net); snd('win',0.15);
     title = cash ? 'BANKED!' : 'VICTORY!';
     ribbon = cash
       ? (info.cashedOut?'CASHED OUT EARLY':(mode.teamSize>1?'LAST TEAM STANDING':'SOLE SURVIVOR'))
