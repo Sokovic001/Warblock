@@ -36,7 +36,8 @@ function test(nom, fn) {
 // voir un rapport qui fait déborder Postgres — lequel lève `22003`, rend un 500 et laisse la ligne
 // `open`, enfermant le joueur dans un billet mort. Elle refuse maintenant ce que la base refuserait.
 const PG_INT4_MAX = 2147483647, PG_INT4_MIN = -2147483648;
-const COLONNES_INT4 = ['stake_cents', 'seats', 'team_size', 'gross_cents', 'fee_cents', 'net_cents',
+const COLONNES_INT4 = ['stake_cents', 'seats', 'team_size', 'paid_seats',
+                       'gross_cents', 'fee_cents', 'net_cents',
                        'purse_cents', 'declared_net_cents', 'ecart_cents',
                        'seconds', 'kills', 'deaths', 'rank', 'cubes', 'damage',
                        'sim_version', 'seq', 'steps',
@@ -56,7 +57,22 @@ const COLONNES_TEXTE = {
   seed_secret: v => /^[0-9a-f]{32}$/.test(v),
   data: v => typeof v === 'string' && v.length >= 1 && v.length <= 65536,
 };
+// `paid_seats` porte une contrainte qui regarde UNE AUTRE COLONNE — `between 1 and seats` — donc
+// elle ne se vérifie qu'en voyant les deux ensemble, et pas colonne par colonne comme les largeurs.
+// La doublure l'IMITE, comme elle imite le reste ; ce qu'elle ne peut pas faire, c'est la SUBIR, et
+// c'est `api/db-check.js` qui s'en charge contre une vraie base. Elle est ici pour qu'un module
+// futur qui écrirait zéro siège payé le voie tomber sur la machine de travail, et pas seulement en
+// intégration continue.
+function verifierPaidSeats(v) {
+  if (v.paid_seats === undefined || v.paid_seats === null) return;
+  if (!Number.isInteger(v.paid_seats) || v.paid_seats < 1 || v.paid_seats > v.seats) {
+    const e = new Error('new row for relation "matches" violates check constraint "matches_paid_seats_borne"');
+    e.code = '23514'; e.constraint = 'matches_paid_seats_borne';
+    throw e;
+  }
+}
 function verifierColonnes(valeurs) {
+  verifierPaidSeats(valeurs);
   for (const c of COLONNES_INT4) {
     const v = valeurs[c];
     if (v === undefined || v === null) continue;
@@ -262,6 +278,10 @@ function fakeDb(seed = []) {
       const ligne = {
         id: nextMatch++, user_id: m.userId, mode: m.mode, stake_cents: m.stakeCents, seats: m.seats,
         team_size: m.teamSize,
+        // Écrite par le SERVEUR et figée, comme `seats`, `team_size` et `sim_version`. La doublure
+        // doit la porter, sans quoi le test qui prouve que le client ne peut pas l'écrire ne
+        // regarderait qu'une colonne absente des deux côtés.
+        paid_seats: m.paidSeats,
         brawler: m.brawler, seed_public: m.seedPublic, seed_secret: m.seedSecret,
         sim_version: m.simVersion,
         client_key: m.clientKey, status: 'open', first_result_at: null,
@@ -928,9 +948,19 @@ await test('un corps chargé écrit exactement la même ligne qu\'un corps minim
     ...DEMANDE, seed: 1, seed_public: 2, seed_secret: 3, seats: 999, stake: 0.5, stake_cents: 999,
     payout_cents: 999, user_id: 999, status: 'settled', opened_at: 0, expires_at: '2099-01-01T00:00:00Z',
     id: 999,
+    // `paid_seats` rejoint la liste : c'est le même patron, étendu d'une colonne. Écrite par le
+    // serveur, figée à l'ouverture, et un corps qui annonce sept sièges payés laisse la ligne
+    // strictement identique à celle d'un corps minimal.
+    paidSeats: 7, paid_seats: 7, paidseats: 7,
   });
   assert.deepStrictEqual(charge.db.matches, nu.db.matches);
   assert.deepStrictEqual(b.corps, a.corps);
+  // Et la valeur écrite est UN, pas la moyenne de ce que le client proposait : un billet EST une
+  // table tant qu'il n'existe pas d'identifiant de table partagée.
+  assert.strictEqual(nu.db.matches[0].paid_seats, 1);
+  // Elle ne part pas au client non plus. Il n'en a rien à faire, et la lui donner l'inviterait à la
+  // renvoyer — exactement ce qu'on refuse à `sim_version`.
+  assert.ok(!/paidSeats|paid_seats/i.test(JSON.stringify(a.corps)), JSON.stringify(a.corps));
 });
 // `repris` est le SEUL champ par lequel un rejeu se distingue du premier appel, et c'est une
 // exception écrite : il ne décrit pas le billet mais le CHEMIN qui l'a servi, et le jeu en a besoin
@@ -2299,6 +2329,77 @@ await test('sim_version est écrite par le SERVEUR, et un corps qui la porte n\'
   // telle quelle au lieu de dire celle sous laquelle il a réellement joué.
   assert.ok(!('simVersion' in a.corps), JSON.stringify(a.corps));
   assert.ok(Number.isInteger(SIM.SIM_VERSION) && SIM.SIM_VERSION >= 1);
+});
+
+console.log('paid_seats, figée à l\'ouverture et DORMANTE');
+await test('paid_seats vaut UN, et le chemin `repris` ne la réécrit JAMAIS', async () => {
+  // Le chemin `repris` est celui qui rend un billet déjà ouvert — rejeu de la clé du client, ou
+  // onglet rouvert. Il ne doit rien réécrire du tout, et c'est le même raisonnement que « il
+  // n'écrit jamais une seconde mise » : ce qui a été figé à l'ouverture l'est pour de bon.
+  //
+  // La preuve demande une valeur DISCERNABLE. On pose donc, à la main et dans la doublure, une
+  // valeur parfaitement légale mais différente de celle que le serveur écrit — trois sièges payés
+  // sur vingt — puis on rejoue la demande en annonçant sept. Si le chemin `repris` réécrivait quoi
+  // que ce soit, la ligne rendrait 1 ou 7, et jamais 3.
+  const { db, app } = bancDeBillet();
+  const a = await demander(app, DEMANDE);
+  assert.strictEqual(db.matches[0].paid_seats, 1);
+  assert.strictEqual(db.matches.length, 1);
+  db.matches[0].paid_seats = 3;
+
+  // (1) le rejeu de la MÊME clé de client.
+  const b = await demander(app, { ...DEMANDE, paidSeats: 7 });
+  assert.strictEqual(b.code, 200);
+  assert.strictEqual(b.corps.repris, true, 'ce n\'est pas le chemin `repris` qu\'on éprouve');
+  assert.strictEqual(b.corps.id, a.corps.id);
+  assert.strictEqual(db.matches[0].paid_seats, 3, 'le chemin `repris` a réécrit paid_seats');
+
+  // (2) le billet DÉJÀ OUVERT, repris sous une autre clé de client : l'autre porte du même chemin.
+  const c = await demander(app, { ...DEMANDE, clientKey: 'cle-2', paidSeats: 7 });
+  assert.strictEqual(c.corps.repris, true);
+  assert.strictEqual(c.corps.id, a.corps.id);
+  assert.strictEqual(db.matches.length, 1, 'un joueur n\'a qu\'un billet ouvert à la fois');
+  assert.strictEqual(db.matches[0].paid_seats, 3, 'le billet déjà ouvert a été réécrit');
+});
+await test('GARDE TEXTUELLE : la contrainte de paid_seats est `between 1 and seats` dans schema.sql', () => {
+  // Deux écritures de la même règle se confrontent, elles ne se font pas confiance — même patron
+  // que la grammaire des comptes et la liste des motifs du grand livre, comparées au TEXTE du
+  // schéma. Ici il n'y a pas d'expression exportée à comparer : la règle n'existe QUE dans le
+  // schéma, et ce qu'on garde est qu'elle y est toujours, entière, et nommée.
+  const fs = require('node:fs'), path = require('node:path');
+  const brut = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  const sql = brut.replace(/--[^\n]*/g, '');
+  const bloc = sql.slice(sql.indexOf('create table if not exists matches'),
+                         sql.indexOf('create unique index if not exists matches_client_key_uniq'));
+  assert.ok(bloc.length > 500, 'la table des billets n\'a pas été retrouvée');
+  const decl = (bloc.match(/^[ \t]*paid_seats\b.*$/m) || [])[0];
+  assert.ok(decl, 'la colonne paid_seats a disparu de matches');
+  assert.match(decl, /\binteger\b/, decl);
+  assert.match(decl, /\bnot null\b/, decl);
+  // La borne, caractère pour caractère. `between 1 and seats` et pas `>= 1` : on ne paie pas moins
+  // d'un siège, et jamais plus qu'il n'y en a sur la table.
+  assert.match(bloc, /constraint matches_paid_seats_borne check \(paid_seats between 1 and seats\)/,
+    'la borne de paid_seats a changé de forme ou de nom');
+  // Le nom est celui que `api/db-check.js` attend d'un refus : une contrainte anonyme rendrait le
+  // refus illisible, et le cas de db-check ne saurait plus dire QUI a refusé.
+  assert.ok(fs.readFileSync(path.join(__dirname, 'db-check.js'), 'utf8')
+    .includes('matches_paid_seats_borne'),
+    'db-check.js n\'éprouve plus la borne : une doublure ne peut que l\'imiter');
+  // ET LA RAISON EST ÉCRITE AU-DESSUS DE LA COLONNE. Une colonne dormante dont personne ne relit le
+  // motif se fait inventer un lecteur au module suivant — c'est très exactement ce qu'il ne faut
+  // pas faire ici, et le dossier l'a déjà tranché à propos de `seed_secret`.
+  const i = brut.indexOf('paid_seats   integer');
+  assert.ok(i > 0);
+  const raison = brut.slice(brut.lastIndexOf('-- COMBIEN DE SIÈGES', i), i);
+  assert.ok(raison.length > 200, 'le commentaire de paid_seats a disparu');
+  assert.match(raison, /DORMANTE/, 'la colonne ne s\'annonce plus dormante');
+  assert.match(raison, /APRÈS COUP/, 'la raison — la donnée est irrécupérable — n\'est plus écrite');
+  assert.match(raison, /NOTIONNEL/, 'le lecteur qu\'il ne faut PAS lui inventer n\'est plus nommé');
+  // Et elle est écrite UNE FOIS dans le routeur, au seul endroit qui fige les colonnes du billet.
+  const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  assert.strictEqual((app.match(/paidSeats/g) || []).length, 1,
+    'paid_seats a plus d\'un point d\'écriture dans app.js');
+  assert.ok(!/paid_seats/.test(app), 'app.js parle de la colonne en dehors du pilote');
 });
 
 console.log('La trace, en insertion seule');
@@ -4396,6 +4497,11 @@ await test('CINQUANTE PARTIES DE BOUT EN BOUT : la somme globale est nulle à CH
       const solde = L.soldeDe(livreDe(db), L.compteEnjeu(m.id));
       assert.strictEqual(solde, m.status === 'open' ? m.stake_cents : 0,
         `${quoi} : le séquestre de ${m.id} (${m.status}) porte ${solde}`);
+      // LE SIÈGE PAYÉ, SUR LES CINQ MODES, LES QUATRE TABLES ET LES CINQ ISSUES : toujours UN, et
+      // toujours dans sa borne. Aujourd'hui un billet EST une table, donc la réponse ne varie pas ;
+      // le jour où elle variera, c'est ce test-là qui dira que quelque chose a changé de nature.
+      assert.strictEqual(m.paid_seats, 1, `${quoi} : ${m.id} porte ${m.paid_seats} sièges payés`);
+      assert.ok(m.paid_seats >= 1 && m.paid_seats <= m.seats, `${quoi} : hors de [1, ${m.seats}]`);
       comptees.set(m.status, (comptees.get(m.status) || 0) + 1);
     }
     // LA RÉCONCILIATION À LA FIN DE CHAQUE SCÉNARIO. Le zéro global est vrai même si un montant

@@ -58,6 +58,18 @@ const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHO
 // n'est en jeu en 02a : on préfère perdre une ligne de statistique que bloquer un joueur.
 const MATCH_MARGE_S = 600;
 
+// COMBIEN DE SIÈGES DE LA TABLE UN HUMAIN A PAYÉS. Un, et ce n'est pas un réglage : un billet EST
+// une table tant qu'il n'existe pas d'identifiant de table partagée, donc le seul humain assis est
+// celui qui ouvre le billet et les autres sièges sont des bots, qui ne misent rien. Le chiffre est
+// écrit ICI, par le serveur, et jamais lu dans le corps de la requête — même patron que
+// `S.SIM_VERSION`, `seats` et `teamSize`.
+//
+// Il est enregistré aujourd'hui pour la raison qui fige `seats` : APRÈS COUP, rien ne permettrait
+// de retrouver combien de sièges un humain avait payés, et l'exposition de la maison cesserait
+// d'être attribuable. La colonne est DORMANTE, et c'est assumé — voir `api/schema.sql`, qui porte
+// la décision en entier.
+const SIEGES_PAYES = 1;
+
 // LE BUDGET DE CALCUL D'UN REJEU. Il tourne dans le fil de la requête, et une trace adversariale
 // peut chercher à en maximiser le coût : c'est la surface d'attaque que la phase 02b ajoute, et
 // elle se borne ici. Une partie solo complète — neuf mille pas, vingt brawlers — coûte environ
@@ -484,6 +496,10 @@ function createApp({
       stakeCents: champs.stakeCents,
       seats: champs.seats,
       teamSize: champs.teamSize,
+      // FIGÉE ICI COMME LA VERSION DE SIMULATION, ET POUR LA MÊME FAMILLE DE RAISONS. Elle ne vient
+      // pas de `champs`, qui est ce qu'on a bien voulu retenir du corps du client : la faire passer
+      // par là l'inviterait à l'écrire.
+      paidSeats: SIEGES_PAYES,
       brawler: champs.brawler,
       seedPublic, seedSecret,
       // FIGÉE ICI, ET NULLE PART AILLEURS. Le client n'a aucun moyen de l'écrire : elle est lue sur

@@ -11,7 +11,7 @@ const L = require('./ledger');
 const COLS = 'id, auth_id, email, name, name_key, avatar, country, created_at';
 // La graine secrète est LUE ici — c'est la seule colonne de cette liste qui ne doit jamais
 // traverser le réseau. C'est `app.js` qui la retire, par sa liste blanche `billet()`.
-const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret, ' +
+const MATCH_COLS = 'id, user_id, mode, stake_cents, seats, team_size, paid_seats, brawler, seed_public, seed_secret, ' +
                    'sim_version, client_key, status, first_result_at, opened_at, expires_at, ' +
                    // le règlement : NULL tant que la partie est ouverte, écrit une seule fois
                    'settled_at, issue, controle, motif, gross_cents, fee_cents, net_cents, ' +
@@ -407,13 +407,13 @@ function pgDb(connectionString) {
         for (let tour = 0; tour < 2; tour++) {
           const ins = await client.query(
             `insert into matches
-               (user_id, mode, stake_cents, seats, team_size, brawler, seed_public, seed_secret,
-                sim_version, client_key, status, opened_at, expires_at)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open',$11,$12)
+               (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler, seed_public,
+                seed_secret, sim_version, client_key, status, opened_at, expires_at)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'open',$12,$13)
              on conflict do nothing
              returning ${MATCH_COLS}`,
-            [m.userId, m.mode, m.stakeCents, m.seats, m.teamSize, m.brawler, m.seedPublic,
-             m.seedSecret, m.simVersion, m.clientKey, m.openedAt, m.expiresAt]);
+            [m.userId, m.mode, m.stakeCents, m.seats, m.teamSize, m.paidSeats, m.brawler,
+             m.seedPublic, m.seedSecret, m.simVersion, m.clientKey, m.openedAt, m.expiresAt]);
           if (ins.rows[0]) {
             const solde = await ledgerSolde(client, dispo);
             const enQuarantaine = await ledgerSolde(client, quarantaine);

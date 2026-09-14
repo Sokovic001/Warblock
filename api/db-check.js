@@ -116,12 +116,17 @@ async function creerJoueur(client, nom) {
   return r.rows[0].id;
 }
 
+// `paid_seats` n'a pas de valeur par défaut en base : elle est ÉCRITE par le serveur, comme
+// `seats` et `sim_version`. Le décor l'écrit donc aussi, et il écrit la même chose que la
+// production — un siège payé sur les vingt de la table.
 async function ouvrirBillet(client, userId, extra = {}) {
   const r = await client.query(
-    `insert into matches (user_id, mode, stake_cents, seats, team_size, brawler, seed_public,
-                          seed_secret, sim_version, client_key, status, opened_at, expires_at)
-     values ($1,'solo',50,20,1,'bolt',12345,$2,1,$3,$4,$5,$6) returning id`,
-    [userId, SECRETE, extra.clientKey || `cle-${Math.random()}`, extra.status || 'open',
+    `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
+                          seed_public, seed_secret, sim_version, client_key, status, opened_at,
+                          expires_at)
+     values ($1,'solo',50,20,1,$2,'bolt',12345,$3,1,$4,$5,$6,$7) returning id`,
+    [userId, extra.paidSeats === undefined ? 1 : extra.paidSeats, SECRETE,
+     extra.clientKey || `cle-${Math.random()}`, extra.status || 'open',
      MAINTENANT, extra.expiresAt || DANS_UNE_HEURE]);
   return r.rows[0].id;
 }
@@ -215,14 +220,48 @@ async function main() {
       const u = await creerJoueur(client, 'Ouvert');
       const premier = await ouvrirBillet(client, u);
       await refuse(client, '23505', 'matches_un_seul_ouvert',
-        `insert into matches (user_id, mode, stake_cents, seats, team_size, brawler, seed_public,
-                              seed_secret, sim_version, client_key, status, opened_at, expires_at)
-         values ($1,'solo',50,20,1,'bolt',999,$2,1,'autre','open',$3,$4)`,
+        `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
+                              seed_public, seed_secret, sim_version, client_key, status, opened_at,
+                              expires_at)
+         values ($1,'solo',50,20,1,1,'bolt',999,$2,1,'autre','open',$3,$4)`,
         [u, SECRETE, MAINTENANT, DANS_UNE_HEURE]);
       // L'index est PARTIEL : une fois la partie close, la place se libère d'elle-même. C'est
       // exactement ce que la doublure imite, et qui n'avait jamais été vu tourner.
       await client.query(`update matches set status = 'expired' where id = $1`, [premier]);
       await ouvrirBillet(client, u, { clientKey: 'apres' });
+      await client.query('rollback');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('paid_seats : la borne `between 1 and seats` REFUSE zéro et refuse plus de sièges qu\'il n\'y en a', async () => {
+      // LA SEULE PREUVE QUE L'INTÉGRATION CONTINUE PUISSE DONNER SUR CETTE COLONNE. La doublure
+      // d'`api/test.js` imite cette contrainte ; elle ne la SUBIT pas, et un test qui passe contre
+      // la doublure prouve la doublure. Ici, c'est Postgres qui refuse.
+      //
+      // La contrainte regarde DEUX colonnes — c'est pour cela qu'elle est une contrainte de table —
+      // et c'est justement le genre qu'une doublure sans schéma oublie : rien, dans un objet
+      // JavaScript, ne relie `paid_seats` à `seats`.
+      await client.query('begin');
+      const u = await creerJoueur(client, 'Sieges');
+      const poser = n => [
+        `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
+                              seed_public, seed_secret, sim_version, client_key, status, opened_at,
+                              expires_at)
+         values ($1,'solo',50,20,1,$2,'bolt',12345,$3,1,$4,'open',$5,$6)`,
+        [u, n, SECRETE, `sieges-${n}`, MAINTENANT, DANS_UNE_HEURE]];
+      // Zéro siège payé : un billet sans humain n'existe pas. Négatif encore moins. Et vingt et un
+      // sièges payés sur une table qui n'en porte que vingt est le cas que seule cette contrainte
+      // peut voir, puisqu'il faut lire les DEUX colonnes.
+      for (const n of [0, -1, 21, 999]) {
+        await refuse(client, '23514', 'matches_paid_seats_borne', ...poser(n));
+      }
+      // Et les deux bords légitimes passent : un aujourd'hui, `seats` le jour d'une table pleine
+      // d'humains. Chacun sur son propre essai, l'index partiel n'autorisant qu'un billet ouvert.
+      for (const n of [1, 20]) {
+        await client.query('savepoint bord');
+        await client.query(...poser(n));
+        await client.query('rollback to savepoint bord');
+      }
       await client.query('rollback');
     });
 

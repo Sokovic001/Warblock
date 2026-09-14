@@ -73,6 +73,20 @@ partie que la sienne et paierait autre chose que ce qu'il a vu : c'est la raison
 hors phases : **un déploiement se draine, il n'écrase pas les billets ouverts** — au plus une
 quinzaine de minutes.
 
+**`paid_seats` est figée de la même façon, et elle est DORMANTE — assumé.** Elle dit combien de
+sièges de la table un humain a payés. `integer not null`, borne
+`check (paid_seats between 1 and seats)`, écrite par le serveur, jamais lue dans le corps de la
+requête, et le chemin `repris` ne la réécrit pas. Elle vaut **1** sur toutes les lignes : un billet
+**est** une table tant qu'il n'existe pas d'identifiant de table partagée — renvoyé à la phase 05 —
+donc le seul humain assis est celui qui ouvre le billet, et les autres sièges sont des bots, qui ne
+misent rien. **Rien ne la lit, et il ne faut pas lui inventer un lecteur** : un montant *notionnel*
+`stake_cents × paid_seats` posé à côté du montant *réalisé* du grand livre serait la paire qu'on
+finit par confondre. La raison de l'écrire quand même est celle qui fige `seats` : après coup, rien
+ne permet de retrouver le chiffre, et l'exposition de la maison cesse d'être attribuable dès le
+premier remplissage partiel. La justification complète est au-dessus de la colonne, dans
+`schema.sql`, et une garde textuelle vérifie qu'elle y reste. Sa borne regarde **deux** colonnes :
+la doublure d'`api/test.js` l'imite, seul `api/db-check.js` la fait subir.
+
 **L'expiration part avec le billet, pas après.** Elle vaut `LOBBY.wait` + la durée complète du plan de
 zone de ce mode — la borne haute d'une partie que personne ne gagne — + dix minutes de marge. Elle
 est donc plus courte en Resurgence, dont le gaz est rapide. La marge est un compromis assumé : trop
@@ -1222,7 +1236,10 @@ doublure se contente d'imiter.
   place qui se libère au billet clos ; `on conflict do nothing` sur `(match_id, seq)` ; la clause
   `where status = 'open' and net_cents is null` ; la clé du grand livre, **refusée et non avalée** ;
   la grammaire des comptes, les comptes distincts, le montant strictement positif, la liste fermée
-  des motifs ; les largeurs `integer` (un entier « valide » à 3 000 000 000 lève bien `22003`) ; la
+  des motifs ; la borne `paid_seats between 1 and seats`, qui regarde **deux** colonnes et que rien
+  ne relie dans un objet JavaScript — zéro, un négatif et vingt et un sièges sur vingt refusés par
+  `matches_paid_seats_borne`, un et vingt acceptés ; les largeurs `integer` (un entier
+  « valide » à 3 000 000 000 lève bien `22003`) ; la
   somme globale du livre à zéro ; le fait que `ledgerSolde` rende un **nombre** ; et que l'expression
   des comptes se comporte pareil dans le moteur POSIX de Postgres et dans celui de JavaScript — deux
   textes identiques ne sont pas deux moteurs d'accord.
@@ -1255,7 +1272,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             215 tests sans rien installer, 224 avec jose
+test.js             217 tests sans rien installer, 226 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1358,8 +1375,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 215 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 224 : les 215, plus la chaîne complète de vérification
+node api/test.js          # 217 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 226 : les 217, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```

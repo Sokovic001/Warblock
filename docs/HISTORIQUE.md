@@ -471,6 +471,56 @@ que les noms qu'`app.js` consomme lui-même. Aucune clause SQL n'a été touché
 pas concerné par ce module. À ce stade, **410 tests sur le jeu et 215 sur l'API** sans rien
 installer, 224 avec `jose`.
 
+### Une colonne DORMANTE, et c'est exactement pourquoi elle est créée maintenant — phase 04a, module 3
+
+`matches` enregistre désormais `paid_seats` : combien de sièges de la table un humain a payés.
+`integer not null`, borne `check (paid_seats between 1 and seats)`, écrite par le serveur et figée à
+l'ouverture du billet — le même patron que `seats`, `team_size` et `sim_version`, et le même test :
+un corps portant `paidSeats: 7` écrit une ligne **strictement identique** à celle d'un corps
+minimal. Le chemin `repris` ne la réécrit jamais, comme il n'écrit jamais une seconde mise.
+
+**Elle vaut 1 sur toutes les lignes, et rien ne la lit.** Un billet **est** une table tant qu'il
+n'existe pas d'identifiant de table partagée : le seul humain assis est celui qui ouvre le billet,
+les dix-neuf autres sièges sont des bots, qui ne misent rien. Aucun chemin de production n'écrira
+autre chose que 1 avant la phase 05.
+
+La raison d'écrire quand même est celle qui fige `seats`, et elle tient en une phrase :
+**après coup, rien ne permet de retrouver le chiffre.** L'exposition de la maison est la différence
+entre ce qui sort de la caisse et ce qui a réellement été misé — c'est l'arbitrage écrit dans « La
+maison est la contrepartie de chaque pot » — et sans ce compte elle cesse d'être **attribuable** dès
+le premier remplissage partiel. Une colonne créée aujourd'hui coûte une ligne de schéma sur une base
+qui n'a jamais tourné ; créée après, elle coûte une reprise de données et un trou définitif dans
+l'historique.
+
+**Le piège de ce module était de lui inventer un lecteur pour qu'elle ait l'air exercée**, et il est
+consigné parce qu'il est séduisant : un agrégat qui tirerait de `stake_cents × paid_seats` un montant
+**notionnel**, posé à côté du montant **réalisé** qu'on lit sur le grand livre. Ce sont très
+exactement les deux nombres qu'on finit par confondre, et un seul des deux est de l'argent. Le
+dossier avait déjà tranché le même cas à propos de `seed_secret` — « elle ne sert à rien en 02a, et
+c'est exactement pourquoi elle est créée maintenant » — et le refus du motif `depot` dit la même
+chose dans l'autre sens : on enregistre un **fait qui varie et se perd**, on ne crée pas la case
+vide d'une **décision qui n'existe pas encore**. C'est aussi pour cela que `matches` ne reçoit aucun
+drapeau d'éligibilité aux tables réelles : sa place, le jour venu, est sur `users`, à côté de la
+vérification d'identité. La justification est écrite **au-dessus de la colonne**, dans
+`api/schema.sql`, et une garde textuelle vérifie qu'elle y reste.
+
+**Ce qui n'a de preuve qu'en intégration continue, et c'est nommé plutôt qu'enjolivé.** La borne
+regarde **deux** colonnes ; rien, dans un objet JavaScript, ne relie `paid_seats` à `seats`. La
+doublure d'`api/test.js` l'**imite** — elle lève un `23514` nommé, comme elle imite déjà les largeurs
+`integer` et la grammaire des comptes — mais elle ne la **subit** pas, et un test qui passe contre la
+doublure prouve la doublure. C'est `api/db-check.js` qui éprouve le refus réel : zéro siège payé,
+un négatif, vingt et un sièges sur une table qui n'en porte que vingt, tous refusés par
+`matches_paid_seats_borne` ; un et vingt acceptés. **Ce module touche une clause SQL, donc le job
+`db` le concerne**, et il n'a pas pu être lancé sur la machine de travail — aucune Postgres n'y
+tourne. Le dernier passage vert connu reste celui du 2026-09-15 (run 34894629071), et il est
+antérieur à cette colonne.
+
+Les cinquante parties de bout en bout la portent toutes à 1, sur les cinq modes, les quatre tables
+et les cinq issues, et `ledgerReconcile` reste sans grief à chaque étape. Le jeu n'a pas changé d'un
+octet : `index.html` n'est pas touché, la colonne ne part pas au client, et il n'y a pas de
+dépendance nouvelle. À ce stade, **410 tests sur le jeu et 217 sur l'API** sans rien installer,
+226 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -521,6 +571,8 @@ de la même nature que celle qu'on vient de fermer :
   l'autre, et sans elle l'exposition ne sera plus attribuable après coup : on saura ce que la maison
   a versé, jamais pour combien de sièges vides. La colonne doit exister **avant** le remplissage,
   pas après, pour la même raison que `seats` et `team_size` sont figés sur le billet.
+  *Fermé par le module 3 de la phase 04a* : `matches.paid_seats` existe, et elle est dormante —
+  voir « Une colonne DORMANTE, et c'est exactement pourquoi elle est créée maintenant ».
 
 ### Le rejeu ne sera opposable que sur le même runtime
 

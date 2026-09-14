@@ -51,8 +51,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 410 tests sur le jeu (`node test.js`) et
-  215 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 224 en tout — de bout en bout avec de la vraie
+  217 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 226 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -231,6 +231,17 @@ porte : le reste a besoin d'un navigateur pour tourner.
   un correctif déployé pendant qu'un joueur joue rejouerait une autre partie que la sienne. Même
   patron que `seats` et `team_size`, et même test — un corps qui la porte écrit une ligne strictement
   identique à celle d'un corps minimal.
+- **`matches` enregistre combien de sièges un humain a payés, et personne ne le lit.** `paid_seats`
+  est écrite par le serveur et figée à l'ouverture, comme `seats`, `team_size` et `sim_version` :
+  un corps portant `paidSeats: 7` écrit une ligne strictement identique à celle d'un corps minimal,
+  et le chemin `repris` ne la réécrit jamais. Elle vaut **1** partout — un billet **est** une table
+  tant qu'il n'existe pas d'identifiant de table partagée — et elle est **dormante, assumée telle**.
+  On ne lui invente pas de lecteur : un montant *notionnel* `stake_cents × paid_seats` posé à côté
+  du montant *réalisé* du grand livre est la paire qu'on finirait par confondre. La raison de
+  l'écrire maintenant est celle qui fige `seats` : après coup le chiffre est irrécupérable, et
+  l'exposition de la maison cesse d'être attribuable. Sa borne
+  `check (paid_seats between 1 and seats)` regarde **deux** colonnes — la doublure l'imite, seul
+  `api/db-check.js` la fait subir.
 - **`match_traces` est en insertion seule, à UNE exception nommée** : clé primaire `(match_id, seq)`,
   `on conflict do nothing`, premier écrit gagne, aucun `update` — mais un rang déjà posé dont les
   données diffèrent est **refusé et nommé**, jamais avalé. Un segment ne portant que des jetons
@@ -427,8 +438,8 @@ tout solde y est modifiable depuis la console.
   - Phase 04a — le **bord** de l'argent réel. **EN COURS**, spécification écrite :
     `docs/PHASE-04A.md`. Elle ne contient aucun dépôt : elle livre les prérequis que ce fichier et
     `docs/HISTORIQUE.md` déclarent eux-mêmes bloquants — un **plafond d'exposition** décidé à
-    l'ouverture du billet, le **compte des sièges payés** que `matches` n'enregistre pas, et **qui a
-    le droit de contre-passer** — plus une cascade de schéma qui détruit aujourd'hui les pièces
+    l'ouverture du billet, le **compte des sièges payés** que `matches` n'enregistrait pas, et **qui
+    a le droit de contre-passer** — plus une cascade de schéma qui détruit aujourd'hui les pièces
     justificatives d'un compte effacé, et un **plancher d'horloge** sur les règlements qui paient.
     Six modules. Rien n'y ouvre de table en argent réel, `SIM_VERSION` ne bouge pas, et le jeu ne
     reçoit qu'un membre de plus dans `WBCore.REFUS_SAS` et une fonction pure de plus dans `WBCore`.
@@ -442,6 +453,10 @@ tout solde y est modifiable depuis la console.
     règlement qui paie, encaissement compris. `SIM_VERSION` ne bouge pas, le sas ne reçoit rien, et
     `api/app.js` n'a pas changé d'une virgule : un refus de verdict clôt déjà la ligne en `rejected`
     et rend le règlement, jamais un 500.
+    *Module 3* : **livré**. `matches.paid_seats`, écrite par le serveur, figée à l'ouverture, bornée
+    par `between 1 and seats`, valant 1 partout — **dormante et assumée telle**, sans lecteur.
+    Premier module de la phase à toucher une clause SQL : le job `db` le concerne, et il n'a pas pu
+    être lancé sur la machine de travail.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.
@@ -457,11 +472,13 @@ elle vaut $0,10 de réel, pas $2, et un joueur qui emporte toute la table coûte
 
 Deux choses restaient ouvertes et bloquaient la phase 04 : **un plafond** — le grand livre mesure
 l'exposition, il ne la borne pas, et rien n'empêche un joueur fort de la moissonner sur des tables
-remplies de bots ; et **le compte des sièges réellement payés**, que `matches` n'enregistre pas.
-Aujourd'hui la réponse est toujours « un », donc personne n'en a eu besoin ; au premier remplissage
-partiel elle variera, et sans elle l'exposition ne sera plus attribuable après coup. Détail et
-raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ». **Les deux sont
-le sujet de la phase 04a, en cours et pas encore livrée** — tant qu'elle ne l'est pas, la mesure
+remplies de bots ; et **le compte des sièges réellement payés**, que `matches` n'enregistrait pas.
+La seconde est réglée depuis le module 3 de la 04a : `matches.paid_seats` existe, écrite par le
+serveur et figée à l'ouverture. Aujourd'hui la réponse est toujours « un », donc **rien ne la lit, et
+c'est exactement pourquoi elle est créée maintenant** — au premier remplissage partiel elle variera,
+et après coup le chiffre serait irrécupérable, l'exposition cessant d'être attribuable. Détail et
+raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ». **Le plafond,
+lui, reste à brancher : c'est le module 4 de la 04a, en cours** — tant qu'il ne l'est pas, la mesure
 existe et la borne non.
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre

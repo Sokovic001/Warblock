@@ -62,6 +62,27 @@ create table if not exists matches (
   -- et donc après un redémarrage de serveur — jugeait la partie contre une table que personne
   -- n'avait achetée.
   team_size    integer      not null check (team_size > 0),
+  -- COMBIEN DE SIÈGES DE CETTE TABLE UN HUMAIN A PAYÉS. Écrite par le SERVEUR et figée à
+  -- l'ouverture, exactement comme `seats`, `team_size` et `sim_version` : le client ne l'écrit
+  -- jamais, et un corps qui la porte laisse la ligne inchangée. Elle vaut 1 sur toutes les lignes
+  -- aujourd'hui, et ce n'est pas un réglage — un billet EST une table tant qu'il n'existe pas
+  -- d'identifiant de table partagée, donc le seul humain assis est celui qui ouvre le billet ; les
+  -- dix-neuf autres sièges sont des bots, qui ne misent rien.
+  --
+  -- ELLE EST DORMANTE, ET C'EST ASSUMÉ. Rien ne la lit, et il ne faut pas lui inventer un lecteur.
+  -- Le dossier a déjà tranché ce cas exact à propos de `seed_secret` : « elle ne sert à rien en 02a,
+  -- et c'est exactement pourquoi elle est créée maintenant ». La raison ici est celle qui fige
+  -- `seats` : APRÈS COUP, rien ne permet de retrouver combien de sièges un humain avait payés, et
+  -- l'exposition de la maison — qui est la différence entre ce qui sort de la caisse et ce qui a
+  -- réellement été misé — cesse d'être attribuable. La colonne doit donc exister AVANT le premier
+  -- remplissage partiel, pas après lui.
+  --
+  -- CE QU'IL NE FAUT PAS LUI AJOUTER, écrit plutôt que redécouvert : un agrégat qui en tirerait un
+  -- montant NOTIONNEL (`stake_cents × paid_seats`) à poser à côté du montant RÉALISÉ qu'on lit sur
+  -- le grand livre. Ce sont très exactement les deux nombres qu'on finirait par confondre, et le
+  -- livre est le seul des deux qui compte de l'argent. Le jour où elle servira, c'est l'identifiant
+  -- de table partagée qui manquera d'abord, et il est renvoyé à la phase 05.
+  paid_seats   integer      not null,
   brawler      text         not null,
   -- La graine PUBLIQUE : 32 bits non signés, le domaine de WBCore.makeRng. Elle décide de la carte,
   -- du gaz, des caisses et des vingt bots, et elle part au client — c'est `seedFor` qui la lit.
@@ -202,6 +223,12 @@ create table if not exists matches (
   replay_ms          integer  check (replay_ms >= 0),
 
   constraint matches_expire_apres check (expires_at > opened_at),
+  -- La borne de `paid_seats`, et elle regarde DEUX colonnes : on ne paie pas moins d'un siège — un
+  -- billet sans humain n'existe pas — et jamais plus qu'il n'y en a sur la table. C'est une
+  -- contrainte de table et pas de colonne parce qu'elle lit `seats`, et elle est NOMMÉE pour que le
+  -- refus soit lisible : `api/db-check.js` l'éprouve contre une vraie base, et une doublure ne peut
+  -- pas SUBIR une contrainte, elle ne fait que l'imiter.
+  constraint matches_paid_seats_borne check (paid_seats between 1 and seats),
   -- Un règlement est complet ou absent : une ligne close porte ses montants, une ligne ouverte
   -- n'en porte aucun. Sans cette contrainte, un règlement interrompu à mi-chemin serait lisible
   -- comme une partie gagnée à zéro.
