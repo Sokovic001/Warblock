@@ -408,9 +408,27 @@ create table if not exists ledger_entries (
 create unique index if not exists ledger_entries_mouvement_uniq
   on ledger_entries (motif, reference, compte_debit, compte_credit);
 
--- Les deux index de LECTURE. Le solde d'un compte est la somme de ses crédits moins la somme de ses
--- débits — c'est ce qui remplace la case qu'on ne crée pas — et cette somme est sur le chemin d'une
--- requête que le joueur attend. Un index par sens suffit longtemps ; le jour où il ne suffira plus,
--- l'échappatoire nommée est l'instantané de clôture, et jamais une colonne mise à jour.
-create index if not exists ledger_entries_debit_idx  on ledger_entries (compte_debit);
-create index if not exists ledger_entries_credit_idx on ledger_entries (compte_credit);
+-- Les deux index de LECTURE, ET ILS PORTENT DÉSORMAIS DEUX COLONNES. Le solde d'un compte est la
+-- somme de ses crédits moins la somme de ses débits — c'est ce qui remplace la case qu'on ne crée
+-- pas — et cette somme est sur le chemin d'une requête que le joueur attend. L'échappatoire nommée,
+-- le jour où la somme coûtera trop cher, reste l'instantané de clôture et jamais une colonne mise à
+-- jour.
+--
+-- POURQUOI `cree_le` LES REJOINT (phase 04a, module 4). Le plafond se décide sur l'exposition
+-- RÉALISÉE d'une FENÊTRE GLISSANTE de `PLAFOND_FENETRE_H` heures, lue à l'ouverture de chaque
+-- billet, c'est-à-dire sur le chemin le plus disputé du système. La clause y porte un compte ET une
+-- date : sur un index qui ne connaît que le compte, Postgres remonte toutes les écritures de
+-- `maison:contrepartie` depuis le premier jour pour n'en garder qu'une journée.
+--
+-- LE RENOMMAGE EST GRATUIT AUJOURD'HUI ET CHER APRÈS. Aucune base de production n'existe, donc
+-- `drop index` ne coûte rien ; après le premier euro, il faudrait une reprise de données et une
+-- fenêtre de maintenance. C'est la même fenêtre que celle de `seed_secret` passée à 128 bits, et
+-- elle se referme au même moment.
+--
+-- CE QUI LE PROUVE N'EST PAS ICI : un `explain (format json)` sur la requête de fenêtre réelle, dans
+-- `api/db-check.js`, qui refuse un `Seq Scan` sur cette table. Aucun test sans base ne peut dire
+-- qu'un index SERT.
+drop index if exists ledger_entries_debit_idx;
+drop index if exists ledger_entries_credit_idx;
+create index if not exists ledger_entries_debit_fenetre_idx  on ledger_entries (compte_debit, cree_le);
+create index if not exists ledger_entries_credit_fenetre_idx on ledger_entries (compte_credit, cree_le);

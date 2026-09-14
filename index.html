@@ -2491,9 +2491,15 @@ const WBCore = (function(){
   // « sans mise au séquestre », donc une partie qui ne pourrait rien payer à personne.
   //
   // LA LISTE EST FERMÉE, et elle ne contient que des refus qui parlent du DROIT de jouer : pas de
-  // crédits, le grand livre a refusé l'écriture, le joueur vient de renoncer. Un 429 ou un 500 n'y
-  // sont pas : ils ne disent rien, donc ils retombent dans le repli hors ligne comme une panne.
-  const REFUS_SAS = ['fonds', 'livre', 'renonce_recent'];
+  // crédits, le grand livre a refusé l'écriture, le joueur vient de renoncer, la table dépasse le
+  // plafond d'exposition. Un 429 ou un 500 n'y sont pas : ils ne disent rien, donc ils retombent
+  // dans le repli hors ligne comme une panne.
+  //
+  // `plafond` est le QUATRIÈME, et il est nommé pour la même raison que les trois autres : le
+  // serveur a instruit la demande et l'a rejetée, rien n'a été débité, et l'action à faire est
+  // claire. Le laisser retomber hors ligne ferait jouer gratuitement celui qu'on vient tout juste
+  // de borner — c'est-à-dire exactement l'inverse de ce que le plafond existe pour tenir.
+  const REFUS_SAS = ['fonds', 'livre', 'renonce_recent', 'plafond'];
   function refusDuBillet(status, data) {
     // Statut 0 : il n'y a pas eu de réponse du tout. Ce n'est pas un refus, c'est une absence.
     if (!Number(status)) return null;
@@ -2522,6 +2528,19 @@ const WBCore = (function(){
       const s = Number(d.windowSeconds);
       const n = Number.isFinite(s) && s > 0 ? Math.ceil(s) : renonceFenetreS();
       return `You just left a room. You can enter a new one ${n} seconds after that one opened.`;
+    }
+    // UN SEUL CODE, DEUX PORTÉES, ET C'EST LE MESSAGE QUI LIT LA PORTÉE. Une seule phrase mentirait
+    // dans un cas sur deux : « prends une table moins chère » est faux quand c'est le fusible global
+    // qui a sauté, puisque aucune table moins chère n'aidera.
+    //
+    // PORTÉE ABSENTE OU ILLISIBLE : ON REND CELLE DE LA MAISON, délibérément. Promettre une table
+    // moins chère quand aucune ne marchera est pire que dire « plus tard » à quelqu'un qu'une table
+    // moins chère aurait dépanné : le premier renvoie le joueur cliquer en boucle sur un lobby qui
+    // a l'air cassé, le second lui fait attendre quelques minutes de trop.
+    if (code === 'plafond') {
+      return d.portee === 'joueur'
+        ? 'You have won a lot here lately, so this room is off limits for now. Nothing was charged — pick a smaller buy-in.'
+        : 'No new rooms are opening right now. Nothing was charged — try again in a few minutes.';
     }
     return 'The server turned this entry down. Try again in a moment.';
   }

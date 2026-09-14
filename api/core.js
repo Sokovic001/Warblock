@@ -38,7 +38,15 @@ const ATTENDUS = ['sanitizeName', 'validName', 'nameKey', 'nameOr', 'NAME', 'MOD
                   // va lui coûter, le serveur l'arbitre. Tout le reste — plan de comptes, motifs,
                   // mouvements — vit dans api/ledger.js et n'a rien à faire dans les 465 Ko que
                   // chaque joueur télécharge.
-                  'renonciationOuverte', 'renonceFenetreS'];
+                  'renonciationOuverte', 'renonceFenetreS',
+                  // Phase 04a, module 4. Le PIRE CAS d'un billet — ce que la maison risque au
+                  // maximum sur la table qu'on s'apprête à ouvrir — est calculé par le JEU et passé
+                  // en paramètre à la base : `api/ledger.js` porte deux gardes textuelles qui lui
+                  // interdisent tout `require` et toute arithmétique de commission, donc le chiffre
+                  // ne peut venir que d'ici. Ces deux noms-là sont sur le chemin d'un REFUS de
+                  // billet : leur disparition doit casser au démarrage du serveur, pas au premier
+                  // `POST /api/match` d'un joueur.
+                  'cashoutCents', 'purseBound'];
 for (const nom of ATTENDUS) {
   if (mod.exports[nom] === undefined) throw new Error(`WBCore n'exporte plus ${nom}.`);
 }

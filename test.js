@@ -3403,8 +3403,11 @@ test('LE JETON QUI MEURT PENDANT LE SAS NE FAIT PAS ENCAISSER LE PORTEFEUILLE DE
 });
 test('un refus NOMMÉ n\'est pas une panne, et la liste est fermée', () => {
   // La règle est dans WBCore avec son test, parce que c'est elle qui décide si une partie payante
-  // peut devenir une partie gratuite. Trois codes, et trois seulement.
-  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent']);
+  // peut devenir une partie gratuite. QUATRE codes depuis la phase 04a, et quatre seulement :
+  // `plafond` rejoint les trois autres parce qu'il dit la même chose qu'eux — le serveur a instruit
+  // la demande et l'a rejetée, rien n'a été débité, et il y a quelque chose à faire. Le laisser
+  // retomber hors ligne ferait jouer GRATUITEMENT celui qu'on vient tout juste de borner.
+  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent', 'plafond']);
   for (const code of C.REFUS_SAS)
     assert.strictEqual(C.refusDuBillet(409, { code }), code, code);
   // Statut 0 : il n'y a pas eu de réponse du tout. Ce n'est pas un refus, c'est une absence — et
@@ -3435,9 +3438,42 @@ test('un refus se dit au joueur en clair, et jamais en détail technique', () =>
   for (const code of ['', 'inconnu', undefined, null])
     assert.ok(C.refusMessage(code, {}).length > 10, String(code));
   // Et jamais le détail technique : ni code, ni statut, ni nom de table.
-  for (const code of ['fonds', 'livre', 'renonce_recent', 'inconnu'])
+  for (const code of ['fonds', 'livre', 'renonce_recent', 'plafond', 'inconnu'])
     for (const fuite of ['409', 'ledger', 'enjeu:', 'postgres', 'undefined', 'NaN'])
       assert.ok(!C.refusMessage(code, { windowSeconds: 10 }).includes(fuite), code + ' / ' + fuite);
+});
+test('UN SEUL CODE, DEUX PORTÉES : le message du plafond LIT la portée, et l\'absence rend la MAISON', () => {
+  // C'est la raison pour laquelle un seul code suffit. Le sas n'a qu'un comportement à tenir — il
+  // s'arrête, il affiche, il ne lance rien — donc faire diverger la liste fermée pour une nuance que
+  // le joueur ne peut pas actionner serait une complication gratuite. Mais UNE SEULE PHRASE
+  // MENTIRAIT DANS UN CAS SUR DEUX.
+  const joueur = C.refusMessage('plafond', { portee: 'joueur', expositionCents: 160000,
+                                             plafondCents: 156000, fenetreHeures: 24 });
+  const maison = C.refusMessage('plafond', { portee: 'maison', expositionCents: 2100000,
+                                             plafondCents: 2000000, fenetreHeures: 24 });
+  assert.notStrictEqual(joueur, maison, 'les deux portées doivent dire deux choses différentes');
+  // La portée `joueur` promet ce qui est VRAI et vérifié côté serveur : une table moins chère
+  // s'ouvre dans la foulée.
+  assert.match(joueur, /smaller buy-in/);
+  // La portée `maison` ne promet AUCUNE table : aucune table moins chère n'aiderait, le fusible
+  // global refuse tout le monde. Elle dit ce qu'il y a à faire — attendre — et ce qui n'a pas eu
+  // lieu : rien n'a été débité.
+  assert.ok(!/smaller buy-in/.test(maison), maison);
+  assert.match(maison, /try again/i);
+  for (const m of [joueur, maison]) assert.match(m, /[Nn]othing was charged/);
+  // PORTÉE ABSENTE OU ILLISIBLE : ON REND CELLE DE LA MAISON, délibérément. Promettre une table
+  // moins chère quand aucune ne marchera renvoie le joueur cliquer en boucle sur un lobby qui a
+  // l'air cassé ; dire « plus tard » à quelqu'un qu'une table moins chère aurait dépanné lui coûte
+  // quelques minutes. Le second est le moins cher des deux, donc c'est le repli.
+  for (const absente of [{}, { portee: '' }, { portee: null }, { portee: 'JOUEUR' },
+                         { portee: 'maison_' }, { portee: ['joueur'] }, { portee: 42 },
+                         undefined, null])
+    assert.strictEqual(C.refusMessage('plafond', absente), maison, JSON.stringify(absente));
+  // Et aucun chiffre du serveur ne fuit à l'écran : le joueur lit ce qu'il peut faire, pas
+  // l'exposition de la maison en centimes.
+  for (const m of [joueur, maison])
+    for (const chiffre of ['156000', '2000000', '160000', '2100000'])
+      assert.ok(!m.includes(chiffre), m);
 });
 test('matchFlow : renoncer rend le billet, et n\'est pas un coup d\'envoi', () => {
   // Deux transitions nouvelles, et elles ne doublent pas `coup-denvoi` : quitter le sas ne lance
@@ -3493,10 +3529,51 @@ testAsync('un refus de fonds ne laisse AUCUN billet à jouer', () => {
       assert.strictEqual(envois.length, 1);
     });
 });
-testAsync('les deux autres refus nommés arrêtent le sas de la même façon', () => {
+testAsync('UN 409 PLAFOND ARRÊTE LE SAS, n\'écrit AUCUN montant, et n\'enferme personne', () => {
+  // Le quatrième refus nommé, et il se comporte exactement comme les trois autres : le serveur a
+  // instruit la demande et l'a rejetée, rien n'a été débité, et la partie ne part PAS hors ligne.
+  // Le laisser filer ferait jouer gratuitement celui qu'on vient tout juste de borner.
+  const { Match, envois, refus, adoptes } = bancMatch();
+  const corps = { erreur: 'x', code: 'plafond', portee: 'joueur', expositionCents: 160000,
+                  plafondCents: 156000, fenetreHeures: 24 };
+  return Promise.resolve()
+    .then(() => { Match.sas('resurgence', 10, 'bolt'); return souffler(); })
+    .then(() => { envois[0].repondre({ ok: false, status: 409, data: corps }); return souffler(); })
+    .then(() => {
+      assert.deepStrictEqual(refus.map(r => r.code), ['plafond'], 'le sas doit être prévenu');
+      assert.strictEqual(refus[0].data.portee, 'joueur', 'la portée arrive telle quelle');
+      assert.ok(C.refusMessage(refus[0].code, refus[0].data).length > 10, 'et il y a un message');
+      assert.strictEqual(envois.length, 1, 'un refus ne se retente pas tout seul');
+      // AUCUN MONTANT N'EST ÉCRIT. Le corps d'un `plafond` ne porte ni solde ni quarantaine — rien
+      // n'a bougé, il n'y a rien à dire — et `applyAccount` rend alors `null` pour les deux. Sans
+      // cette règle, un refus remettrait le portefeuille du lobby à zéro, ce qui est très exactement
+      // la panne qu'un montant ABSENT ne doit jamais produire. `expositionCents` et `plafondCents`
+      // sont des centimes de la MAISON, et ils ne doivent surtout pas être pris pour un solde.
+      assert.strictEqual(adoptes.length, 1, 'le module adopte les montants du refus, une fois');
+      const p = C.applyAccount(LOCAL(), adoptes[0], AVA);
+      assert.strictEqual(p.wallet, null, 'un refus plafond a écrit un solde');
+      assert.strictEqual(p.quarantine, null, 'un refus plafond a écrit une quarantaine');
+      // LE LOBBY N'EST PAS MORT, et c'est la promesse que la portée `joueur` fait à l'écran : une
+      // table moins chère s'ouvre IMMÉDIATEMENT dans la foulée.
+      Match.sas('solo', 0.5, 'bolt');
+      return souffler();
+    })
+    .then(() => {
+      assert.strictEqual(envois.length, 2, 'après un refus de plafond, on peut retenter');
+      envois[1].repondre({ ok: true, status: 200, data: BILLET('91', 777) });
+      return souffler();
+    })
+    .then(() => assert.strictEqual(C.seedFor(Match.coupDenvoi('solo', 50), 111111), 777,
+      'et la table moins chère se joue normalement'));
+});
+testAsync('les trois autres refus nommés arrêtent le sas de la même façon', () => {
   const cas = [
     { code: 'livre', corps: { erreur: 'x', code: 'livre', detail: null } },
     { code: 'renonce_recent', corps: { erreur: 'x', code: 'renonce_recent', windowSeconds: 10 } },
+    // La portée `maison` : le fusible global a sauté, aucune table moins chère n'aidera, et le sas
+    // s'arrête tout pareil.
+    { code: 'plafond', corps: { erreur: 'x', code: 'plafond', portee: 'maison',
+                                expositionCents: 2100000, plafondCents: 2000000, fenetreHeures: 24 } },
   ];
   return cas.reduce((chaine, c) => chaine.then(() => {
     const { Match, envois, refus } = bancMatch();

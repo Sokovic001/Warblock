@@ -34,6 +34,7 @@ POST /api/match      { mode, stake, brawler, clientKey }
                        repris, balanceCents, quarantineCents }
 → 409                { erreur, code: 'fonds', balanceCents, quarantineCents, requiredCents }
 → 409                { erreur, code: 'renonce_recent', windowSeconds }
+→ 409                { erreur, code: 'plafond', portee, expositionCents, plafondCents, fenetreHeures }
 ```
 
 - `mode` est une clé de `WBCore.MODES`, `stake` la mise **en dollars telle qu'elle est affichée** et
@@ -732,15 +733,14 @@ en outre que l'écran lise une **horloge** et non un compteur de tics : `sasRemb
 elle ne promet **rien** sur un billet **repris**, dont l'heure d'ouverture est celle d'un sas
 précédent — c'est pour cela que `POST /api/match` rend `repris` avec le billet.
 
-## L'exposition de la maison — calculable, et appelée par personne
+## L'exposition de la maison — calculable, puis branchée
 
 Phase 04a, module 1. Le grand livre **mesurait** l'exposition depuis la phase 03 : le solde négatif
 de `maison:contrepartie` **est** ce que coûtent dix-neuf adversaires qui ne misent rien. Il ne la
 **bornait** pas. Ce module la rend calculable — cinq constantes entières et quatre fonctions pures
-dans `api/ledger.js` — et **rien ne les appelle encore** : aucune route, aucune colonne, aucun
-changement de schéma, pas un octet de comportement en plus. C'est « le contrat avant le brancheur »,
-déjà employé en 02a pour `seedFor` et `matchFlow`, et son prix est écrit dans `docs/PHASE-04A.md` :
-un module qui ne tourne que dans les tests jusqu'à ce que le module 4 le branche.
+dans `api/ledger.js` — sans aucun appelant : c'est « le contrat avant le brancheur », déjà employé
+en 02a pour `seedFor` et `matchFlow`. **Le module 4 les branche**, et c'est décrit plus bas, sous
+« Le plafond refuse à l'ouverture ».
 
 **L'exposition est une SOMME d'écritures, jamais une colonne.** `expositionDe(transferts,
 references)` la lit sur les **deux** comptes de maison — `maison:contrepartie` et
@@ -852,6 +852,85 @@ littéraux de `COMPTES_EMETTEURS` : pour **toute** forme que la grammaire engend
 paramétrées sur toutes les magnitudes qu'un `bigserial` produit, plus les trois comptes de maison —
 le découvert est faux hors de `maison:dotation` et `maison:contrepartie`. C'est la garde qui
 empêchera un futur `maison:reserve` d'hériter du découvert par distraction.
+
+## Le plafond refuse à l'ouverture, et le sas le dit
+
+Phase 04a, module 4. La mesure devient une **borne** : `POST /api/match` refuse en `409 plafond`.
+
+```
+POST /api/match      { mode, stake, brawler, clientKey }
+→ 409                { erreur, code: 'plafond', portee: 'joueur' | 'maison',
+                       expositionCents, plafondCents, fenetreHeures }
+```
+
+**Le pire cas d'un billet est calculé par le JEU, et passé en paramètre.** `api/ledger.js` porte deux
+gardes textuelles — aucun `require`, aucune arithmétique de commission — donc le net maximal ne peut
+venir que de `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`. `api/app.js` le calcule
+**une fois**, le donne au fusible puis à `db.createMatch`, et personne ne le recalcule : même
+discipline que `mouvementGain`. `cashoutCents` et `purseBound` sont entrés dans la liste `ATTENDUS`
+d'`api/core.js` — ils sont désormais sur le chemin d'un refus, donc leur disparition casse au
+démarrage du serveur et pas au premier `POST` d'un joueur.
+
+**Le plafond par joueur est EXACT et se décide dans la transaction.** Il est lu dans `createMatch`,
+**après** `select id from users where id = $1 for update` et avant la moindre écriture : c'est ce
+verrou qui sérialise deux onglets du même joueur, et c'est pour cela que ce contrôle-là est dedans.
+Son agrégat est borné par les billets d'un seul joueur sur vingt-quatre heures. Un refus n'a laissé
+**ni ligne, ni écriture, ni séquestre** — l'annulation rend la ligne qu'on venait d'insérer à
+l'inexistence, comme sur `fonds` — et il n'enferme personne : la table moins chère s'ouvre dans la
+foulée, ce qu'un test vérifie au lieu de le promettre.
+
+**Le verdict ne s'applique qu'à un billet NEUF.** Le chemin `repris` — rejeu de la clé du client, ou
+billet déjà ouvert rendu tel quel — ne passe pas par lui. Refuser un billet que le joueur **détient**,
+mise débitée, l'enfermerait dedans jusqu'à l'expiration, puisqu'il n'en a qu'un à la fois. C'est la
+leçon du `22003`, et c'est la règle écrite de la phase : **un billet déjà ouvert n'est jamais cassé
+rétroactivement**, et **aucun chemin de règlement ne peut produire le code `plafond`** — garde
+textuelle, parce que refuser au règlement serait voler une partie gagnée et que c'est irréparable.
+
+**Le fusible global est APPROCHÉ, et il ne tourne pas sous le verrou.** C'est un interrupteur, pas un
+invariant : son agrégat porte sur toutes les écritures de tous les joueurs, et le lire sous le verrou
+ferait de chaque ouverture de billet un balayage de la table qui grossit le plus vite du dépôt, sur
+le chemin le plus disputé du système. Le dépôt a déjà payé ce genre de chose une fois — `GET /api/me`
+retenait un client du bassin assez longtemps pour mettre en file le renoncement d'un **autre** joueur
+au-delà de sa fenêtre de dix secondes. Il est donc lu **hors transaction**, au plus une fois toutes
+les `FUSIBLE_RAFRAICHI_S` secondes, la valeur gardée **en mémoire du processus** entre deux lectures,
+sur l'horloge **injectée** — donc sa cadence se teste sans attendre. Il a le droit d'être en retard
+d'une minute, et ce retard vaut au plus ce qu'une minute d'ouvertures peut engager.
+
+**La requête de fenêtre ne fait AUCUN cast sur la référence.** `ledger_entries.reference` est du
+texte, et une contre-passation y porte `gain:42` : `reference::bigint` lèverait `22P02`, et une
+jointure qui filtre ces lignes laisserait un gain **annulé** peser dans l'exposition — donc refuserait
+un joueur pour de l'argent qu'il n'a jamais reçu. La requête **interpole** `REFERENCE_BILLET_SQL` et
+compare à `matches.id::text` ; les comptes (`COMPTES_EXPOSITION`) et les motifs (`MOTIFS_EXPOSITION`)
+lui arrivent en **paramètres**, depuis les mêmes listes que lit `expositionDe` — il n'existe jamais
+deux écritures de la même règle, et deux gardes textuelles le vérifient. `maison:dotation` n'entre
+jamais dans l'exposition. Un détail écrit dans le code plutôt que découvert en production :
+l'expression est calculée dans une **sous-requête sur `ledger_entries` seule**, parce qu'elle nomme
+`motif` sans le qualifier et que `matches` porte elle aussi un `motif` — dans le `join`, elle sortait
+en `42702`.
+
+**Les deux index de lecture du livre portent maintenant deux colonnes**, `(compte_debit, cree_le)` et
+`(compte_credit, cree_le)`, sous de nouveaux noms et avec le `drop index if exists` des anciens. Une
+fenêtre glissante porte un compte **et** une date. Que ces index **servent** n'a de preuve qu'en
+intégration continue : `api/db-check.js` pose un `explain (format json)` sur la requête réelle et
+refuse tout `Seq Scan` sur `ledger_entries`.
+
+**Un seul code, deux portées, et le message LIT la portée.** `plafond` entre dans la liste fermée
+`WBCore.REFUS_SAS`, qui passe de trois à quatre membres : le sas s'arrête, affiche, et ne lance
+aucune partie — le laisser retomber hors ligne ferait jouer gratuitement celui qu'on vient de borner.
+Un seul code, parce que le sas n'a qu'un comportement à tenir ; mais une seule phrase mentirait dans
+un cas sur deux, donc la réponse porte `portee`. Portée `joueur` : une table moins chère marchera.
+Portée `maison` : aucune table moins chère n'aidera, rien n'a été débité, réessayer plus tard.
+**Portée absente ou illisible : on rend le message de la maison**, délibérément.
+
+**Trois limites, écrites plutôt que découvertes.** (1) Le refus par joueur **consomme une graine** :
+il se décide dans la transaction, donc après les deux tirages, exactement comme `fonds`. Le prix est
+nul — le joueur n'obtient aucun billet, donc aucune carte, et la source est un générateur. (2) Quand
+le fusible saute, il refuse **aussi** un joueur qui redemandait simplement son billet déjà ouvert
+après une réponse perdue : le fusible est lu avant de savoir si la demande est un rejeu. Pendant un
+déclenchement, un billet ouvert n'est donc pas récupérable par cette route, et sa mise reste au
+séquestre jusqu'à l'expiration. (3) Le fusible vit **en mémoire du processus**, comme la limitation
+de débit : perdu au redémarrage, non partagé entre instances, donc un déploiement à deux processus
+double de fait le fusible.
 
 ## `ledger_entries` — la table, et ce que sa clé prouve
 
@@ -1250,6 +1329,17 @@ doublure se contente d'imiter.
   du même solde : un seul aboutit, l'autre est refusé, et le solde ne passe jamais en négatif. Un
   verrou éprouvé en série ne prouve rien : une doublure JavaScript mono-fil sérialise gratuitement
   ce que Postgres ne sérialise que si on le lui demande correctement.
+- **Depuis la phase 04a, deux cas de plus, et ils sont de la même famille.** (1) **Deux ouvertures
+  simultanées ne franchissent pas le plafond à deux** : deux `createMatch` réels en parallèle rendent
+  un seul billet, une seule mise, l'un des deux marqué `repris` — puis, l'exposition posée par des
+  écritures, le billet suivant est refusé en `plafond`, portée `joueur`, sans laisser de ligne
+  ouverte. Ce cas exécute au passage la **vraie requête de fenêtre** contre Postgres : c'est le seul
+  endroit où `REFERENCE_BILLET_SQL` est interprétée par le moteur, et où un `42702` sur `motif`
+  ambigu se verrait. (2) **La requête de fenêtre ne balaie pas le grand livre** : quarante mille
+  lignes de lest, un `analyze`, puis un `explain (format json)` sur la requête réelle, qui refuse tout
+  `Seq Scan` sur `ledger_entries` et exige que l'un des deux index `(compte, cree_le)` serve. C'est
+  la seule façon de prouver qu'un index **sert**, et personne ne peut la donner sur la machine de
+  travail.
 
 Le job `db` de `.github/workflows/test.yml` monte un service `postgres:16` et le lance. Le job
 existant ne change pas d'une ligne, et un test compare ses étapes une à une.
@@ -1272,7 +1362,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             217 tests sans rien installer, 226 avec jose
+test.js             227 tests sans rien installer, 236 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1375,8 +1465,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 217 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 226 : les 217, plus la chaîne complète de vérification
+node api/test.js          # 227 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 236 : les 227, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
@@ -1562,7 +1652,11 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   ouvre une transaction d'écriture — verrou `for update` sur la ligne `users`, deux soldes et trois
   agrégats, du `begin` au `commit` — et retient tout ce temps un client du bassin de dix connexions.
   Un seul onglet qui la martelait pouvait mettre en file le `POST .../renounce` d'un **autre** joueur
-  au-delà de sa fenêtre de dix secondes : sa mise restait au séquestre. Son seau est **séparé** et
+  au-delà de sa fenêtre de dix secondes : sa mise restait au séquestre. **Un SECOND état vit
+  désormais en mémoire du processus, et c'est le fusible global de la phase 04a.** Même famille, même
+  limite : perdu au redémarrage, non partagé entre instances, donc un déploiement à deux processus
+  **double de fait le fusible**. C'est un choix, pas un oubli — le lire sous le verrou d'ouverture
+  d'un billet ferait très exactement la panne décrite au paragraphe précédent, en pire. Son seau est **séparé** et
   plus large (soixante par minute contre douze), parce que le jeu la lit à la connexion, à la reprise
   de session, après chaque renoncement et après chaque règlement. Deux dettes restent, et elles sont
   hors de ce correctif : le seau est en mémoire, donc il ne borne un martèlement que **par instance**,

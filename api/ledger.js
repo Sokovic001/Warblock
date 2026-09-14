@@ -445,6 +445,21 @@ const BILLET_RE = new RegExp(BILLET_RE_SQL);
 const CONTREPASSATION_RE_SQL = `^(?:${MOTIFS_BILLET.join('|')}):([1-9][0-9]*)$`;
 const CONTREPASSATION_RE = new RegExp(CONTREPASSATION_RE_SQL);
 
+// CE QUI ENTRE DANS L'EXPOSITION, ÉCRIT UNE SEULE FOIS. `expositionDe` lit ces deux listes, et la
+// requête de fenêtre d'`api/db-pg.js` les reçoit en paramètres : il n'existe donc qu'une écriture de
+// « quels comptes » et « quels motifs », alors que la règle vit des deux côtés d'un réseau. Une
+// seconde écriture dans un littéral SQL serait le patron du `respawn()` défini deux fois, et
+// celle-là ne se relirait qu'au moment de refuser quelqu'un.
+//
+// DEUX COMPTES, ET SEULEMENT DEUX. `maison:dotation` n'y est PAS : émettre des crédits fictifs n'est
+// pas s'exposer, et l'y laisser ferait de la première connexion de chaque joueur 5 000 centimes
+// d'exposition.
+const COMPTES_EXPOSITION = Object.freeze([MAISON_CONTREPARTIE, MAISON_COMMISSION]);
+// QUATRE MOTIFS. Les trois qui désignent un billet, plus celui qui corrige l'un d'eux : une
+// contre-passation de gain DOIT être vue, sans quoi un gain annulé continuerait de peser dans
+// l'exposition. `dotation` et `recharge` n'en sont pas, et c'est la même raison que ci-dessus.
+const MOTIFS_EXPOSITION = Object.freeze([...MOTIFS_BILLET, 'contrepassation']);
+
 // CE QUI RAMÈNE UNE ÉCRITURE À UN BILLET, ou à `null`. C'est le cœur du module, et le piège de la
 // phase : il naît VERT si on ne le nomme pas.
 //
@@ -503,12 +518,11 @@ function expositionDe(transferts, references) {
     const billet = referenceBillet(t.motif, t.reference);
     return billet !== null && voulues.has(billet);
   });
-  const contrepartie = soldeDe(retenus, MAISON_CONTREPARTIE);
-  const commission = soldeDe(retenus, MAISON_COMMISSION);
+  const soldes = COMPTES_EXPOSITION.reduce((s, compte) => s + soldeDe(retenus, compte), 0);
   // `0 - x` et non `-x` : `-0` est un nombre distinct de `0` pour `Object.is`, donc pour
   // `assert.strictEqual` et pour toute comparaison stricte qu'un appelant écrirait. Un livre vide
   // doit rendre zéro, pas « moins zéro ».
-  return 0 - (contrepartie + commission);
+  return 0 - soldes;
 }
 
 // LE VERDICT. `expositionRealiseeCents` vient du livre, `expositionBilletCents` du billet qu'on
@@ -695,5 +709,6 @@ module.exports = {
   soldeDe, ledgerReconcile, STATUTS_CLOS,
   PLAFOND_FENETRE_H, PLAFOND_TABLES_PAR_JOUR, PLAFOND_JOUEUR_CENTS, PLAFOND_MAISON_CENTS,
   FUSIBLE_RAFRAICHI_S,
+  COMPTES_EXPOSITION, MOTIFS_EXPOSITION,
   expositionBilletMaxCents, referenceBillet, REFERENCE_BILLET_SQL, expositionDe, plafondVerdict,
 };

@@ -521,6 +521,103 @@ octet : `index.html` n'est pas touché, la colonne ne part pas au client, et il 
 dépendance nouvelle. À ce stade, **410 tests sur le jeu et 217 sur l'API** sans rien installer,
 226 avec `jose`.
 
+### La mesure devient une borne, et le sas dit laquelle — phase 04a, module 4
+
+Le grand livre **mesurait** l'exposition de la maison depuis la phase 03 ; le module 1 de cette
+phase l'a rendue **calculable**, sans appelant. Ce module la **branche** : `POST /api/match` refuse
+désormais en `409 plafond`, et la partie ne part pas hors ligne.
+
+**Le pire cas d'un billet est calculé par le JEU et passé en paramètre.** `api/ledger.js` porte deux
+gardes textuelles — aucun `require`, aucune arithmétique de commission — donc le net maximal ne peut
+venir que de `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`. `api/app.js` le calcule
+une fois, le donne au fusible et à `db.createMatch`, et personne ne le recalcule : même discipline
+que `mouvementGain`, qui reçoit brut, commission et net sans les refaire. `cashoutCents` et
+`purseBound` entrent du même coup dans la liste `ATTENDUS` d'`api/core.js` — ils sont désormais sur
+le chemin d'un **refus**, donc leur disparition doit casser au démarrage du serveur et pas au premier
+`POST` d'un joueur.
+
+**Les deux nombres n'ont pas la même nature, et les traiter pareil coûtait la section critique la
+plus disputée du système.** Le **plafond par joueur** est EXACT : il se lit dans la transaction
+d'ouverture, **après** le verrou `select id from users where id = $1 for update`, parce que c'est ce
+verrou qui sérialise deux onglets du même joueur, et parce que son agrégat est borné par les billets
+d'un seul joueur sur vingt-quatre heures. Le **fusible global** est APPROCHÉ : c'est un
+interrupteur, pas un invariant, et le lire sous ce verrou ferait de chaque ouverture de billet un
+agrégat **non borné** sur la table qui grossit le plus vite du dépôt. Le dépôt a déjà payé ce genre
+de chose une fois — `GET /api/me` retenait un client du bassin assez longtemps pour mettre en file le
+renoncement d'un **autre** joueur au-delà de sa fenêtre de dix secondes. Il est donc lu **hors
+transaction**, au plus une fois toutes les `FUSIBLE_RAFRAICHI_S` secondes, la valeur gardée en
+mémoire du processus entre deux lectures, sur l'**horloge injectée** — donc sa cadence se teste sans
+attendre. Il a le droit d'être en retard d'une minute, et ce retard vaut au plus ce qu'une minute
+d'ouvertures peut engager.
+
+**La requête de fenêtre ne fait aucun `cast` sur la référence, et c'est le piège de la phase.**
+`ledger_entries.reference` est du **texte**, et une contre-passation y porte `gain:42` : une jointure
+par `reference::bigint` lèverait `22P02` sur ces lignes-là, une jointure qui les **filtre** les
+ignore — c'est-à-dire qu'un gain annulé continuerait de peser dans l'exposition et refuserait un
+joueur pour de l'argent qu'il n'a jamais reçu. La requête **interpole** `REFERENCE_BILLET_SQL`,
+exportée par `api/ledger.js`, et compare à `matches.id::text` ; les comptes et les motifs lui
+arrivent en **paramètres**, depuis les mêmes listes que lit `expositionDe`. Deux gardes textuelles le
+tiennent : l'interpolation est bien celle-là, et aucune seconde écriture de la règle n'est apparue à
+côté. Un détail qui ne se serait vu qu'en production est écrit dans le code : l'expression est
+calculée dans une **sous-requête sur `ledger_entries` seule**, parce qu'elle nomme `motif` sans le
+qualifier et que `matches` porte elle aussi un `motif` — écrite dans le `join`, elle sortait en
+`42702`.
+
+**Les deux index de lecture du livre passent à deux colonnes** — `(compte_debit, cree_le)` et
+`(compte_credit, cree_le)` — sous de nouveaux noms, avec le `drop index if exists` des anciens. Une
+fenêtre glissante lue à chaque ouverture de billet porte un compte **et** une date ; sur un index qui
+ne connaît que le compte, Postgres remonte toutes les écritures de `maison:contrepartie` depuis le
+premier jour pour n'en garder qu'une journée. Aucune base de production n'existe, donc ce renommage
+coûte zéro aujourd'hui et une reprise de données après le premier euro — la même fenêtre que celle de
+`seed_secret` passée à 128 bits.
+
+**Un seul code de refus, deux portées, et c'est le MESSAGE qui lit la portée.** `plafond` entre dans
+la liste fermée `WBCore.REFUS_SAS`, qui passe de trois à quatre membres : le serveur a instruit la
+demande et l'a rejetée, rien n'a été débité, donc le sas s'arrête au lieu de laisser partir une
+partie gratuite — laisser filer ferait jouer gratuitement celui qu'on vient de borner. Un seul code,
+parce que le sas n'a qu'un comportement à tenir. Mais **une seule phrase mentirait dans un cas sur
+deux** : « prends une table moins chère » est faux quand c'est le fusible global qui a sauté. La
+réponse porte donc `portee`, plus `expositionCents`, `plafondCents` et `fenetreHeures`, en 409 comme
+tous les refus nommés de cette API. **Portée absente ou illisible : on rend le message de la
+maison**, délibérément — promettre une table moins chère quand aucune ne marchera renvoie le joueur
+cliquer en boucle sur un lobby qui a l'air cassé ; dire « plus tard » à quelqu'un qu'une table moins
+chère aurait dépanné lui coûte quelques minutes.
+
+**Deux décisions d'écriture prises dans ce module, et elles méritent d'être relues.**
+
+La première : **le verdict ne s'applique qu'à l'ouverture d'un billet NEUF.** Le chemin `repris` —
+rejeu de la clé du client, ou billet déjà ouvert rendu tel quel — ne passe pas par lui. Refuser un
+billet que le joueur **détient**, mise débitée, l'enfermerait dedans jusqu'à l'expiration, puisqu'il
+n'en a qu'un à la fois : c'est la leçon du `22003`, et c'est aussi la règle écrite de la phase — un
+billet déjà ouvert n'est jamais cassé rétroactivement. Le corollaire est gardé par un test négatif :
+**aucun chemin de règlement ne peut produire le code `plafond`**, garde textuelle sur `app.js` et sur
+`db-pg.js`, plus un parcours des routes qui closent une ligne. Refuser au règlement serait voler une
+partie gagnée, et c'est irréparable.
+
+La seconde, et c'est une **limite**, pas une propriété : le fusible global, lui, est lu **avant** de
+savoir si la demande sera un rejeu. Quand il saute, il refuse donc aussi un joueur qui redemandait
+simplement son billet déjà ouvert après une réponse perdue. C'est cohérent avec ce qu'il est — une
+alerte qui refuse tout le monde — mais il faut le savoir : pendant un déclenchement, un billet ouvert
+n'est pas récupérable par cette route, et sa mise reste au séquestre jusqu'à l'expiration.
+
+**Ce que la spécification annonçait et qui était faux, corrigé plutôt que contourné.** Elle écrivait
+qu'un refus `plafond` ne consomme « pas même une graine ». C'est vrai de la portée `maison`, refusée
+avant les deux tirages — ce n'est **pas** vrai de la portée `joueur`, qui se décide dans la
+transaction, donc après. Les deux exigences étaient en tension, et c'est « sous le verrou » qui
+gagne, parce que c'est elle qui rend le plafond exact. Le prix est nul : un joueur refusé n'obtient
+**aucun** billet, donc aucune carte, et la source de graines est un générateur, pas une suite finie.
+Le refus `fonds` fait exactement pareil depuis la phase 03. Le test l'**asserte** au lieu de le taire.
+
+**Ce qui n'a de preuve qu'en intégration continue.** Deux cas nouveaux dans `api/db-check.js` :
+**deux ouvertures simultanées qui ne franchissent pas le plafond à deux** — la propriété qu'une
+doublure mono-fil sérialise gratuitement, et qui éprouve au passage la requête réelle contre
+Postgres, `42702` compris — et un **`explain (format json)` qui refuse tout `Seq Scan` sur
+`ledger_entries`**, sur quarante mille lignes de lest, seule façon de prouver que les deux index
+**servent**. **Ce module touche des clauses SQL, donc le job `db` le concerne**, et il n'a pas pu
+être lancé sur la machine de travail : ni Postgres, ni docker, ni `psql`, ni `gh`. Le dernier passage
+vert connu reste celui du 2026-09-15 (run 34894629071), antérieur à `paid_seats` comme à ces deux
+index. À ce stade, **412 tests sur le jeu et 227 sur l'API** sans rien installer, 236 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes

@@ -143,6 +143,76 @@ async function ledgerDe(client, { reference }) {
   return r.rows.map(l => ({ ...l, id: String(l.id), montant_cents: Number(l.montant_cents) }));
 }
 
+// ---------------------------------------------------------------------------------------------
+// L'EXPOSITION RÉALISÉE, ET LA REQUÊTE QUI NE FAIT AUCUN CAST SUR LA RÉFÉRENCE.
+//
+// `ledger_entries.reference` est du TEXTE, et `mouvementContrepassation` y écrit `gain:42` et non
+// `42`. Une jointure `ledger → matches` par `reference::bigint` lèverait donc `22P02` sur ces
+// lignes-là ; une jointure qui les FILTRE les ignore, c'est-à-dire qu'un gain contre-passé
+// continuerait de peser dans l'exposition. C'est le piège de la phase, et il naît vert : le module
+// qui écrit la requête n'est pas celui qui crée les lignes qui la cassent.
+//
+// La règle qui ramène une écriture à un billet vit dans `api/ledger.js`, elle est pure, elle est
+// exhaustive sur la liste fermée des motifs, et elle exporte SA TRADUCTION SQL. On l'INTERPOLE ici
+// plutôt que de la réécrire : deux écritures de la même règle finissent par différer, et celle qui
+// différerait vivrait dans un littéral SQL que personne ne relit. Même patron que `COMPTE_RE_SQL`
+// dans `schema.sql`, et une garde textuelle d'`api/test.js` confronte les deux.
+//
+// L'EXPRESSION EST CALCULÉE DANS UNE SOUS-REQUÊTE SUR `ledger_entries` SEULE, et ce n'est pas du
+// style : elle nomme `motif` et `reference` sans les qualifier, et `matches` porte elle aussi une
+// colonne `motif`. Écrite directement dans le `join`, elle sortirait en `42702` — « column
+// reference motif is ambiguous » — sur le chemin de l'ouverture d'un billet.
+//
+// LES COMPTES ET LES MOTIFS SONT DES PARAMÈTRES, pas des littéraux : ils viennent de
+// `L.COMPTES_EXPOSITION` et de `L.MOTIFS_EXPOSITION`, les mêmes listes que lit `expositionDe`.
+// `maison:dotation` n'y entre jamais — émettre des crédits fictifs n'est pas s'exposer.
+//
+// L'exposition est `débits − crédits` sur les comptes de maison, c'est-à-dire l'OPPOSÉ de leur
+// solde : exactement ce que `expositionDe` calcule côté JavaScript, sur les mêmes lignes.
+const EXPOSITION_FENETRE_SQL = `
+    select coalesce(sum(e.montant_cents) filter (where e.compte_debit  = any($3::text[])), 0)
+         - coalesce(sum(e.montant_cents) filter (where e.compte_credit = any($3::text[])), 0) as total
+      from (select montant_cents, compte_debit, compte_credit,
+                   ${L.REFERENCE_BILLET_SQL} as billet
+              from ledger_entries
+             where cree_le >= $2
+               and motif = any($4::text[])
+               and (compte_debit = any($3::text[]) or compte_credit = any($3::text[]))) e
+      join matches m on m.id::text = e.billet
+     where m.user_id = $1`;
+
+// LE FUSIBLE GLOBAL, ET IL NE FAIT AUCUNE JOINTURE. Ce n'est pas un oubli : c'est un INTERRUPTEUR,
+// pas un invariant. Le rattacher à `matches` en ferait un agrégat non borné sur DEUX tables, et il
+// est déjà non borné sur une. Les quatre motifs suffisent à écarter la dotation et la recharge ; ce
+// qu'une jointure ajouterait — écarter une écriture dont la référence ne désigne aucune ligne — vaut
+// zéro centime sur un seuil de deux millions, et se paierait à chaque rafraîchissement.
+const EXPOSITION_MAISON_SQL = `
+    select coalesce(sum(montant_cents) filter (where compte_debit  = any($2::text[])), 0)
+         - coalesce(sum(montant_cents) filter (where compte_credit = any($2::text[])), 0) as total
+      from ledger_entries
+     where cree_le >= $1
+       and motif = any($3::text[])
+       and (compte_debit = any($2::text[]) or compte_credit = any($2::text[]))`;
+
+// LE DÉBUT DE LA FENÊTRE GLISSANTE. Glissante, et pas une journée calendaire : une journée
+// calendaire se réinitialise à une heure connue de tous, et attendre minuit deviendrait une
+// stratégie. L'heure vient de l'appelant — c'est l'horloge injectée dans `createApp` — donc la
+// fenêtre se fait glisser dans un test sans attendre vingt-quatre heures.
+function fenetreDepuis(maintenant) {
+  const t = maintenant instanceof Date ? maintenant.getTime() : Number(maintenant);
+  if (!Number.isFinite(t)) throw new Error('plafond : heure illisible');
+  return new Date(t - L.PLAFOND_FENETRE_H * 3600 * 1000);
+}
+
+// L'exposition d'UN joueur, dans la transaction de son billet et sous le verrou que l'appelant a
+// pris. `sum()` rend un `bigint`, donc une CHAÎNE : la conversion est ici pour la même raison que
+// dans `ledgerSolde`, et avec le même prix si on l'oublie — « 9 » y serait plus grand que « 10 ».
+async function expositionJoueur(client, userId, depuis) {
+  const r = await client.query(EXPOSITION_FENETRE_SQL,
+    [userId, depuis, L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION]);
+  return Number((r.rows[0] || {}).total) || 0;
+}
+
 // LES DEUX SEULS ÉCHECS DU GRAND LIVRE QUE L'APPELANT A LE DROIT DE TRADUIRE EN REFUS NOMMÉ, et
 // pas en 500. `23505` est la clé d'idempotence qui refuse une jambe déjà posée — l'écrivain n'a
 // AUCUN `on conflict do nothing`, et c'est voulu : un doublon veut dire qu'on paie deux fois, donc
@@ -402,6 +472,24 @@ function pgDb(connectionString) {
         await client.query('select id from users where id = $1 for update', [m.userId]);
         const dispo = L.compteJoueur(m.userId);
         const quarantaine = L.compteQuarantaine(m.userId);
+        // LE PLAFOND PAR JOUEUR : LU ICI, SOUS LE VERROU, ET AVANT LA MOINDRE ÉCRITURE. C'est ce qui
+        // le rend EXACT plutôt qu'approché — deux onglets du même joueur sont sérialisés par ce
+        // verrou-là, et le second lit donc ce que le premier a écrit. Son agrégat est borné par les
+        // billets d'un seul joueur sur vingt-quatre heures : quelques dizaines de lignes, sur un
+        // index qui les porte. Le FUSIBLE GLOBAL, lui, n'est pas ici : il est lu hors de cette
+        // transaction et amorti, parce qu'un agrégat non borné sur la table qui grossit le plus vite
+        // du dépôt n'a rien à faire dans la section critique la plus disputée du système.
+        //
+        // LE PIRE CAS DU BILLET EST REÇU, JAMAIS CALCULÉ ICI. `api/ledger.js` porte deux gardes
+        // textuelles — aucun `require`, aucune arithmétique de commission — donc le net maximal vient
+        // de `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`, dans `api/app.js`, et
+        // il traverse en paramètre. Même discipline que `mouvementGain`, qui reçoit brut, commission
+        // et net sans les recalculer.
+        const plafond = L.plafondVerdict({
+          expositionRealiseeCents: await expositionJoueur(client, m.userId, fenetreDepuis(m.openedAt)),
+          expositionBilletCents: L.expositionBilletMaxCents(m.netMaxCents, m.stakeCents),
+          plafondCents: L.PLAFOND_JOUEUR_CENTS,
+        });
         // Deux tours au plus : le premier peut buter sur un billet périmé, qu'on clôt ; le second
         // insère alors. Au-delà, quelqu'un d'autre écrit en même temps, et on rend la main.
         for (let tour = 0; tour < 2; tour++) {
@@ -415,6 +503,22 @@ function pgDb(connectionString) {
             [m.userId, m.mode, m.stakeCents, m.seats, m.teamSize, m.paidSeats, m.brawler,
              m.seedPublic, m.seedSecret, m.simVersion, m.clientKey, m.openedAt, m.expiresAt]);
           if (ins.rows[0]) {
+            // LE VERDICT NE S'APPLIQUE QU'À L'OUVERTURE D'UN BILLET NEUF, ET C'EST DÉLIBÉRÉ. Le
+            // chemin `repris` — rejeu de la clé du client, ou billet déjà ouvert qu'on rend tel quel
+            // — ne passe jamais par ici : refuser un billet que le joueur DÉTIENT déjà, mise
+            // débitée, l'enfermerait dedans jusqu'à l'expiration, puisqu'il n'en a qu'un à la fois.
+            // C'est la leçon du `22003`, et c'est aussi la règle écrite de la phase : un billet déjà
+            // ouvert n'est jamais cassé rétroactivement.
+            //
+            // L'annulation rend la ligne qu'on vient d'insérer à l'inexistence, exactement comme sur
+            // le refus `fonds` : ni billet, ni écriture, ni séquestre, ni clôture du billet périmé
+            // que le tour précédent avait entamée.
+            if (plafond.franchi) {
+              await client.query('rollback');
+              return { match: null, refus: 'plafond', portee: 'joueur',
+                       expositionCents: plafond.expositionCents,
+                       plafondCents: plafond.plafondCents };
+            }
             const solde = await ledgerSolde(client, dispo);
             const enQuarantaine = await ledgerSolde(client, quarantaine);
             // LE SOLDE INSUFFISANT NE LAISSE NI BILLET NI ÉCRITURE. L'annulation rend la ligne
@@ -498,6 +602,27 @@ function pgDb(connectionString) {
       } catch (e) {
         await client.query('rollback').catch(() => {});
         throw e;
+      } finally {
+        client.release();
+      }
+    },
+
+    // LE FUSIBLE GLOBAL, ET IL OUVRE SA PROPRE CONNEXION. C'est la moitié importante : il est lu
+    // HORS de la transaction du billet, donc il ne rallonge pas la section critique que le verrou de
+    // ligne tient. Le dépôt a déjà payé ce genre de chose une fois — `GET /api/me` retenait un client
+    // du bassin assez longtemps pour mettre en file le renoncement d'un AUTRE joueur au-delà de sa
+    // fenêtre de dix secondes.
+    //
+    // Il a le droit d'être EN RETARD, et c'est `api/app.js` qui borne ce retard à
+    // `FUSIBLE_RAFRAICHI_S`. Être exact au billet près sur un interrupteur de deux millions de
+    // centimes ne veut rien dire ; payer un agrégat non borné à chaque ouverture pour l'obtenir est
+    // la mauvaise moitié du marché.
+    async expositionMaison({ depuis }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(EXPOSITION_MAISON_SQL,
+          [depuis, L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION]);
+        return Number((r.rows[0] || {}).total) || 0;
       } finally {
         client.release();
       }
@@ -897,4 +1022,9 @@ function pgDb(connectionString) {
 // en transaction : ce ne sont pas des méthodes du `db` injecté dans `createApp()`, et le routeur ne
 // les voit jamais. Ce qui les appelle, ce sont les méthodes nommées de `pgDb` — et `api/db-check.js`,
 // qui les éprouve contre une VRAIE Postgres, ce qu'aucun test sans base ne peut faire.
-module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe, reglerSequestre, jourDe };
+// `EXPOSITION_FENETRE_SQL` et `fenetreDepuis` sortent d'ici pour une seule raison : `api/db-check.js`
+// pose un `explain (format json)` sur LA REQUÊTE RÉELLE, et pas sur une requête réécrite pour
+// l'occasion. Un harnais qui recopie ce qu'il vérifie ne vérifie rien — le dossier l'a déjà payé une
+// fois — et c'est le seul contrôle qui puisse dire qu'un index SERT.
+module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe, reglerSequestre, jourDe,
+                   EXPOSITION_FENETRE_SQL, fenetreDepuis };

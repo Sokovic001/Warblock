@@ -50,9 +50,9 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 410 tests sur le jeu (`node test.js`) et
-  217 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 226 en tout — de bout en bout avec de la vraie
+- **Lancer `npm test` après chaque modification.** 412 tests sur le jeu (`node test.js`) et
+  227 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 236 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -135,10 +135,15 @@ porte : le reste a besoin d'un navigateur pour tourner.
   sas lit `W.enLigne`, l'économie **figée à l'entrée**, et jamais `Auth.online()` : un jeton qui
   meurt au milieu du sas ferait sinon encaisser au portefeuille de démonstration une mise que le
   séquestre du serveur détient.
-- **Un refus NOMMÉ arrête le sas ; une panne SILENCIEUSE ne l'arrête pas.** `fonds`, `livre` et
-  `renonce_recent` — liste fermée dans `WBCore.REFUS_SAS`, confrontée par `api/test.js` aux codes que
-  l'API émet vraiment — ferment le sas, affichent un message et ne lancent aucune partie, sans
-  laisser le lobby mort. Tout le reste, y compris un 500 et un 429, retombe dans le repli hors ligne.
+- **Un refus NOMMÉ arrête le sas ; une panne SILENCIEUSE ne l'arrête pas.** `fonds`, `livre`,
+  `renonce_recent` et `plafond` — liste fermée dans `WBCore.REFUS_SAS`, confrontée par `api/test.js`
+  aux codes que l'API émet vraiment — ferment le sas, affichent un message et ne lancent aucune
+  partie, sans laisser le lobby mort. Tout le reste, y compris un 500 et un 429, retombe dans le
+  repli hors ligne. **`plafond` porte UN code et DEUX portées, et c'est `refusMessage` qui la lit** :
+  portée `joueur`, une table moins chère marchera ; portée `maison`, le fusible global a sauté et
+  aucune table moins chère n'aidera ; portée **absente ou illisible**, on rend celle de la maison —
+  promettre une table moins chère quand aucune ne marchera est pire que dire « plus tard » à
+  quelqu'un qu'une table moins chère aurait dépanné.
 - **Le bouton QUITTER du sas dit ce que partir coûte**, en appelant `WBCore.renonciationOuverte` avec
   une **horloge monotone** posée au clic — `performance.now() − W.clic` — et jamais avec `W.t`, qui
   compte des tics de `setInterval` et retarde dès qu'un onglet passe en arrière-plan, c'est-à-dire
@@ -308,9 +313,26 @@ porte : le reste a besoin d'un navigateur pour tourner.
   `ledger_entries.reference` est du **texte** et qu'une contre-passation y porte `gain:42` : une
   jointure par `reference::bigint` lèverait `22P02`, et une jointure qui filtre ces lignes laisserait
   un gain contre-passé compter dans l'exposition. Sa traduction SQL, `REFERENCE_BILLET_SQL`, est
-  construite depuis les mêmes listes — il n'existe jamais deux écritures de la même règle. **Rien
-  n'appelle encore tout cela** : c'est « le contrat avant le brancheur », et le plafond ne refuse
-  aucun billet tant que le module 4 de la 04a n'est pas livré.
+  construite depuis les mêmes listes — il n'existe jamais deux écritures de la même règle.
+- **Le plafond REFUSE à l'ouverture du billet, et il refuse en 409.** Deux nombres, deux natures. Le
+  **plafond par joueur** est EXACT : il se lit dans la transaction de `createMatch`, **après** le
+  verrou de ligne — c'est ce verrou qui sérialise deux onglets — et son agrégat est borné par les
+  billets d'un joueur sur vingt-quatre heures. Le **fusible global** est APPROCHÉ : c'est un
+  interrupteur, pas un invariant, il est lu **hors transaction**, au plus une fois toutes les
+  `FUSIBLE_RAFRAICHI_S` secondes, valeur gardée en mémoire du processus, sur l'horloge **injectée**.
+  Le lire sous le verrou ferait de chaque ouverture un agrégat non borné sur la table qui grossit le
+  plus vite du dépôt, et le dépôt a déjà payé cela une fois. Le pire cas d'un billet est calculé par
+  le **jeu** — `cashoutCents(purseBound(mise, sièges).maxCents)` — et **passé en paramètre** : il
+  n'est recalculé nulle part. La requête de fenêtre **interpole** `REFERENCE_BILLET_SQL` et compare à
+  `matches.id::text`, sans aucun `cast` ; les comptes et les motifs lui arrivent en paramètres,
+  depuis les mêmes listes que lit `expositionDe`. Un refus ne laisse **ni ligne, ni écriture, ni
+  séquestre** et n'enferme personne — la table moins chère s'ouvre dans la foulée — mais il consomme
+  une graine, comme `fonds`, parce qu'il se décide dans la transaction. Le verdict ne s'applique
+  qu'à un billet **neuf** : le chemin `repris` n'est jamais refusé, et **aucun chemin de règlement ne
+  peut produire le code `plafond`** — garde textuelle, parce que refuser au règlement serait voler
+  une partie gagnée. Les deux index de lecture du livre portent désormais `(compte, cree_le)` ; que
+  ces index **servent** n'a de preuve qu'en intégration continue, par un `explain` dans
+  `api/db-check.js`.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Le solde est une SOMME d'écritures, et les routes l'écrivent.** La dotation et la recharge sont
@@ -457,6 +479,13 @@ tout solde y est modifiable depuis la console.
     par `between 1 and seats`, valant 1 partout — **dormante et assumée telle**, sans lecteur.
     Premier module de la phase à toucher une clause SQL : le job `db` le concerne, et il n'a pas pu
     être lancé sur la machine de travail.
+    *Module 4* : **livré**. Le plafond refuse à l'ouverture, en `409 plafond`, et le sas le dit.
+    Plafond par joueur EXACT sous le verrou de `createMatch`, fusible global APPROCHÉ hors
+    transaction et amorti à `FUSIBLE_RAFRAICHI_S`, requête de fenêtre sans aucun `cast` —
+    `REFERENCE_BILLET_SQL` interpolée, comparée à `matches.id::text` — deux index de lecture passés à
+    `(compte, cree_le)`, et `WBCore.REFUS_SAS` à quatre membres avec un message qui lit la portée.
+    Second module de la phase à toucher des clauses SQL : le job `db` le concerne, et il n'a pas pu
+    être lancé sur la machine de travail.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.
@@ -477,9 +506,11 @@ La seconde est réglée depuis le module 3 de la 04a : `matches.paid_seats` exis
 serveur et figée à l'ouverture. Aujourd'hui la réponse est toujours « un », donc **rien ne la lit, et
 c'est exactement pourquoi elle est créée maintenant** — au premier remplissage partiel elle variera,
 et après coup le chiffre serait irrécupérable, l'exposition cessant d'être attribuable. Détail et
-raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ». **Le plafond,
-lui, reste à brancher : c'est le module 4 de la 04a, en cours** — tant qu'il ne l'est pas, la mesure
-existe et la borne non.
+raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ». **La première
+l'est depuis le module 4 de la 04a : le plafond REFUSE**, en 409, à l'ouverture du billet — exact par
+joueur sous le verrou, approché pour la maison et hors transaction. Ce qu'il ne borne pas est écrit
+avec lui : un plafond par joueur ne borne pas une **flotte de comptes**, le fusible global vaut
+environ treize comptes saturés, et le seul remède réel est une vérification d'identité, en 04b.
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
 n'existe pas ; le client ne peut écrire que son pseudo, son avatar et son pays ; aucun secret dans

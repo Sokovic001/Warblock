@@ -46,7 +46,11 @@ const path = require('node:path');
 const { Pool } = require('pg');
 const C = require('./core');
 const L = require('./ledger');
-const { pgDb, ledgerWrite, ledgerSolde, ledgerDe } = require('./db-pg');
+// `EXPOSITION_FENETRE_SQL` et `fenetreDepuis` : la requête RÉELLE du plafond, celle que
+// `createMatch` exécute sous son verrou. On l'explique telle quelle — un harnais qui recopie ce
+// qu'il vérifie ne vérifie rien, et le dossier l'a déjà payé une fois.
+const { pgDb, ledgerWrite, ledgerSolde, ledgerDe,
+        EXPOSITION_FENETRE_SQL, fenetreDepuis } = require('./db-pg');
 
 // La même règle que `db-pg.js` : une connexion à la base d'un jeu d'argent ne se fait pas en clair,
 // sauf en local — et le service de l'intégration continue EST en local, sur 127.0.0.1.
@@ -650,6 +654,210 @@ async function main() {
         await client.query('delete from ledger_entries where reference in (select id::text from matches where user_id = $1)', [u]);
         await client.query('delete from users where id = $1', [u]);
       }
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('DEUX OUVERTURES SIMULTANÉES NE FRANCHISSENT PAS LE PLAFOND À DEUX', async () => {
+      // LA PROPRIÉTÉ QU'UNE DOUBLURE MONO-FIL SÉRIALISE GRATUITEMENT. Le plafond par joueur est
+      // EXACT parce qu'il se lit dans la transaction du billet, APRÈS `select id from users where
+      // id = $1 for update` : deux onglets du même joueur sont donc sérialisés, et le second voit ce
+      // que le premier a écrit. En JavaScript mono-fil, cette propriété est vraie sans qu'on ait
+      // rien fait — c'est très exactement le patron du harnais qui recopiait ce qu'il vérifiait.
+      //
+      // Ce que ce cas éprouve en même temps, et qui ne s'éprouve nulle part ailleurs : la REQUÊTE de
+      // fenêtre elle-même. Elle joint `ledger_entries` à `matches` par l'expression exportée de
+      // `api/ledger.js`, sans aucun `cast` sur la référence, avec deux tableaux en paramètres. Une
+      // faute de syntaxe ou un `42702` — « column reference motif is ambiguous », `matches` portant
+      // elle aussi un `motif` — sortirait ici, et nulle part dans `npm test`.
+      const base = pgDb(URL_BASE);
+      const semer = await pool.connect();
+      let u;
+      try {
+        await semer.query('begin');
+        u = await creerJoueur(semer, 'Plafond');
+        // De quoi payer plusieurs mises : la dotation de production ne suffirait pas, et c'est le
+        // plafond qu'on éprouve ici, pas le découvert.
+        await ledgerWrite(semer, L.mouvementDotation({ userId: u, montantCents: 500000 }));
+        await semer.query('commit');
+      } finally { semer.release(); }
+
+      const MISE = 1000, SIEGES = 50;
+      const p = C.cashoutCents(C.purseBound(MISE, SIEGES).maxCents);
+      const pireCas = L.expositionBilletMaxCents(p.netCents, MISE);
+      const demande = cle => base.createMatch({
+        userId: u, mode: 'resurgence', stakeCents: MISE, seats: SIEGES, teamSize: 1, paidSeats: 1,
+        netMaxCents: p.netCents, brawler: 'bolt', seedPublic: 12345, seedSecret: SECRETE,
+        simVersion: 1, clientKey: cle, openedAt: MAINTENANT, expiresAt: DANS_UNE_HEURE });
+      try {
+        // DEUX OUVERTURES EN MÊME TEMPS, deux clés de client différentes, deux connexions réelles.
+        const [a, b] = await Promise.all([demande('course-a'), demande('course-b')]);
+        const ouverts = [a, b].filter(r => r.match);
+        if (ouverts.length !== 2) throw new Error('une ouverture a échoué : ' + JSON.stringify([a, b]));
+        if (String(a.match.id) !== String(b.match.id)) {
+          throw new Error(`deux billets ouverts à la fois (${a.match.id}, ${b.match.id}) : un seul pire cas doit être en vol`);
+        }
+        if ([a, b].filter(r => r.repris).length !== 1) {
+          throw new Error('les deux ouvertures se croient neuves, ou les deux se croient reprises');
+        }
+        // ET UNE SEULE MISE : le chemin `repris` n'écrit jamais une seconde écriture. C'est cela qui
+        // fait que « exposition réalisée + UN pire cas » est exact.
+        const compte = await pool.connect();
+        try {
+          const r = await compte.query(
+            `select count(*) as n from ledger_entries where motif = 'mise' and reference = $1`,
+            [String(a.match.id)]);
+          if (Number(r.rows[0].n) !== 1) throw new Error(`${r.rows[0].n} mises écrites au lieu d'une`);
+          // LE PLAFOND, MAINTENANT. On sème assez d'exposition RÉALISÉE pour que le billet suivant
+          // le franchisse — en POSANT DES ÉCRITURES, jamais en touchant un compteur.
+          await compte.query('begin');
+          await compte.query(
+            `update matches set status = 'settled', settled_at = now(), issue = 'encaissement',
+                                gross_cents = 0, fee_cents = 0, net_cents = 0
+               where id = $1 and status = 'open' and net_cents is null`, [a.match.id]);
+          await ledgerWrite(compte, L.mouvementGain({ userId: u, matchId: a.match.id,
+            miseCents: MISE, grossCents: 0, feeCents: 0, netCents: 0, convergee: true }));
+          const combien = Math.ceil(L.PLAFOND_JOUEUR_CENTS / pireCas) + 1;
+          for (let i = 0; i < combien; i++) {
+            const m = await compte.query(
+              `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats,
+                                    brawler, seed_public, seed_secret, sim_version, client_key,
+                                    status, opened_at, expires_at, settled_at, issue,
+                                    gross_cents, fee_cents, net_cents)
+               values ($1,'resurgence',$2,$3,1,1,'bolt',12345,$4,1,$5,'settled',$6,$7,$6,
+                       'encaissement',$8,$9,$10) returning id`,
+              [u, MISE, SIEGES, SECRETE, `semee-${i}`, MAINTENANT, DANS_UNE_HEURE,
+               p.grossCents, p.feeCents, p.netCents]);
+            const id = m.rows[0].id;
+            await ledgerWrite(compte, L.mouvementMise({ userId: u, matchId: id, miseCents: MISE }));
+            await ledgerWrite(compte, L.mouvementGain({ userId: u, matchId: id, miseCents: MISE,
+              grossCents: p.grossCents, feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+          }
+          await compte.query('commit');
+        } finally { compte.release(); }
+
+        // LA VRAIE REQUÊTE, CONTRE LA VRAIE BASE : elle doit retrouver le chiffre qu'on vient de
+        // poser. C'est ici, et seulement ici, que l'expression `REFERENCE_BILLET_SQL` est exécutée
+        // par Postgres, avec une contre-passation possible dans la colonne.
+        const refus = await demande('apres-plafond');
+        if (refus.refus !== 'plafond') {
+          throw new Error(`le billet suivant n'a pas été refusé (${JSON.stringify(refus).slice(0, 200)})`);
+        }
+        if (refus.portee !== 'joueur') throw new Error(`portée ${refus.portee}`);
+        if (refus.plafondCents !== L.PLAFOND_JOUEUR_CENTS) {
+          throw new Error(`plafond ${refus.plafondCents}`);
+        }
+        // ET LE REFUS N'A RIEN LAISSÉ : pas de ligne `open`, pas d'écriture de plus.
+        const reste = await pool.connect();
+        try {
+          const ouvert = await reste.query(
+            `select count(*) as n from matches where user_id = $1 and status = 'open'`, [u]);
+          if (Number(ouvert.rows[0].n) !== 0) {
+            throw new Error(`${ouvert.rows[0].n} billets ouverts après un refus de plafond`);
+          }
+        } finally { reste.release(); }
+      } finally {
+        await base.close().catch(() => {});
+        const net = await pool.connect();
+        try {
+          await net.query(
+            `delete from ledger_entries where reference in (select id::text from matches where user_id = $1)
+                                           or reference = $2`, [u, String(u)]);
+          await net.query('delete from matches where user_id = $1', [u]);
+          await net.query('delete from users where id = $1', [u]);
+        } finally { net.release(); }
+      }
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('LA REQUÊTE DE FENÊTRE NE BALAIE PAS LE GRAND LIVRE : aucun `Seq Scan` sur ledger_entries', async () => {
+      // LA SEULE FAÇON DE PROUVER QUE LES DEUX INDEX SERVENT, et personne ne peut la donner sur la
+      // machine de travail. Les index de lecture du livre portaient `(compte_debit)` et
+      // `(compte_credit)` seuls ; le plafond lit une FENÊTRE, donc sa clause porte un compte ET une
+      // date, et sur un index qui ne connaît que le compte, Postgres remonte toutes les écritures de
+      // `maison:contrepartie` depuis le premier jour pour n'en garder qu'une journée. La requête
+      // vit sur le chemin le plus disputé du système : elle s'exécute à chaque ouverture de billet.
+      //
+      // IL FAUT DES LIGNES POUR QUE LA QUESTION AIT UN SENS. Sur une table de trois lignes, Postgres
+      // balaie — et il a raison. On pose donc du LEST : des dizaines de milliers d'écritures qui ne
+      // touchent AUCUN compte de maison, pour que le filtre soit sélectif, et quelques centaines qui
+      // en touchent. Ces lignes-là ne sont pas une comptabilité, c'est un banc : la base est jetable,
+      // et tout est annulé à la fin.
+      await client.query('begin');
+      const u = await creerJoueur(client, 'Explain');
+      const autre = await creerJoueur(client, 'Lest');
+      const p = C.cashoutCents(C.purseBound(1000, 50).maxCents);
+      // Quatre cents billets réglés, et les quatre jambes de chacun : mise, contrepartie, commission,
+      // joueur. Deux de ces jambes touchent un compte de maison, et ce sont elles que l'index doit
+      // retrouver.
+      await client.query(
+        `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
+                              seed_public, seed_secret, sim_version, client_key, status, opened_at,
+                              expires_at, settled_at, issue, gross_cents, fee_cents, net_cents)
+         select $1,'resurgence',1000,50,1,1,'bolt',12345,$2,1,'explain-'||g,'settled',$3,$4,$3,
+                'encaissement',$5,$6,$7
+           from generate_series(1, 400) g`,
+        [u, SECRETE, MAINTENANT, DANS_UNE_HEURE, p.grossCents, p.feeCents, p.netCents]);
+      await client.query(
+        `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents, cree_le)
+         select 'mise', m.id::text, 'joueur:'||$1||':disponible', 'enjeu:'||m.id, 1000,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1
+         union all
+         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1
+         union all
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1
+         union all
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'joueur:'||$1||':disponible', $4,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1`,
+        [u, p.grossCents - 1000, p.feeCents, p.netCents]);
+      // LE LEST : des mises qui ne touchent aucun compte de maison. C'est ce qui rend le filtre
+      // sélectif, donc l'index utile — sans elles, « aucun Seq Scan » serait une question vide.
+      await client.query(
+        `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents, cree_le)
+         select 'mise', (1000000 + g)::text, 'joueur:'||$1||':disponible', 'enjeu:'||(1000000 + g), 50,
+                now() - ((g % 200) || ' minutes')::interval
+           from generate_series(1, 40000) g`, [autre]);
+      await client.query('analyze ledger_entries');
+      await client.query('analyze matches');
+
+      const plan = await client.query(
+        { text: 'explain (format json) ' + EXPOSITION_FENETRE_SQL,
+          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION] });
+      const racine = plan.rows[0]['QUERY PLAN'];
+      const noeuds = [];
+      (function parcourir(n) {
+        if (Array.isArray(n)) { n.forEach(parcourir); return; }
+        if (!n || typeof n !== 'object') return;
+        if (n['Node Type']) noeuds.push(n);
+        for (const v of Object.values(n)) if (v && typeof v === 'object') parcourir(v);
+      })(racine);
+      const balayages = noeuds.filter(n => n['Node Type'] === 'Seq Scan'
+                                        && n['Relation Name'] === 'ledger_entries');
+      if (balayages.length) {
+        throw new Error('la requête de fenêtre BALAIE ledger_entries : '
+          + JSON.stringify(racine).slice(0, 600));
+      }
+      // Et elle passe bien par les index NOMMÉS : un plan sans `Seq Scan` mais qui n'aurait pas
+      // regardé cette table ne prouverait rien.
+      const index = noeuds.filter(n => /Index|Bitmap/.test(n['Node Type'] || ''))
+                          .map(n => n['Index Name']).filter(Boolean);
+      if (!index.some(i => /ledger_entries_(debit|credit)_fenetre_idx/.test(i))) {
+        throw new Error('aucun des deux index de fenêtre ne sert : ' + index.join(', '));
+      }
+      // Enfin, la requête RÉPOND, et elle répond juste : quatre cents victoires maximales.
+      const total = await client.query(
+        { text: EXPOSITION_FENETRE_SQL,
+          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION] });
+      const attendu = 400 * L.expositionBilletMaxCents(p.netCents, 1000);
+      if (Number(total.rows[0].total) !== attendu) {
+        throw new Error(`l'exposition vaut ${total.rows[0].total} au lieu de ${attendu}`);
+      }
+      await client.query('rollback');
     });
   } finally {
     partage = null;

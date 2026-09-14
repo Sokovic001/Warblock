@@ -174,6 +174,25 @@ Deux corollaires, tous deux gardés par un test :
 - **Un billet déjà ouvert n'est jamais cassé rétroactivement.** Franchir le plafond pendant qu'il
   vit ne change rien à son règlement.
 
+**Deux corrections apportées à la livraison du module 4, écrites ici plutôt que découvertes.**
+
+La première annule une phrase de cette spécification. Elle écrivait qu'un refus `plafond` ne consomme
+« pas même une graine », et c'était **faux pour la portée `joueur`** : ce verdict-là se décide dans la
+transaction, donc **après** les deux tirages de `api/app.js`, comme le refus `fonds` depuis la phase
+03. Les deux exigences — « sous le verrou » et « aucune graine » — étaient en tension, et c'est « sous
+le verrou » qui gagne, parce que c'est elle qui rend le plafond **exact**. Le prix est nul : le joueur
+n'obtient aucun billet, donc aucune carte, et la source de graines est un générateur, pas une suite
+finie. La portée `maison`, elle, refuse bien avant les tirages. Le test l'**asserte** au lieu de le
+taire.
+
+La seconde est une **limite** du corollaire ci-dessus. Le verdict par joueur ne s'applique qu'à
+l'ouverture d'un billet **neuf** — le chemin `repris` n'est jamais refusé, sans quoi un joueur dont la
+réponse s'est perdue se retrouverait enfermé dans un billet qu'il détient déjà, mise débitée. Le
+**fusible global**, lui, est lu avant de savoir si la demande est un rejeu : quand il saute, il refuse
+donc aussi la récupération d'un billet ouvert. C'est cohérent avec ce qu'il est — une alerte qui
+refuse tout le monde — mais pendant un déclenchement, une mise au séquestre n'est plus récupérable
+par cette route avant l'expiration.
+
 ### 6. Le plafond par joueur est EXACT et sous le verrou ; le fusible global est APPROCHÉ et hors transaction
 
 Les deux nombres n'ont pas la même nature, et les traiter pareil coûtait la section critique la plus
@@ -465,7 +484,7 @@ Elles vont dans `docs/HISTORIQUE.md`, à côté des trois choses consignées ava
 | `decouvertAutorise` est faux hors des familles nommées | Balayage de toute forme de compte que la grammaire engendre, pas seulement des deux littéraux de `COMPTES_EMETTEURS` |
 | Le plafond par joueur est décidé DANS la transaction du billet et sous le verrou de ligne | Lecture du texte de `db-pg.js` ; et, contre une vraie base, deux ouvertures simultanées qui ne franchissent pas le plafond à deux |
 | Le fusible global ne tourne pas sous le verrou et ne se relit qu'à la cadence nommée | Horloge injectée : deux ouvertures dans la même minute ne produisent qu'une lecture |
-| Un refus `plafond` ne laisse rien derrière lui | Aucune ligne dans `matches`, aucune écriture dans `ledger_entries`, aucun séquestre habité, `ledgerReconcile` sans grief, pas même une graine consommée — et la table moins chère s'ouvre dans la foulée |
+| Un refus `plafond` ne laisse rien derrière lui | Aucune ligne dans `matches`, aucune écriture dans `ledger_entries`, aucun séquestre habité, `ledgerReconcile` sans grief — et la table moins chère s'ouvre dans la foulée. La portée `joueur` consomme **une graine**, comme `fonds` : voir la correction sous la décision 5 |
 | Aucun chemin de règlement ne produit `plafond` | Garde textuelle et parcours des codes que les routes de règlement peuvent émettre |
 | Un billet déjà ouvert n'est jamais cassé rétroactivement | On franchit le plafond pendant qu'il vit, on le règle, rien ne change |
 | `plafond` est un refus nommé qui arrête le sas | `WBCore.REFUS_SAS` vaut quatre codes, confrontée aux codes que l'API émet vraiment ; le sas s'arrête, affiche, ne lance rien |

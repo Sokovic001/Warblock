@@ -6,6 +6,13 @@
 const crypto = require('node:crypto');
 const C = require('./core');
 const S = require('./sim');
+// LE GRAND LIVRE, ET CE QUE LE ROUTEUR EN LIT : DES CONSTANTES ET DES FONCTIONS PURES, JAMAIS UN
+// ÉCRIVAIN. `api/ledger.js` ne pose rien lui-même, et ce qui pose une écriture vit dans
+// `api/db-pg.js`, avec un client déjà en transaction — le routeur ne le voit pas, et une garde
+// textuelle vérifie qu'il ne le nomme jamais. Ce qu'on prend ici, ce sont les bornes du plafond — la
+// route doit dire au joueur quel plafond l'a refusé et sur quelle fenêtre — plus le pire cas d'un
+// billet et le verdict, qui sont deux fonctions pures.
+const L = require('./ledger');
 
 const MAX_BODY = 4 * 1024;          // un profil tient largement dedans ; au-delà, on coupe
 // LA BORNE DE LA TRACE, ET D'ELLE SEULE. `MAX_BODY` ne bouge pas : relever la borne de la route qui
@@ -122,6 +129,21 @@ const REFUS_LIVRE = 'Le grand livre a refusé cette écriture : rien n\'a été 
 // les dix secondes, pour un avantage nul contre vingt bots dont aucun ne connaît la carte. Le jour
 // où les adversaires seront humains, ce chiffre-là devra être relu.
 const REFUS_FENETRE_CLOSE = 'La fenêtre de renoncement de ce billet est passée : la partie est réputée commencée, et la mise ne revient pas.';
+
+// LE REFUS DU PLAFOND, ET IL N'A QU'UN CODE POUR DEUX PORTÉES. Un seul code, parce que le sas n'a
+// qu'un comportement à tenir — il s'arrête, il affiche, il ne lance rien — et que faire diverger la
+// liste fermée `WBCore.REFUS_SAS` pour une nuance que le joueur ne peut pas actionner serait une
+// complication gratuite.
+//
+// Mais UNE SEULE PHRASE MENTIRAIT DANS UN CAS SUR DEUX : « choisis une table moins chère » est faux
+// quand c'est le fusible global qui a sauté, puisque aucune table moins chère n'aidera. La réponse
+// porte donc `portee`, et c'est `WBCore.refusMessage` qui la lit, côté jeu, en anglais comme le
+// reste de ce que le joueur voit. Ce que l'API écrit ici est la phrase des journaux, pas celle de
+// l'écran.
+//
+// COMME TOUS LES AUTRES REFUS NOMMÉS, IL SORT EN 409 ET JAMAIS EN 500, et il n'enferme personne :
+// rien n'a été débité, et la table d'à côté s'ouvre dans la foulée.
+const REFUS_PLAFOND = 'Cette table dépasse le plafond d\'exposition : rien n\'a été débité.';
 
 // ---------- limitation de débit ----------
 // Un seau par utilisateur, en mémoire. Volontairement simple : il freine le martèlement d'un pseudo
@@ -419,6 +441,40 @@ function createApp({
     at: new Date(now()),
   });
 
+  // ---------- le fusible global, lu HORS transaction et AMORTI ----------
+  //
+  // POURQUOI IL N'EST PAS EXACT, ET POURQUOI C'EST LE BON MARCHÉ. Le plafond par joueur est exact :
+  // il se lit dans la transaction du billet, après le verrou de ligne, parce que deux onglets du même
+  // joueur doivent être sérialisés et que son agrégat est borné par les billets d'un seul joueur sur
+  // vingt-quatre heures. Le fusible, lui, est un INTERRUPTEUR, pas un invariant, et son agrégat est
+  // NON BORNÉ : il porte sur toutes les écritures de tous les joueurs. Le lire sous le verrou ferait
+  // de chaque ouverture de billet un balayage de la table qui grossit le plus vite du dépôt, sur le
+  // chemin le plus disputé du système.
+  //
+  // ET LE DÉPÔT A DÉJÀ PAYÉ CE GENRE DE CHOSE UNE FOIS : `GET /api/me` retenait un client du bassin
+  // — une transaction, un verrou de ligne et trois agrégats — assez longtemps pour mettre en file le
+  // renoncement d'un AUTRE joueur au-delà de sa fenêtre de dix secondes. C'est la raison écrite, pas
+  // une précaution de style.
+  //
+  // Être exact au billet près sur un seuil de deux millions de centimes ne veut rien dire ; payer un
+  // agrégat non borné à chaque ouverture pour l'obtenir est la mauvaise moitié du marché. La
+  // péremption est donc chiffrée : LE FUSIBLE A LE DROIT D'ÊTRE EN RETARD DE `FUSIBLE_RAFRAICHI_S`
+  // SECONDES, et ce retard vaut au plus ce qu'une minute d'ouvertures peut engager.
+  //
+  // L'horloge est celle qui est injectée dans `createApp`, donc la cadence se teste sans attendre.
+  // Et cet état-là vit EN MÉMOIRE DU PROCESSUS, comme la limitation de débit : perdu au redémarrage,
+  // non partagé entre instances. Un déploiement à deux processus double donc de fait le fusible.
+  // C'est une limite connue, écrite ici plutôt que découverte au premier déploiement.
+  let fusible = null;
+  async function expositionMaisonCents() {
+    const t = now();
+    if (fusible && t - fusible.luA < L.FUSIBLE_RAFRAICHI_S * 1000) return fusible.cents;
+    const depuis = new Date(t - L.PLAFOND_FENETRE_H * 3600 * 1000);
+    const cents = nombre(await db.expositionMaison({ depuis }));
+    fusible = { luA: t, cents };
+    return cents;
+  }
+
   // ---------- POST /api/match ----------
   // Le serveur possède l'identité de la partie ; le client ne fait que la demander. Il choisit sa
   // table, son mode et son brawler, et rien de plus : les graines, les sièges, la mise en centimes,
@@ -473,6 +529,38 @@ function createApp({
       }, origin);
     }
 
+    // LE PIRE CAS DU BILLET DEMANDÉ, CALCULÉ PAR LE JEU ET NULLE PART AILLEURS. `api/ledger.js`
+    // porte deux gardes textuelles — aucun `require`, aucune arithmétique de commission — donc le
+    // net maximal ne peut venir que de `WBCore` : c'est `purseBound` qui dit ce qu'une sacoche peut
+    // au plus valoir sur cette table, et `cashoutCents` ce qu'il en reste une fois la commission
+    // prise. Le chiffre est calculé ICI, une seule fois, puis PASSÉ en paramètre — au fusible
+    // ci-dessous et à `db.createMatch`, qui en tire le verdict par joueur sous son verrou. Même
+    // discipline que `mouvementGain`, qui reçoit brut, commission et net sans les recalculer.
+    const netMaxCents = C.cashoutCents(C.purseBound(champs.stakeCents, champs.seats).maxCents).netCents;
+    const expositionBilletCents = L.expositionBilletMaxCents(netMaxCents, champs.stakeCents);
+
+    // LE FUSIBLE GLOBAL, ET IL EST LU AVANT LES DEUX TIRAGES DE GRAINES. Quand il saute, il refuse
+    // TOUT LE MONDE : ce n'est pas un réglage, c'est une alerte, et le seul signal qu'elle produise
+    // est ce refus-là, lu dans les journaux — cette phase ne livre aucune alerte, et c'est écrit
+    // plutôt qu'omis par distraction. La portée est `maison`, et c'est elle qui fait dire au sas
+    // « réessaie plus tard » au lieu de « prends une table moins chère », qui serait faux : aucune
+    // table moins chère n'aidera.
+    const maison = L.plafondVerdict({
+      expositionRealiseeCents: await expositionMaisonCents(),
+      expositionBilletCents,
+      plafondCents: L.PLAFOND_MAISON_CENTS,
+    });
+    if (maison.franchi) {
+      return envoyer(res, 409, {
+        erreur: REFUS_PLAFOND,
+        code: 'plafond',
+        portee: 'maison',
+        expositionCents: maison.expositionCents,
+        plafondCents: maison.plafondCents,
+        fenetreHeures: L.PLAFOND_FENETRE_H,
+      }, origin);
+    }
+
     // Deux tirages, deux usages. La publique décide de la carte et du gaz, et part au client. La
     // secrète ne quitte jamais le serveur : elle ne sert à rien tant que rien n'est simulé, et
     // c'est exactement pourquoi elle est créée maintenant — le jour où le serveur décidera du
@@ -500,6 +588,11 @@ function createApp({
       // pas de `champs`, qui est ce qu'on a bien voulu retenir du corps du client : la faire passer
       // par là l'inviterait à l'écrire.
       paidSeats: SIEGES_PAYES,
+      // LE NET MAXIMAL DE CETTE TABLE, PASSÉ ET JAMAIS RECALCULÉ EN BASE. C'est de lui que
+      // `createMatch` tire le pire cas du billet, puis le verdict du plafond par joueur, sous le
+      // verrou de ligne. Il ne vient pas de `champs` : ce n'est pas un choix du client, c'est une
+      // conséquence du mode et de la table qu'il a choisis.
+      netMaxCents,
       brawler: champs.brawler,
       seedPublic, seedSecret,
       // FIGÉE ICI, ET NULLE PART AILLEURS. Le client n'a aucun moyen de l'écrire : elle est lue sur
@@ -515,6 +608,20 @@ function createApp({
     // ce n'est pas un 500 — c'est un refus nommé, comme tous les autres de cette API.
     if (ouverture.refus === 'livre')
       return envoyer(res, 409, { erreur: REFUS_LIVRE, code: 'livre', detail: ouverture.detail || null }, origin);
+    // LE PLAFOND PAR JOUEUR, DÉCIDÉ DANS LA TRANSACTION ET SOUS LE VERROU. Il n'a laissé ni ligne,
+    // ni écriture, ni séquestre : l'annulation a rendu à l'inexistence la ligne qu'on venait
+    // d'insérer, exactement comme sur `fonds`. La portée est `joueur`, et c'est elle qui fait dire au
+    // sas qu'une table moins chère marchera — ce qui est vrai, et vérifié par un test qui en ouvre
+    // une dans la foulée.
+    if (ouverture.refus === 'plafond')
+      return envoyer(res, 409, {
+        erreur: REFUS_PLAFOND,
+        code: 'plafond',
+        portee: ouverture.portee,
+        expositionCents: nombre(ouverture.expositionCents),
+        plafondCents: nombre(ouverture.plafondCents),
+        fenetreHeures: L.PLAFOND_FENETRE_H,
+      }, origin);
     // LE SOLDE INSUFFISANT EST UN REFUS NOMMÉ, EN 409, ET IL N'A LAISSÉ NI BILLET NI ÉCRITURE.
     // Pas un `402` : la doctrine du dossier est « des refus nommés, tous en 400 ou 409, aucun en
     // 500 », et un `402` ouvrirait une famille de plus — il parle par ailleurs de payer l'API, pas

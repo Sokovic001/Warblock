@@ -92,7 +92,13 @@ function verifierColonnes(valeurs) {
     }
   }
 }
-function fakeDb(seed = []) {
+// L'HORLOGE DE LA DOUBLURE, ET POURQUOI ELLE ARRIVE MAINTENANT. `cree_le` était une date fixe, ce
+// qui suffisait tant que personne ne lisait le livre par tranche de temps. Le plafond, lui, se
+// décide sur une FENÊTRE GLISSANTE : une doublure qui date toutes ses écritures du même instant ne
+// peut pas montrer une écriture qui SORT de la fenêtre, donc elle ne pourrait pas faire tomber un
+// plafond qui aurait oublié le `cree_le >= $2` de sa clause. L'horloge est celle qu'on injecte déjà
+// dans `createApp`, donc la fenêtre se fait glisser sans attendre vingt-quatre heures.
+function fakeDb(seed = [], horloge = null) {
   const users = seed.map(u => ({ ...u }));
   const matches = [];
   // `match_traces`, EN INSERTION SEULE : la doublure n'expose aucun moyen de modifier ni de
@@ -174,7 +180,8 @@ function fakeDb(seed = []) {
       nouvelles.push(Object.freeze({
         id: String(nextEcriture++), motif: t.motif, reference: t.reference,
         compte_debit: t.compteDebit, compte_credit: t.compteCredit,
-        montant_cents: t.montantCents, cree_le: '2026-01-01T00:00:00Z' }));
+        montant_cents: t.montantCents,
+        cree_le: horloge ? new Date(horloge()).toISOString() : '2026-01-01T00:00:00Z' }));
     }
     // LE DÉCOUVERT, sur l'effet NET du mouvement et compte par compte, exactement comme db-pg.js.
     // Deux comptes seulement en sont exemptés — un compte d'émission et un compte de contrepartie —
@@ -197,6 +204,31 @@ function fakeDb(seed = []) {
     for (const n of nouvelles) ledger.push(n);
     return { ecrites: nouvelles.length };
   }
+  // L'EXPOSITION, ET ELLE PASSE PAR LES FONCTIONS PURES DU GRAND LIVRE. La doublure ne réécrit ni la
+  // règle qui ramène une écriture à un billet, ni la liste des comptes de maison, ni celle des
+  // motifs : elle lit `expositionDe`, `COMPTES_EXPOSITION` et `MOTIFS_EXPOSITION`, exactement comme
+  // la requête SQL de `db-pg.js` les reçoit en paramètres. Une doublure qui recopierait ces listes
+  // mentirait dans le mauvais sens — en acceptant ce que la base compte, ou l'inverse.
+  const transfertsDuLivre = filtre => ledger.filter(filtre).map(l => ({
+    motif: l.motif, reference: l.reference, compteDebit: l.compte_debit,
+    compteCredit: l.compte_credit, montantCents: l.montant_cents }));
+  const fenetreDepuis = maintenant =>
+    new Date((maintenant instanceof Date ? maintenant.getTime() : Number(maintenant))
+             - L.PLAFOND_FENETRE_H * 3600 * 1000);
+  // Les billets d'UN joueur, sur la fenêtre : le miroir de la jointure `m.user_id = $1` et du
+  // `cree_le >= $2` de la requête réelle.
+  const expositionFenetre = (userId, depuis) => L.expositionDe(
+    transfertsDuLivre(l => new Date(l.cree_le) >= depuis),
+    matches.filter(x => x.user_id === userId).map(x => String(x.id)));
+  // LE FUSIBLE GLOBAL : le cumul de TOUS les joueurs, et SANS jointure — comme la requête réelle, et
+  // pour la même raison. C'est un interrupteur, pas un invariant : les quatre motifs suffisent à
+  // écarter la dotation et la recharge, et ce qu'une jointure ajouterait vaut zéro centime sur un
+  // seuil de deux millions.
+  const expositionMaisonDe = depuis => {
+    const dans = transfertsDuLivre(
+      l => new Date(l.cree_le) >= depuis && L.MOTIFS_EXPOSITION.includes(l.motif));
+    return 0 - L.COMPTES_EXPOSITION.reduce((s, compte) => s + L.soldeDe(dans, compte), 0);
+  };
   // Le règlement d'un séquestre, et il n'y en a qu'un : vider celui d'un billet clos sans montant
   // et régler celui d'un joueur qui vient de perdre sont la MÊME opération comptable. Le miroir
   // exact de `reglerSequestre` de db-pg.js, frontière avec la 02a comprise — un séquestre vide veut
@@ -247,6 +279,17 @@ function fakeDb(seed = []) {
     async createMatch(m) {
       const dispo = L.compteJoueur(m.userId), quar = L.compteQuarantaine(m.userId);
       const argent = () => ({ balanceCents: soldeDe(dispo), quarantineCents: soldeDe(quar) });
+      // LE PLAFOND PAR JOUEUR, LU AVANT TOUT LE RESTE — dans db-pg.js, c'est après le verrou de
+      // ligne, et c'est ce verrou qui le rend EXACT. La doublure n'a pas de verrou : un mono-fil
+      // JavaScript sérialise gratuitement ce que Postgres ne sérialise que si on le lui demande
+      // bien, et c'est `api/db-check.js` qui éprouve deux ouvertures simultanées.
+      //
+      // Le PIRE CAS est REÇU, jamais calculé ici : `netMaxCents` vient de `WBCore` par `app.js`.
+      const plafond = L.plafondVerdict({
+        expositionRealiseeCents: expositionFenetre(m.userId, fenetreDepuis(m.openedAt)),
+        expositionBilletCents: L.expositionBilletMaxCents(m.netMaxCents, m.stakeCents),
+        plafondCents: L.PLAFOND_JOUEUR_CENTS,
+      });
       // LE CHEMIN `repris` N'ÉCRIT JAMAIS UNE SECONDE MISE. C'est le vol le plus facile de la
       // phase — un `POST` rejoué qui débite deux fois — et il se referme en ne posant rien ici.
       const rejeu = matches.find(x => x.user_id === m.userId && x.client_key === m.clientKey);
@@ -261,6 +304,15 @@ function fakeDb(seed = []) {
       // transaction qui rend la ligne à l'inexistence, ce qu'une doublure sans transaction ne peut
       // pas imiter. Ce qui doit être identique, et l'est, c'est ce qu'on OBSERVE après un refus :
       // aucun billet, aucune écriture, et pas même la clôture du billet périmé.
+      // LE PLAFOND NE S'APPLIQUE QU'À L'OUVERTURE D'UN BILLET NEUF : les deux chemins `repris`
+      // ci-dessus sont déjà passés, et c'est voulu. Refuser un billet que le joueur DÉTIENT, mise
+      // débitée, l'enfermerait dedans jusqu'à l'expiration — il n'en a qu'un à la fois. Il vient
+      // AVANT le contrôle des fonds, comme dans db-pg.js, parce que c'est la maison qui ne veut pas
+      // de ce billet-là, et cela ne dépend pas de ce que le joueur a en poche.
+      if (plafond.franchi)
+        return { match: null, refus: 'plafond', portee: 'joueur',
+                 expositionCents: plafond.expositionCents, plafondCents: plafond.plafondCents };
+
       const solde = soldeDe(dispo);
       if (solde < m.stakeCents)
         return { match: null, refus: 'fonds', balanceCents: solde,
@@ -493,6 +545,12 @@ function fakeDb(seed = []) {
       L.exigeCompte(compte);
       return soldeDe(compte);
     },
+    // LE FUSIBLE GLOBAL. Il est une méthode du `db` injecté — pas une des trois fonctions à client
+    // transactionnel — précisément parce qu'il est lu HORS de la transaction du billet : le routeur
+    // doit pouvoir le demander sans rien tenir.
+    async expositionMaison({ depuis }) {
+      return expositionMaisonDe(depuis);
+    },
     async ledgerDe({ reference }) {
       return ledger.filter(l => l.reference === reference)
                    .map(l => ({ id: l.id, motif: l.motif, reference: l.reference,
@@ -588,8 +646,10 @@ const PAS_INTRO = (() => {
 })();
 
 function bancDeBillet(extra = {}) {
-  const db = fakeDb();
   const horloge = { t: T0 };
+  // La doublure date ses écritures sur LA MÊME horloge que le routeur : c'est ce qui permet de faire
+  // sortir une écriture de la fenêtre glissante du plafond en avançant `horloge.t`.
+  const db = fakeDb([], () => horloge.t);
   let tire = 0, tireSecret = 0;
   const app = appDe(db, {
     randomSeed: () => {
@@ -2120,11 +2180,24 @@ test('toute colonne dont db-pg.js parle existe encore dans le schéma', () => {
     'order', 'by', 'limit', 'count', 'sum', 'max', 'coalesce', 'filter', 'as', 'now',
     // `for update` : le verrou de ligne, premier verrou explicite du dépôt.
     'for',
+    // Phase 04a : la requête de fenêtre du plafond. `join` parce qu'elle est la seule du fichier à
+    // croiser deux tables, `any` parce que les comptes et les motifs lui arrivent en TABLEAUX —
+    // `L.COMPTES_EXPOSITION` et `L.MOTIFS_EXPOSITION`, les mêmes listes que lit `expositionDe`, et
+    // pas des littéraux recopiés dans le SQL.
+    'join', 'any',
     'true', 'false']);
+  // LES ALIAS DE LA REQUÊTE DE FENÊTRE, NOMMÉS PLUTÔT QUE GLISSÉS DANS LA LISTE DES MOTS SQL. Un
+  // alias est un nom qu'on a choisi, pas un mot-clé : la garde doit dire lesquels elle accepte,
+  // sinon la première colonne mal orthographiée passerait pour un alias. `e` est la sous-requête sur
+  // `ledger_entries` — elle existe parce que l'expression de la référence nomme `motif` sans le
+  // qualifier, et que `matches` porte aussi un `motif` —, `m` la table des billets, et `billet`
+  // l'identifiant que cette expression calcule.
+  const ALIAS = new Set(['e', 'm', 'billet']);
   const utilises = mots((listes + ' ' + corps).replace(/\bas\s+\w+/g, ' '));
   assert.ok(utilises.size > 20, `seulement ${utilises.size} identifiants retrouvés dans db-pg.js`);
   for (const mot of utilises)
-    if (!SQL.has(mot)) assert.ok(schema.has(mot), `db-pg.js parle de « ${mot} », absent de schema.sql`);
+    if (!SQL.has(mot) && !ALIAS.has(mot))
+      assert.ok(schema.has(mot), `db-pg.js parle de « ${mot} », absent de schema.sql`);
 });
 test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées', () => {
   // Le revirement se vérifie, il ne se raconte pas : un compteur qu'on incrémente est une case
@@ -4563,7 +4636,7 @@ await test('LE VOL QUE CETTE PHASE FERME : jouer, perdre, n\'envoyer NI trace NI
   reconcilier(db, 'le billet que personne n\'a terminé');
 });
 
-await test('LES TROIS REFUS QUI ARRÊTENT LE SAS EXISTENT VRAIMENT, et le jeu ne les invente pas', async () => {
+await test('LES QUATRE REFUS QUI ARRÊTENT LE SAS EXISTENT VRAIMENT, et le jeu ne les invente pas', async () => {
   // Le jeu ne se comporte pas de la même façon devant une PANNE et devant un REFUS : une panne le
   // laisse partir hors ligne comme depuis la 02a, un refus nommé arrête le sas et ne lance aucune
   // partie. La liste des refus qui arrêtent vit dans `WBCore.REFUS_SAS`, côté jeu, parce que c'est
@@ -4571,7 +4644,7 @@ await test('LES TROIS REFUS QUI ARRÊTENT LE SAS EXISTENT VRAIMENT, et le jeu ne
   // qui décrivent la même chose se confrontent, sinon la seconde ment un jour en silence.
   const fs = require('node:fs'), path = require('node:path');
   const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
-  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent']);
+  assert.deepStrictEqual(C.REFUS_SAS, ['fonds', 'livre', 'renonce_recent', 'plafond']);
   for (const code of C.REFUS_SAS)
     assert.ok(new RegExp("code: '" + code + "'").test(app),
       `le jeu arrête son sas sur un refus « ${code} » que l'API n'émet nulle part`);
@@ -4596,8 +4669,16 @@ await test('LES TROIS REFUS QUI ARRÊTENT LE SAS EXISTENT VRAIMENT, et le jeu ne
   // être relue le jour où un refus de plus arrive sur cette route.
   const ouverture = app.slice(app.indexOf('async function ouvrirBillet('), app.indexOf('async function recevoirTrace('));
   const codes = [...new Set([...ouverture.matchAll(/code: '([a-z_]+)'/g)].map(m => m[1]))].sort();
-  assert.deepStrictEqual(codes, ['fonds', 'livre', 'renonce_recent'],
+  assert.deepStrictEqual(codes, ['fonds', 'livre', 'plafond', 'renonce_recent'],
     'un refus de plus sur POST /api/match : décider s\'il arrête le sas ou non, et l\'écrire');
+  // `plafond` EST ÉMIS DEUX FOIS SUR CETTE ROUTE, et c'est la moitié qui compte : un seul code, deux
+  // PORTÉES. Le fusible global refuse avant les tirages de graines, le plafond par joueur revient de
+  // la transaction — et les deux sortent en 409 avec la même forme de corps.
+  assert.strictEqual((ouverture.match(/code: 'plafond'/g) || []).length, 2,
+    'le plafond doit être émis par les deux portées : la maison, et le joueur');
+  for (const portee of ['maison', 'joueur'])
+    assert.ok(new RegExp(`portee: '${portee}'|portee: ouverture\\.portee`).test(ouverture),
+      `la portée « ${portee} » ne part pas au client : le sas ne saurait quoi dire`);
 });
 
 await test('LA FRONTIÈRE AVEC LA 02a TIENT SUR TOUS LES CHEMINS D\'ARGENT, y compris les deux nouveaux', async () => {
@@ -5161,6 +5242,320 @@ await test('LA PURGE N\'EFFACE JAMAIS LA TRACE D\'UN BILLET DONT LE RÉSULTAT N\
   reconcilier(db, 'le billet jamais jugé');
 });
 
+console.log('Le plafond refuse à l\'ouverture, et le sas le dit');
+
+// SEMER UNE VICTOIRE MAXIMALE, EN POSANT DES ÉCRITURES. C'est la moitié qui compte : on franchit le
+// plafond en écrivant dans le grand livre, jamais en touchant un compteur — il n'existe aucune
+// colonne à écrire, et relire redonne le même chiffre. La ligne `matches` qui va avec est posée
+// aussi, pour que `ledgerReconcile` reste sans grief : une exposition semée dans le vide serait un
+// engagement sans billet, c'est-à-dire un grief, pas un décor.
+//
+// La mise est débitée puis le gain crédité : le joueur peut donc en enchaîner autant qu'on veut, la
+// première seule ayant besoin de sa dotation.
+let semees = 0;
+async function semerVictoireMaximale(db, userId, miseCents, seats, at) {
+  const p = C.cashoutCents(C.purseBound(miseCents, seats).maxCents);
+  const id = 900001 + (semees++);
+  const quand = new Date(at);
+  db.matches.push({
+    id, user_id: userId, mode: 'resurgence', stake_cents: miseCents, seats, team_size: 1,
+    paid_seats: 1, brawler: BRAWLER, seed_public: 1, seed_secret: SECRETS[0],
+    sim_version: SIM.SIM_VERSION, client_key: `semee-${id}`, status: 'settled',
+    first_result_at: quand, opened_at: quand, expires_at: quand, settled_at: quand,
+    issue: 'encaissement', controle: null, motif: null,
+    gross_cents: p.grossCents, fee_cents: p.feeCents, net_cents: p.netCents,
+    purse_cents: 0, declared_net_cents: null, ecart_cents: null,
+    seconds: 1, kills: 0, deaths: 0, rank: 1, cubes: 0, damage: 0, cashed_out: true,
+    trace_steps: 1, replay_digest: null, digest_match: true, divergence_step: null, replay_ms: 0,
+  });
+  await db.ledgerWrite(L.mouvementMise({ userId, matchId: id, miseCents }));
+  await db.ledgerWrite(L.mouvementGain({ userId, matchId: id, miseCents, grossCents: p.grossCents,
+                                         feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  return { id, pireCas: L.expositionBilletMaxCents(p.netCents, miseCents), p };
+}
+// Les deux tables qui servent à tout ce qui suit, et leurs pires cas — RECALCULÉS depuis `WBCore`,
+// jamais écrits à la main. La chère porte le maximum du domaine (39 000 centimes), la petite le
+// minimum utile : c'est cet écart qui rend « une table moins chère marchera » vérifiable plutôt que
+// promis.
+const CHERE = { corps: { ...DEMANDE, mode: 'resurgence', stake: 10 },
+                miseCents: 1000, seats: C.seatsOf(C.MODES.resurgence) };
+const PETITE = { corps: { ...DEMANDE, mode: 'solo', stake: 0.5 },
+                 miseCents: 50, seats: C.seatsOf(C.MODES.solo) };
+const pireCasChere = () => pireCasDe(CHERE.miseCents, CHERE.seats);
+const pireCasPetite = () => pireCasDe(PETITE.miseCents, PETITE.seats);
+
+await test('UN REFUS plafond NE LAISSE RIEN, et la table moins chère s\'ouvre DANS LA FOULÉE', async () => {
+  // La propriété entière : le refus est un 409 nommé, il ne pose ni ligne, ni écriture, ni
+  // séquestre, `ledgerReconcile` reste sans grief — et il n'enferme personne. C'est la leçon du
+  // `22003` transposée : un joueur n'a qu'un billet ouvert à la fois, donc un refus qui laisserait
+  // quoi que ce soit derrière lui le bloquerait jusqu'à l'expiration.
+  const { db, app, horloge, tires } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+
+  // TROIS victoires maximales et une demi-table : de quoi refuser la table la plus chère sans
+  // refuser la plus petite. Le nombre n'est pas choisi au hasard — trois pires cas maximaux laissent
+  // passer le QUATRIÈME billet, c'est la définition même de `PLAFOND_TABLES_PAR_JOUR` — donc il faut
+  // strictement plus que trois pour voir un refus, et strictement moins que le plafond entier pour
+  // que la petite table passe encore.
+  let realisee = 0;
+  for (let i = 0; i < 3; i++)
+    realisee += (await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t)).pireCas;
+  realisee += (await semerVictoireMaximale(db, uid, 500, CHERE.seats, horloge.t)).pireCas;
+  assert.strictEqual(realisee, 3 * pireCasChere() + pireCasDe(500, CHERE.seats));
+  assert.ok(realisee + pireCasChere() > L.PLAFOND_JOUEUR_CENTS, `${realisee} : la chère passerait`);
+  assert.ok(realisee + pireCasPetite() <= L.PLAFOND_JOUEUR_CENTS, `${realisee} : la petite tomberait aussi`);
+
+  const lignes = db.matches.length, livre = db.ledger.length, graines = tires();
+  const r = await demander(app, { ...CHERE.corps, clientKey: 'chere' });
+
+  assert.strictEqual(r.code, 409, JSON.stringify(r.corps));
+  assert.strictEqual(r.corps.code, 'plafond');
+  assert.strictEqual(r.corps.portee, 'joueur');
+  assert.strictEqual(r.corps.expositionCents, realisee + pireCasChere());
+  assert.strictEqual(r.corps.plafondCents, L.PLAFOND_JOUEUR_CENTS);
+  assert.strictEqual(r.corps.fenetreHeures, L.PLAFOND_FENETRE_H);
+  // Le corps ne porte AUCUN montant du joueur : rien n'a bougé, il n'y a rien à dire, et un solde
+  // rendu ici serait un solde que le jeu écrirait pour rien.
+  assert.ok(!('balanceCents' in r.corps) && !('quarantineCents' in r.corps), JSON.stringify(r.corps));
+
+  // RIEN N'A ÉTÉ POSÉ.
+  assert.strictEqual(db.matches.length, lignes, 'le refus a laissé une ligne dans matches');
+  assert.strictEqual(db.ledger.length, livre, 'le refus a laissé une écriture');
+  for (const m of db.matches)
+    assert.strictEqual(soldeEnjeu(db, m.id), 0, `le séquestre de ${m.id} est habité`);
+  zeroGlobal(db, 'après un refus de plafond');
+  reconcilier(db, 'le refus de plafond');
+
+  // CE QUE LE REFUS CONSOMME QUAND MÊME, ÉCRIT PLUTÔT QUE TU : UNE GRAINE. Le verdict par joueur est
+  // EXACT, donc il se lit sous le verrou de ligne, donc dans la transaction — c'est-à-dire après que
+  // le routeur a tiré ses deux graines. C'est exactement ce que fait déjà le refus `fonds`, et pour
+  // la même raison. Ce n'est pas la même chose que `renonce_recent`, qui refuse AVANT les tirages :
+  // là-bas la graine est l'enjeu du refus — un chercheur de carte martelait la route — ici le joueur
+  // n'obtient aucun billet, donc aucune carte, et le tirage ne lui apprend rien. La source est un
+  // générateur, pas une suite finie.
+  assert.strictEqual(tires(), graines + 1,
+    'le refus par joueur se décide dans la transaction : il a tiré sa graine comme le refus `fonds`');
+
+  // ET IL N'ENFERME PERSONNE : la table moins chère s'ouvre immédiatement, mise débitée, séquestre
+  // habité. C'est ce que la portée `joueur` promet à l'écran, et c'est vérifié ici plutôt qu'écrit.
+  const petite = await demander(app, { ...PETITE.corps, clientKey: 'petite' });
+  assert.strictEqual(petite.code, 200, JSON.stringify(petite.corps));
+  assert.strictEqual(petite.corps.repris, false);
+  assert.strictEqual(petite.corps.stakeCents, PETITE.miseCents);
+  assert.strictEqual(soldeEnjeu(db, petite.corps.id), PETITE.miseCents);
+  zeroGlobal(db, 'après la table moins chère');
+  reconcilier(db, 'la table moins chère ouverte après un refus');
+});
+
+await test('LE PLAFOND LAISSE PASSER LE QUATRIÈME BILLET MAXIMAL, et refuse le cinquième', async () => {
+  // `PLAFOND_TABLES_PAR_JOUR` vaut quatre, et cela veut dire QUATRE tables ouvertes, pas trois. La
+  // comparaison de `plafondVerdict` est stricte pour cette raison exacte ; ce test le constate de
+  // bout en bout, par la route, plutôt que sur la fonction pure.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR - 1; i++)
+    await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+
+  const quatrieme = await demander(app, { ...CHERE.corps, clientKey: 'q4' });
+  assert.strictEqual(quatrieme.code, 200, 'le quatrième billet maximal doit passer : sinon le plafond en vaut trois');
+  // On le clôt, et on sème la quatrième victoire : le cinquième, lui, est refusé.
+  db.matches.find(m => String(m.id) === String(quatrieme.corps.id)).status = 'abandoned';
+  await db.ledgerWrite(L.mouvementGain({ userId: uid, matchId: quatrieme.corps.id,
+    miseCents: CHERE.miseCents, grossCents: 0, feeCents: 0, netCents: 0, convergee: true }));
+  await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+  const cinquieme = await demander(app, { ...CHERE.corps, clientKey: 'q5' });
+  assert.strictEqual(cinquieme.code, 409, JSON.stringify(cinquieme.corps));
+  assert.strictEqual(cinquieme.corps.code, 'plafond');
+  zeroGlobal(db, 'après le cinquième billet refusé');
+  reconcilier(db, 'quatre tables maximales');
+});
+
+await test('LA FENÊTRE GLISSE : un billet sorti des vingt-quatre heures ne compte plus, éprouvé sans attendre', async () => {
+  // La fenêtre est GLISSANTE et pas une journée calendaire : une journée calendaire se réinitialise
+  // à une heure connue de tous, et attendre minuit deviendrait une stratégie. Ce que ce test tient,
+  // c'est la clause `cree_le >= $2` de la requête : sans elle, l'exposition d'un joueur ne
+  // redescendrait JAMAIS, et le plafond deviendrait une interdiction à vie au bout de quatre tables.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR; i++)
+    await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+
+  const refus = await demander(app, { ...CHERE.corps, clientKey: 'dedans' });
+  assert.strictEqual(refus.corps.code, 'plafond', JSON.stringify(refus.corps));
+
+  // AU BORD EXACT : les écritures ont l'âge de la fenêtre à la milliseconde près, donc elles y sont
+  // encore. `cree_le >= maintenant − fenêtre` est une inégalité LARGE, et c'est le bord qu'on tient.
+  horloge.t += L.PLAFOND_FENETRE_H * 3600 * 1000;
+  assert.strictEqual((await demander(app, { ...CHERE.corps, clientKey: 'bord' })).corps.code, 'plafond',
+    'au bord exact, les écritures sont encore dans la fenêtre');
+
+  // Une milliseconde plus tard, elles en sont sorties, et le même billet s'ouvre.
+  horloge.t += 1;
+  const ouvert = await demander(app, { ...CHERE.corps, clientKey: 'dehors' });
+  assert.strictEqual(ouvert.code, 200, JSON.stringify(ouvert.corps));
+  assert.strictEqual(ouvert.corps.stakeCents, CHERE.miseCents);
+  // Et le grand livre n'a PAS bougé : ce n'est pas l'exposition qui a été effacée, c'est la fenêtre
+  // qui a glissé. Le chiffre de toujours est toujours là.
+  assert.strictEqual(L.expositionDe(livreDe(db), db.matches.map(m => String(m.id))),
+    L.PLAFOND_TABLES_PAR_JOUR * pireCasChere(),
+    'la fenêtre a effacé des écritures au lieu de glisser');
+  zeroGlobal(db, 'après que la fenêtre a glissé');
+});
+
+await test('UN GAIN CONTRE-PASSÉ NE COMPTE PLUS DANS L\'EXPOSITION, et c\'est le piège de la phase', async () => {
+  // `ledger_entries.reference` est du TEXTE, et une contre-passation y porte `gain:42`. Une jointure
+  // par `reference::bigint` lèverait `22P02` sur ces lignes-là ; une jointure qui les FILTRE les
+  // ignore, c'est-à-dire qu'un gain annulé continuerait de peser dans l'exposition et refuserait un
+  // joueur pour de l'argent qu'il n'a jamais reçu. Le défaut naît VERT : le module qui écrit la
+  // requête n'est pas celui qui crée les lignes qui la cassent.
+  //
+  // La contre-passation n'aura son appelant qu'au module suivant — c'est `api/operateur.js` — et ce
+  // test est écrit ICI justement pour cela : la requête existe déjà, donc sa lacune existe déjà.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  const semees = [];
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR; i++)
+    semees.push(await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t));
+  assert.strictEqual((await demander(app, { ...CHERE.corps, clientKey: 'avant' })).corps.code, 'plafond');
+
+  // ON CONTRE-PASSE LE DERNIER GAIN : le mouvement inverse, daté, qui laisse les deux visibles. Le
+  // livre boucle toujours — un transfert boucle toujours — mais l'exposition doit redescendre d'un
+  // pire cas exactement.
+  const dernier = semees[semees.length - 1];
+  const gain = L.mouvementGain({ userId: uid, matchId: dernier.id, miseCents: CHERE.miseCents,
+    grossCents: dernier.p.grossCents, feeCents: dernier.p.feeCents, netCents: dernier.p.netCents,
+    convergee: true });
+  await db.ledgerWrite(L.mouvementContrepassation({ transferts: gain }));
+  assert.ok(db.ledger.some(l => l.motif === 'contrepassation' && l.reference === `gain:${dernier.id}`),
+    'la contre-passation doit bien porter la référence préfixée qui casse une jointure naïve');
+
+  const apres = await demander(app, { ...CHERE.corps, clientKey: 'apres' });
+  assert.strictEqual(apres.code, 200, JSON.stringify(apres.corps));
+  // Le livre boucle toujours. La réconciliation, elle, a désormais un grief légitime — le séquestre
+  // contre-passé est réhabité — et ce n'est pas ce test qui le juge : c'est le module 5, avec son
+  // appelant. Ici on ne prouve QUE la lecture de l'exposition.
+  zeroGlobal(db, 'après une contre-passation de gain');
+});
+
+await test('LE FUSIBLE GLOBAL refuse sur le cumul de TOUS LES JOUEURS, avec la portée maison', async () => {
+  // Un plafond par joueur ne borne pas une FLOTTE DE COMPTES : `findOrCreate` crée un compte par
+  // adresse email, et rien n'empêche cinquante adresses. Le fusible est la seule réponse de cette
+  // phase, il vaut environ treize comptes saturés, et son déclenchement refuse TOUT LE MONDE — y
+  // compris un joueur dont l'exposition personnelle est NULLE, ce que ce test constate.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+
+  // La flotte : autant de comptes qu'il en faut pour faire sauter le fusible, un billet maximal
+  // chacun. Le nombre est CALCULÉ, jamais écrit — un palier ou un mode qui change le fera bouger.
+  // La borne est celle de la PLUS PETITE table, pas de la plus chère : quand le fusible saute, il
+  // refuse tout le monde, y compris celui qui demandait la table à cinquante centimes, et c'est
+  // exactement ce que ce test doit pouvoir montrer.
+  let cumul = 0;
+  let voisin = 1000;
+  while (cumul + pireCasPetite() <= L.PLAFOND_MAISON_CENTS) {
+    voisin += 1;
+    await db.ledgerWrite(L.mouvementDotation({ userId: voisin, montantCents: CHERE.miseCents }));
+    cumul += (await semerVictoireMaximale(db, voisin, CHERE.miseCents, CHERE.seats, horloge.t)).pireCas;
+  }
+  assert.ok(cumul > 0 && cumul + pireCasPetite() > L.PLAFOND_MAISON_CENTS);
+  assert.ok(cumul + pireCasChere() > L.PLAFOND_MAISON_CENTS);
+
+  const r = await demander(app, { ...CHERE.corps, clientKey: 'fusible' });
+  assert.strictEqual(r.code, 409, JSON.stringify(r.corps));
+  assert.strictEqual(r.corps.code, 'plafond', 'le code est le MÊME : le sas n\'a qu\'un comportement à tenir');
+  assert.strictEqual(r.corps.portee, 'maison', 'la portée est ce qui distingue les deux, et elle seule');
+  assert.strictEqual(r.corps.plafondCents, L.PLAFOND_MAISON_CENTS);
+  assert.strictEqual(r.corps.expositionCents, cumul + pireCasChere());
+  assert.strictEqual(r.corps.fenetreHeures, L.PLAFOND_FENETRE_H);
+  // ET CE N'EST PAS LE PLAFOND PAR JOUEUR QUI A REFUSÉ : celui qui demande n'a JAMAIS joué.
+  assert.strictEqual(L.expositionDe(livreDe(db), db.matches.filter(m => m.user_id === uid).map(m => String(m.id))), 0,
+    'le demandeur a une exposition personnelle : le test ne prouve plus ce qu\'il annonce');
+  assert.ok(pireCasChere() < L.PLAFOND_JOUEUR_CENTS, 'le plafond par joueur aurait refusé tout seul');
+  // Le refus vient AVANT les tirages de graines et avant la transaction : ni ligne, ni écriture.
+  assert.strictEqual(db.matches.filter(m => m.user_id === uid).length, 0);
+  // Et il refuse aussi la table la moins chère : aucune table moins chère n'aide quand c'est la
+  // maison qui ferme. C'est très exactement la raison pour laquelle le message lit la portée.
+  const petite = await demander(app, { ...PETITE.corps, clientKey: 'petite-fusible' });
+  assert.strictEqual(petite.corps.code, 'plafond');
+  assert.strictEqual(petite.corps.portee, 'maison');
+  assert.match(C.refusMessage('plafond', petite.corps), /try again/i);
+  assert.ok(!/smaller buy-in/.test(C.refusMessage('plafond', petite.corps)));
+});
+
+await test('LE FUSIBLE NE SE RELIT QU\'À SA CADENCE, et il ne tourne PAS sous le verrou', async () => {
+  // Le plafond par joueur est exact ; le fusible est APPROCHÉ, et c'est le bon marché. Le lire sous
+  // le verrou ferait de chaque ouverture de billet un agrégat non borné sur la table qui grossit le
+  // plus vite du dépôt — et le dépôt a déjà payé ce genre de chose une fois : `GET /api/me` mettait
+  // en file le renoncement d'un AUTRE joueur au-delà de sa fenêtre de dix secondes.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  let lectures = 0;
+  const brute = db.expositionMaison;
+  db.expositionMaison = async a => { lectures++; return brute(a); };
+
+  assert.strictEqual((await demander(app, { ...PETITE.corps, clientKey: 'u1' })).code, 200);
+  assert.strictEqual(lectures, 1, 'la première ouverture doit lire le fusible');
+  // DEUX OUVERTURES DANS LA MÊME MINUTE, UNE SEULE LECTURE. La valeur est gardée en mémoire du
+  // processus entre les deux — un état de plus qui vit là, comme la limitation de débit, perdu au
+  // redémarrage et non partagé entre instances.
+  horloge.t += (L.FUSIBLE_RAFRAICHI_S - 1) * 1000;
+  assert.strictEqual((await demander(app, { ...PETITE.corps, clientKey: 'u2' })).code, 200);
+  assert.strictEqual(lectures, 1, 'le fusible a été relu deux fois dans la même minute');
+
+  // Passé la cadence, il se relit. L'horloge est celle qui est injectée, donc rien n'attend.
+  horloge.t += 1000;
+  assert.strictEqual((await demander(app, { ...PETITE.corps, clientKey: 'u3' })).code, 200);
+  assert.strictEqual(lectures, 2, 'le fusible ne s\'est jamais rafraîchi');
+
+  // ET CHAQUE `createApp` A SON PROPRE FUSIBLE : la valeur est une fermeture, pas un module. Deux
+  // instances du routeur dans le même processus ne se partagent rien, et un test n'hérite pas de la
+  // lecture d'un autre.
+  const autre = bancDeBillet({ limiter: () => true });
+  let autresLectures = 0;
+  const brute2 = autre.db.expositionMaison;
+  autre.db.expositionMaison = async a => { autresLectures++; return brute2(a); };
+  await demander(autre.app, { ...PETITE.corps, clientKey: 'v1' });
+  assert.strictEqual(autresLectures, 1);
+});
+
+await test('UN BILLET DÉJÀ OUVERT N\'EST JAMAIS CASSÉ RÉTROACTIVEMENT : le plafond franchi pendant qu\'il vit ne change rien', async () => {
+  // Le corollaire écrit de « le plafond se décide à l'OUVERTURE » : refuser plus tard serait voler
+  // une partie gagnée, et c'est irréparable. On ouvre, on franchit le plafond PENDANT que le billet
+  // vit, et on le règle — la partie est rejouée et payée comme si de rien n'était.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  const b = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  assert.strictEqual(b.code, 200);
+
+  // Le plafond est franchi pendant que le billet vit. On le vérifie plutôt que de le supposer : une
+  // NOUVELLE demande serait refusée à cet instant précis.
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR; i++)
+    await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+
+  // Le chemin `repris` rend TOUJOURS le billet : le joueur dont la réponse s'est perdue le retrouve,
+  // plafond ou pas. Le lui refuser l'enfermerait dedans jusqu'à l'expiration, mise débitée.
+  const repris = await demander(app, { ...DEMANDE, mode: 'resurgence' });
+  assert.strictEqual(repris.code, 200, JSON.stringify(repris.corps));
+  assert.strictEqual(repris.corps.repris, true);
+  assert.strictEqual(repris.corps.id, b.corps.id);
+
+  // ET IL SE RÈGLE. Le montant sort de la partie rejouée, comme toujours.
+  const { rep } = await jouerEtRendre(app, horloge, b, { encaisser: 300 });
+  assert.notStrictEqual(rep.code, 500);
+  assert.strictEqual(rep.code, 200, JSON.stringify(rep.corps));
+  assert.strictEqual(rep.corps.status, 'settled', JSON.stringify(rep.corps));
+  assert.notStrictEqual(rep.corps.code, 'plafond');
+  assert.ok(rep.corps.netCents > 0, 'la partie gagnée n\'a rien payé');
+  assert.strictEqual(soldeEnjeu(db, b.corps.id), 0);
+  zeroGlobal(db, 'après un règlement au-delà du plafond');
+  reconcilier(db, 'le billet ouvert avant le plafond');
+});
+
 console.log('Le grand livre : le schéma, les gardes textuelles, et la vraie Postgres');
 // Tout ce qui suit lit du TEXTE. Il faut le dire une fois de plus, parce que c'est la limite exacte
 // de ce module : aucune base ne tourne ici, et un test qui passe contre la doublure prouve la
@@ -5198,13 +5593,27 @@ test('toute colonne du grand livre dont db-pg.js parle existe dans schema.sql', 
   // Ce qu'elle promet, c'est le test « le seul delete est la purge nommée » qui le vérifie, clause
   // par clause. On compte quand même les requêtes croisées : une SECONDE ne doit pas se faufiler
   // ici sans que personne ne s'en aperçoive.
-  const croisees = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q) && /match_traces/.test(q));
-  assert.strictEqual(croisees.length, 1,
-    `${croisees.length} requêtes croisent le grand livre et les traces : il ne doit y avoir que la purge`);
-  const requetes = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q) && !/match_traces/.test(q));
+  //
+  // ET LA REQUÊTE DE FENÊTRE DU PLAFOND EST LA SECONDE, écartée d'ici de la même façon : elle joint
+  // `ledger_entries` à `matches` pour ramener chaque écriture à son billet, donc elle porte
+  // forcément des mots qui ne sont pas des colonnes du grand livre. Ce qu'elle promet est tenu par
+  // sa propre garde, plus bas — l'expression de la référence y est INTERPOLÉE depuis `api/ledger.js`
+  // et jamais réécrite. On compte les deux : une TROISIÈME requête croisée ne doit pas se faufiler
+  // ici sans que personne ne s'en aperçoive.
+  const toutes = (pg.match(/`[^`]*`/g) || []).filter(q => /ledger_entries/.test(q));
+  const croisees = toutes.filter(q => /match_traces/.test(q) || /\bmatches\b/.test(q));
+  assert.strictEqual(croisees.length, 2,
+    `${croisees.length} requêtes croisent le grand livre et une autre table : la purge, et la fenêtre du plafond`);
+  assert.strictEqual(croisees.filter(q => /match_traces/.test(q)).length, 1, 'la purge des traces');
+  assert.strictEqual(croisees.filter(q => /m\.id::text/.test(q)).length, 1, 'la fenêtre du plafond');
+  const requetes = toutes.filter(q => !croisees.includes(q));
   assert.ok(requetes.length >= 3, `seulement ${requetes.length} requêtes du grand livre dans db-pg.js`);
   const MOTS_SQL = new Set(['const', 'select', 'from', 'where', 'and', 'or', 'is', 'not', 'null',
     'insert', 'into', 'values', 'returning', 'order', 'by', 'sum', 'coalesce', 'filter', 'as',
+    // `any` et `text` : le fusible global reçoit les comptes et les motifs en TABLEAUX, depuis
+    // `L.COMPTES_EXPOSITION` et `L.MOTIFS_EXPOSITION`. Des littéraux recopiés dans le SQL auraient
+    // été une seconde écriture de « quels comptes comptent », et c'est le patron qu'on refuse.
+    'any', 'text',
     'ledger_entries']);
   const texte = (listes + ' ' + requetes.join(' '))
     .replace(/\$\{[^}]*\}/g, ' ').replace(/'[^']*'/g, ' ').replace(/\bas\s+\w+/g, ' ');
@@ -5385,8 +5794,21 @@ test('la clé du grand livre, et les deux index qui remplacent la case', () => {
   assert.strictEqual(cles.size, gain.length, 'deux jambes du même mouvement partagent la clé');
   // Le solde est une SOMME sur ces lignes, jamais une colonne : les deux index de lecture sont ce
   // qui rend cette somme tenable, et l'échappatoire nommée reste l'instantané, jamais une case.
-  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_debit\)/);
-  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_credit\)/);
+  //
+  // ILS PORTENT DEUX COLONNES DEPUIS LA PHASE 04a, et le renommage est le sujet du test : le
+  // plafond lit l'exposition d'une FENÊTRE GLISSANTE à chaque ouverture de billet, donc sa clause
+  // porte un compte ET une date. Sur un index qui ne connaît que le compte, Postgres remonte toutes
+  // les écritures de `maison:contrepartie` depuis le premier jour pour n'en garder qu'une journée.
+  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_debit, cree_le\)/);
+  assert.match(bloc, /create index[^\n]*on ledger_entries \(compte_credit, cree_le\)/);
+  // ET LES ANCIENS SONT EXPLICITEMENT DÉPOSÉS. `create index if not exists` sous un NOUVEAU nom
+  // laisserait les deux anciens en place : deux index morts qui ralentissent chaque insertion du
+  // livre sans servir une seule lecture. Aucune base de production n'existe, donc ce `drop` coûte
+  // zéro aujourd'hui et une fenêtre de maintenance après le premier euro.
+  for (const vieux of ['ledger_entries_debit_idx', 'ledger_entries_credit_idx']) {
+    assert.match(bloc, new RegExp(`drop index if exists ${vieux}`), `${vieux} n'est pas déposé`);
+    assert.ok(!new RegExp(`create index[^\\n]*${vieux}\\b`).test(bloc), `${vieux} est recréé`);
+  }
   // Et ce que la clé NE prouve pas doit rester écrit à côté d'elle : deux décompositions
   // différentes sur la même référence passeraient, et c'est ailleurs que ce trou est refermé.
   const commente = lireApi('schema.sql');
@@ -5396,6 +5818,121 @@ test('la clé du grand livre, et les deux index qui remplacent la case', () => {
   assert.match(raison, /NE PROUVE PAS/, 'la limite de la clé n\'est plus écrite à côté d\'elle');
   assert.match(raison, /découvert|séquestre/i);
   assert.match(raison, /net_cents is null/);
+});
+
+await test('GARDE NÉGATIVE : AUCUN CHEMIN DE RÈGLEMENT NE PEUT PRODUIRE LE CODE plafond', async () => {
+  // Refuser au RÈGLEMENT serait voler une partie gagnée, et c'est irréparable. C'est très exactement
+  // le genre de `if` qu'on ajoute un dimanche soir, donc la propriété mérite une garde et pas
+  // seulement une phrase de conception. Elle se tient sur le TEXTE : le code `plafond` ne doit
+  // apparaître QUE dans les constantes de tête et dans la route qui OUVRE un billet.
+  const fs = require('node:fs'), path = require('node:path');
+  const app = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const constantes = app.indexOf('function createApp(');
+  const debut = app.indexOf('async function ouvrirBillet(');
+  const fin = app.indexOf('async function recevoirTrace(');
+  assert.ok(constantes > 0 && debut > constantes && fin > debut, 'app.js a changé de forme');
+  const sites = [...app.matchAll(/'plafond'/g)].map(m => m.index);
+  assert.ok(sites.length >= 2, `seulement ${sites.length} mentions de « plafond » dans app.js`);
+  for (const i of sites)
+    assert.ok(i < constantes || (i >= debut && i < fin),
+      `« plafond » est nommé hors de la route qui ouvre un billet, à l'octet ${i}`);
+  // Et côté pilote, le refus ne naît que de `createMatch` : ni le règlement, ni le renoncement, ni
+  // le veilleur ne savent le prononcer.
+  const pg = PG_NU();
+  const ouverture = pg.slice(pg.indexOf('async createMatch(m)'), pg.indexOf('async expositionMaison('));
+  assert.ok(ouverture.length > 500, 'createMatch n\'a pas été retrouvé');
+  assert.strictEqual((pg.match(/refus: 'plafond'/g) || []).length, 1, 'le refus plafond a plus d\'un site');
+  assert.ok(ouverture.includes("refus: 'plafond'"), 'le refus plafond n\'est plus dans createMatch');
+
+  // ET LA PROPRIÉTÉ SE CONSTATE AUSSI EN MARCHE : on franchit le plafond, puis on parcourt TOUS les
+  // chemins qui closent une ligne — règlement, trace, renoncement, veilleur — et aucun ne le
+  // prononce. Une garde textuelle dit où le mot est écrit ; celle-ci dit ce que les routes rendent.
+  const { db, app: routeur, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(routeur, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  const b = await demander(routeur, { ...DEMANDE, mode: 'resurgence' });
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR; i++)
+    await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+  const p = partieDe(b, { encaisser: 300 });
+  const reponses = [];
+  // `poserTrace` asserte déjà ses 200 ; ce qu'on ramasse ici, ce sont les deux routes qui CLOSENT
+  // une ligne et qui pourraient être tentées de regarder un plafond.
+  for (let i = 0; i < p.segments.length; i++)
+    reponses.push(await appel(routeur, { method: 'POST', path: `/api/match/${b.corps.id}/trace`,
+      token: 'ok:u1:Loic', body: { seq: i, simVersion: SIM.SIM_VERSION, data: p.segments[i] } }));
+  horloge.t = Date.parse(b.corps.openedAt) + (C.LOBBY.wait + p.rapport.seconds + 3) * 1000;
+  reponses.push(await appel(routeur, { method: 'POST', path: `/api/match/${b.corps.id}/result`,
+                                       token: 'ok:u1:Loic', body: p.rapport }));
+  reponses.push(await renoncer(routeur, b.corps.id));
+  for (const r of reponses) {
+    assert.notStrictEqual(r.code, 500, JSON.stringify(r.corps));
+    assert.notStrictEqual((r.corps || {}).code, 'plafond', JSON.stringify(r.corps));
+  }
+  assert.deepStrictEqual((await routeur.veiller()).echecs, []);
+});
+
+test('GARDE TEXTUELLE : la requête de fenêtre INTERPOLE REFERENCE_BILLET_SQL, et ne la réécrit nulle part', () => {
+  // Même patron que `COMPTE_RE_SQL` recopiée dans `schema.sql` : il ne doit jamais exister deux
+  // écritures de la même règle. Ici on peut faire mieux qu'une comparaison de textes — la requête est
+  // en JavaScript, donc elle INTERPOLE la chaîne exportée — et ce que la garde tient est que c'est
+  // bien cette interpolation-là, et qu'aucune seconde écriture n'est apparue à côté.
+  const pg = PG_NU();
+  const debut = pg.indexOf('const EXPOSITION_FENETRE_SQL = `');
+  assert.ok(debut > 0, 'la requête de fenêtre a disparu de db-pg.js');
+  const requete = pg.slice(debut, pg.indexOf('`;', debut));
+  assert.ok(requete.includes('${L.REFERENCE_BILLET_SQL}'),
+    'la requête de fenêtre réécrit la règle au lieu d\'interpoler celle d\'api/ledger.js');
+  // AUCUN CAST SUR LA RÉFÉRENCE. `reference::bigint` lèverait `22P02` sur `gain:42` — c'est tout le
+  // sujet — et le seul `::text` autorisé est celui qui porte l'identifiant du billet DANS L'AUTRE
+  // SENS : on compare du texte à du texte.
+  for (const interdit of ['reference::', '::bigint', '::int', '::numeric', 'cast('])
+    assert.ok(!requete.includes(interdit), `${interdit} dans la requête de fenêtre`);
+  assert.ok(requete.includes('m.id::text'), 'la comparaison ne se fait plus sur matches.id::text');
+  // ET LA RÈGLE N'EST ÉCRITE NULLE PART AILLEURS dans le pilote : ni l'expression régulière des
+  // billets, ni l'extraction d'une contre-passation.
+  assert.ok(!/substring\s*\(\s*reference/.test(pg), 'une seconde écriture de la règle est apparue');
+  assert.ok(!/reference\s*~/.test(pg), 'une seconde écriture de la règle est apparue');
+  // LES COMPTES ET LES MOTIFS SONT DES PARAMÈTRES, pas des littéraux : les deux listes viennent
+  // d'`api/ledger.js`, les mêmes que lit `expositionDe`. `maison:dotation` n'entre jamais dans
+  // l'exposition, et un littéral recopié ici finirait par l'y laisser entrer.
+  for (const appel of ['L.COMPTES_EXPOSITION', 'L.MOTIFS_EXPOSITION'])
+    assert.strictEqual((pg.match(new RegExp(appel.replace('.', '\\.'), 'g')) || []).length, 2,
+      `${appel} doit servir aux DEUX requêtes d'exposition, et à elles seules`);
+  for (const litteral of ["'maison:contrepartie'", "'maison:commission'", "'maison:dotation'"])
+    assert.ok(!pg.includes(litteral), `${litteral} est recopié dans db-pg.js`);
+  // Les deux listes disent bien ce qu'elles annoncent, et `maison:dotation` n'en est pas.
+  assert.deepStrictEqual(L.COMPTES_EXPOSITION.slice(), [L.MAISON_CONTREPARTIE, L.MAISON_COMMISSION]);
+  assert.ok(!L.COMPTES_EXPOSITION.includes(L.MAISON_DOTATION));
+  assert.deepStrictEqual(L.MOTIFS_EXPOSITION.slice(),
+                         ['mise', 'gain', 'remboursement', 'contrepassation']);
+  for (const m of L.MOTIFS_EXPOSITION) assert.ok(L.MOTIFS.includes(m), m);
+});
+
+test('GARDE TEXTUELLE : le plafond par joueur est SOUS le verrou, le fusible global ne l\'est pas', () => {
+  // Les deux nombres n'ont pas la même nature, et les traiter pareil coûtait la section critique la
+  // plus disputée du système. Ce que cette garde tient, c'est la FRONTIÈRE : la lecture par joueur
+  // est dans la transaction et après le verrou ; celle de la maison est une méthode à part, qui
+  // ouvre sa propre connexion, et le routeur l'appelle hors de tout.
+  const pg = PG_NU();
+  const ouverture = pg.slice(pg.indexOf('async createMatch(m)'), pg.indexOf('async expositionMaison('));
+  const VERROU = 'select id from users where id = $1 for update';
+  assert.ok(ouverture.indexOf(VERROU) < ouverture.indexOf('expositionJoueur('),
+    'l\'exposition du joueur est lue AVANT le verrou : elle ne serait plus exacte');
+  assert.ok(ouverture.indexOf('expositionJoueur(') < ouverture.indexOf('insert into matches'),
+    'le plafond est décidé après l\'insertion du billet');
+  assert.ok(!ouverture.includes('EXPOSITION_MAISON_SQL') && !ouverture.includes('expositionMaison('),
+    'le fusible global est lu dans la transaction du billet : agrégat non borné sous le verrou');
+  // Et le routeur l'amortit : au plus une lecture toutes les `FUSIBLE_RAFRAICHI_S` secondes, sur
+  // l'horloge INJECTÉE, avec la valeur gardée en mémoire du processus entre les deux.
+  const app = lireApi('app.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const amorti = app.slice(app.indexOf('async function expositionMaisonCents('),
+                           app.indexOf('async function ouvrirBillet('));
+  assert.ok(amorti.length > 100, 'l\'amortissement du fusible n\'a pas été retrouvé');
+  assert.match(amorti, /FUSIBLE_RAFRAICHI_S/, 'la cadence n\'est plus lue dans api/ledger.js');
+  assert.match(amorti, /now\(\)/, 'le fusible ne lit plus l\'horloge injectée : sa cadence serait intestable');
+  assert.ok(!/Date\.now\(\)/.test(amorti), 'le fusible lit une horloge que les tests ne peuvent pas avancer');
+  // LA DEUX-COLONNES DES INDEX EST CE QUI REND CETTE LECTURE TENABLE, et le schéma le dit.
+  assert.match(SQL_NU(), /on ledger_entries \(compte_debit, cree_le\)/);
 });
 
 test('les statuts clos du grand livre et le `check` de matches.status sont la MÊME liste', () => {
