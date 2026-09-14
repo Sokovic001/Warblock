@@ -31,7 +31,7 @@ son mode et son brawler, **et rien d'autre**.
 ```
 POST /api/match      { mode, stake, brawler, clientKey }
 → 200                { id, mode, stakeCents, seats, teamSize, brawler, seed, status, openedAt, expiresAt,
-                       balanceCents, quarantineCents }
+                       repris, balanceCents, quarantineCents }
 → 409                { erreur, code: 'fonds', balanceCents, quarantineCents, requiredCents }
 → 409                { erreur, code: 'renonce_recent', windowSeconds }
 ```
@@ -92,6 +92,23 @@ Conséquences, toutes testées :
   clé, donc la réponse ne change plus ;
 - un billet périmé est clos (`status = 'expired'`) au moment où l'insertion bute dessus, ce qui
   libère la place. Le seul `update` de cette table, et il ne touche qu'un statut, jamais un montant.
+
+**`repris` est le SEUL champ par lequel un rejeu se distingue du premier appel**, et c'est une
+exception écrite à la doctrine ci-dessus. Ce que l'idempotence promet reste entier : même
+identifiant, même graine, même mise, aucune écriture de plus. Ce booléen ne décrit pas le **billet**,
+il décrit le **chemin** qui l'a servi, et il part au client pour une raison d'argent : un billet
+repris porte l'heure d'ouverture d'un sas **précédent**, donc le bouton QUITTER du jeu ne peut pas
+déduire son âge de son propre chronomètre. Le taire faisait promettre à l'écran un remboursement que
+la route de renoncement refusait ensuite, sans un mot, pour une mise entière. `createMatch` le
+calculait déjà sur ses trois chemins ; il ne manquait que le passage au client.
+
+**Les trois routes à identifiant refusent un zéro de tête.** `([1-9][0-9]{0,18})`, et pas
+`([0-9]{1,19})` : un `bigserial` n'en produit jamais, mais Postgres convertit « 007 » en `bigint` 7
+et retrouve donc la ligne — si bien qu'un paramètre brut pouvait servir à nommer un compte du grand
+livre, où « 007 » est refusé à juste titre, et où le refus sortait en **500** sur la seule route qui
+rende une mise. Le chemin est désormais un 404 « Route inconnue » avant d'atteindre quoi que ce soit.
+C'est la ceinture ; les bretelles sont dans `db-pg.js`, où un compte ne se nomme **jamais** avec le
+paramètre reçu mais toujours avec l'`id` de la ligne relue.
 
 **UN BILLET NE SERT QU'UNE TENTATIVE, ET C'EST UNE RÈGLE D'ARGENT.** Depuis que le serveur rejoue,
 toute la partie est une fonction pure de `seed_public` : la carte, les caisses, les vingt bots et le
@@ -626,7 +643,15 @@ repose pas uniquement sur un index.
 **`ledgerReconcile(ligneMatch, transferts)`** rend une liste de griefs — vide quand tout s'apparie. Le
 zéro global ne dit rien de l'appariement : il reste vrai quand un montant **juste** est posé sur le
 **mauvais** compte. Elle attrape exactement cela, plus le billet sans engagement, l'engagement sans
-billet et le séquestre non vidé sur une ligne close. Elle accepte une ligne ou une liste de lignes ;
+billet et le séquestre non vidé sur une ligne close. **Sur une ligne close SANS règlement — `expired`,
+`abandoned`, `rejected`, `renounced` — elle regarde aussi OÙ le séquestre est parti**, et pas
+seulement qu'il est vide : le statut suffit à le dire, puisque `renounced` ne vient que de
+`renounceMatch` et rend la mise au joueur, quand les trois autres viennent de `reglerSequestre` et la
+versent à `maison:contrepartie`. Sans ce contrôle, « ouvrir un billet, laisser expirer, se faire
+rembourser » — très exactement le vol que la fenêtre de renoncement ferme — se réconciliait en
+**vert**. Le **remboursement mal dirigé** est attrapé au même titre que le gain mal dirigé : un
+`remboursement` crédité à la maison ou à un autre joueur boucle le livre et vide le séquestre, et
+seule la comparaison au `user_id` de la ligne peut le voir. Elle accepte une ligne ou une liste de lignes ;
 avec une liste elle voit tous les billets, ce qui est la seule façon de tenir « aucun engagement sans
 son billet ». Les modules suivants l'appelleront à la fin de **chaque** scénario d'`api/test.js`.
 
@@ -649,6 +674,17 @@ La fonction est pure : elle ne lit aucune horloge, elle la reçoit. Le test qui 
 pas deux constantes, il **confronte** la fenêtre au vrai code du lobby — `joinRate`, `seatsAt` et la
 règle de `waitTick` — sur les cinq modes, les quatre tables, toute la plage de files d'attente et les
 vingt-quatre heures d'`onlineTotal` : le coup d'envoi le plus précoce y vaut 13,42 s.
+
+**Il y a DEUX marges, et la seconde est arrivée après coup.** `RENONCE_MARGE_S` couvre le vol
+**aller** de la demande de billet, qui joue dans le bon sens. `RENONCE_MARGE_ECRAN_MS` couvre le vol
+**retour** — le `POST .../renounce` met lui aussi du temps à arriver, et le serveur date la fenêtre à
+SA réception — donc l'écran ferme sa promesse une seconde et demie avant le serveur. La propriété
+« l'écran ne promet jamais un remboursement que le serveur refusera » **tient tant que ce vol retour
+reste sous cette marge**, et c'est écrit ici parce qu'elle était affirmée sans réserve. Elle suppose
+en outre que l'écran lise une **horloge** et non un compteur de tics : `sasRemboursable` lit
+`performance.now() − W.clic`, jamais `W.t`, qui retarde dès qu'un onglet passe en arrière-plan. Et
+elle ne promet **rien** sur un billet **repris**, dont l'heure d'ouverture est celle d'un sas
+précédent — c'est pour cela que `POST /api/match` rend `repris` avec le billet.
 
 ## `ledger_entries` — la table, et ce que sa clé prouve
 
@@ -1020,6 +1056,15 @@ doublure se contente d'imiter.
   négociable du dépôt, tout est injecté dans `createApp()`. Un test le lance avec un environnement
   vidé pour le vérifier, et un autre vérifie que le job existant n'a reçu ni service ni base.
 - Il **écrit et efface** dans la base qu'on lui donne : une base jetable, celle du service du job.
+- **Il fait tourner `findOrCreate` DEUX FOIS DE SUITE**, avec le pseudo de repli — celui que tout
+  nouveau compte reçoit, puisque Crossmint ne transporte pas de pseudo — et vérifie que le second
+  obtient « Player2 » **et sa dotation**. Ce scénario n'a rien d'exotique : c'est le deuxième joueur
+  qui s'inscrit. Il est ici parce qu'il ne peut être nulle part ailleurs — la doublure d'`api/test.js`
+  résout la collision de pseudo en mémoire, donc elle ne **subit** jamais un refus d'insertion, et
+  dans un bloc transactionnel une erreur avorte tout ce qui suit (`25P02`), si bien que le réessai
+  sortait en 500 sans compte et sans dotation. Le script éprouvait jusque-là la **contrainte**
+  `name_key` sans jamais appeler la fonction qui la heurte : la réserve de la phase 03 appliquée à
+  elle-même.
 - Ce qu'il éprouve, nommément : `name_key` ; l'index **partiel** « un seul billet ouvert », et la
   place qui se libère au billet clos ; `on conflict do nothing` sur `(match_id, seq)` ; la clause
   `where status = 'open' and net_cents is null` ; la clé du grand livre, **refusée et non avalée** ;
@@ -1340,7 +1385,19 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   `matches` remplie par quelqu'un qui répartit ses appels, et depuis `POST /api/match/:id/result`
   c'est en plus un règlement écrit sur chacune. Elle doit passer en magasin partagé avant la
   production. Les seaux sont séparés par route : renommer son personnage ne consomme pas le droit de
-  demander une partie, et l'inverse non plus.
+  demander une partie, et l'inverse non plus. **`GET /api/me` a désormais le sien, PARCE QU'ELLE
+  ÉCRIT** : cette énumération l'omettait, et c'est ce qui en faisait le meilleur levier d'épuisement
+  du bassin. Elle ne coûte au client qu'un GET sans corps, mais depuis la phase 03 `findOrCreate`
+  ouvre une transaction d'écriture — verrou `for update` sur la ligne `users`, deux soldes et trois
+  agrégats, du `begin` au `commit` — et retient tout ce temps un client du bassin de dix connexions.
+  Un seul onglet qui la martelait pouvait mettre en file le `POST .../renounce` d'un **autre** joueur
+  au-delà de sa fenêtre de dix secondes : sa mise restait au séquestre. Son seau est **séparé** et
+  plus large (soixante par minute contre douze), parce que le jeu la lit à la connexion, à la reprise
+  de session, après chaque renoncement et après chaque règlement. Deux dettes restent, et elles sont
+  hors de ce correctif : le seau est en mémoire, donc il ne borne un martèlement que **par instance**,
+  et `connectionTimeoutMillis: 5_000` fait qu'un bassin saturé plus de cinq secondes rend un 500 avant
+  même le contrôle de fenêtre. Le jeu, lui, n'a aucune reprise sur un renoncement perdu — il le **dit**
+  désormais au joueur, il ne le rejoue pas.
 - **Aucune base n'a jamais tourné.** L'index unique partiel sur les billets ouverts, la contrainte
   `name_key`, le comportement de `insert … on conflict do nothing`, la clause `where status =
   'open' and net_cents is null` qui arbitre l'unicité du règlement et, depuis la phase 02b, la clé

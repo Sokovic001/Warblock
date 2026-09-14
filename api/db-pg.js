@@ -271,12 +271,24 @@ function pgDb(connectionString) {
           // joueur le jour de son inscription. Il pourra le changer ensuite.
           let base = name, cle = nameKey(base), n = 1;
           while (!user) {
+            // UN POINT DE REPRISE AUTOUR DE L'INSERTION, ET IL EST LA CONDITION DU RÉESSAI. Dans un
+            // bloc transactionnel, une erreur avorte TOUT ce qui suit : la commande d'après sort en
+            // `25P02` (« current transaction is aborted ») et jamais en `23505`. Le test de code
+            // ci-dessous était donc faux au second tour, le `throw` repartait, la transaction était
+            // annulée et la route rendait 500 — sans compte et sans dotation. Et ce n'était pas un
+            // cas rare : Crossmint ne transporte pas de pseudo, donc TOUT nouveau compte se présente
+            // avec « Player », donc tout second compte créé heurtait `name_key`. Même geste que le
+            // `savepoint essai` d'`api/db-check.js` : ici on a besoin de connaître la contrainte qui
+            // refuse, c'est donc un point de reprise et pas un `on conflict do nothing`.
+            await client.query('savepoint pseudo');
             try {
               const ins = await client.query(
                 `insert into users (auth_id, email, name, name_key) values ($1,$2,$3,$4) returning ${COLS}`,
                 [authId, email, base, cle]);
               user = ins.rows[0];
+              await client.query('release savepoint pseudo');
             } catch (e) {
+              await client.query('rollback to savepoint pseudo');
               if (e && e.code === '23505' && String(e.constraint || '').includes('name_key')) {
                 n += 1;
                 const suffixe = String(n);
@@ -759,11 +771,19 @@ function pgDb(connectionString) {
           await client.query('commit');
           return { match: null, deja: ligneMatch(deja.rows[0]) || null };
         }
-        const engage = await ledgerSolde(client, L.compteEnjeu(matchId));
+        // UN COMPTE SE NOMME AVEC L'ID DE LA LIGNE, JAMAIS AVEC LE PARAMÈTRE D'URL. Postgres
+        // compare deux `bigint`, donc `/api/match/007/renounce` retrouve bien la ligne 7 ; mais
+        // « 007 » n'est pas un identifiant du grand livre, et `compteEnjeu` le refuse à juste titre
+        // — un identifiant de ligne est un entier positif sans zéro de tête. Nommer le séquestre
+        // avec le paramètre faisait donc LEVER `identifiant()` sur la seule route qui rende une
+        // mise, et le refus sortait en 500, ce que le chemin de l'argent s'interdit. La ligne
+        // relue est la seule source d'identifiant, exactement comme dans `reglerSequestre`.
+        const ligne = maj.rows[0];
+        const engage = await ledgerSolde(client, L.compteEnjeu(ligne.id));
         if (engage > 0) {
           try {
             await ledgerWrite(client, L.mouvementRemboursement({
-              userId, matchId, miseCents: engage }));
+              userId: ligne.user_id, matchId: ligne.id, miseCents: engage }));
           } catch (e) {
             if (!refusDuLivre(e)) throw e;
             // Tout est annulé, y compris la clôture : le billet repart `open`, le joueur peut
@@ -772,10 +792,10 @@ function pgDb(connectionString) {
             return { match: null, refus: 'livre', detail: e.code };
           }
         }
-        const balanceCents = await ledgerSolde(client, L.compteJoueur(userId));
-        const quarantineCents = await ledgerSolde(client, L.compteQuarantaine(userId));
+        const balanceCents = await ledgerSolde(client, L.compteJoueur(ligne.user_id));
+        const quarantineCents = await ledgerSolde(client, L.compteQuarantaine(ligne.user_id));
         await client.query('commit');
-        return { match: ligneMatch(maj.rows[0]), rembourseCents: engage > 0 ? engage : 0,
+        return { match: ligneMatch(ligne), rembourseCents: engage > 0 ? engage : 0,
                  balanceCents, quarantineCents };
       } catch (e) {
         await client.query('rollback').catch(() => {});

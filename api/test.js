@@ -106,6 +106,13 @@ function fakeDb(seed = []) {
   // Les deux seuls échecs du livre que l'appelant traduit en refus nommé, jamais en 500 : le miroir
   // de `refusDuLivre` de db-pg.js.
   const refusDuLivre = e => !!e && (e.code === '23505' || e.code === 'decouvert');
+  // COMPARER LES IDENTIFIANTS COMME LA BASE LES COMPARE, c'est-à-dire en `bigint` et pas en texte.
+  // `String(x.id) === String(matchId)` rendait `'007' !== '7'`, donc la doublure répondait 404 là où
+  // Postgres retrouve la ligne 7 — et elle masquait ainsi le seul défaut que ce chemin portait : le
+  // paramètre brut servait à nommer un compte du grand livre, qui le refuse, et la route de
+  // renoncement sortait en 500. Une doublure qui ne subit pas ce que la base fait prouve la
+  // doublure. Un identifiant illisible n'apparie rien, comme un `where id = $1` illisible.
+  const memeId = (a, b) => { try { return BigInt(a) === BigInt(b); } catch { return false; } };
   const soldeDe = compte => ledger.reduce(
     (s, l) => s + (l.compte_credit === compte ? l.montant_cents : 0)
                 - (l.compte_debit === compte ? l.montant_cents : 0), 0);
@@ -276,20 +283,20 @@ function fakeDb(seed = []) {
     async findMatch({ matchId, userId }) {
       // `user_id` fait partie de la recherche, pas d'une vérification après coup : un identifiant
       // deviné ne doit rien apprendre sur la partie de quelqu'un d'autre.
-      return matches.find(x => String(x.id) === String(matchId) && x.user_id === userId) || null;
+      return matches.find(x => memeId(x.id, matchId) && x.user_id === userId) || null;
     },
     // La marque « une partie a été jouée sur ce billet » : une écriture de STATUT, jamais de
     // montant, et sa clause imite celle du vrai pilote — `status = 'open' and first_result_at is
     // null`. Elle ne se pose donc qu'une fois, et un résultat renvoyé ne modifie pas la ligne.
     async markPlayed({ matchId, userId, at }) {
-      const m = matches.find(x => String(x.id) === String(matchId) && x.user_id === userId
+      const m = matches.find(x => memeId(x.id, matchId) && x.user_id === userId
                                   && x.status === 'open' && !x.first_result_at);
       if (!m) return { marque: false };
       m.first_result_at = at;
       return { marque: true };
     },
     async settleMatch(r) {
-      const m = matches.find(x => String(x.id) === String(r.matchId) && x.user_id === r.userId);
+      const m = matches.find(x => memeId(x.id, r.matchId) && x.user_id === r.userId);
       if (!m) return { match: null, deja: true };
       // La doublure imite la clause `where` de db-pg.js, et rien d'autre : `status = 'open' and
       // net_cents is null`. Un second règlement ne touche donc aucune ligne, et on rend celle qui
@@ -389,7 +396,7 @@ function fakeDb(seed = []) {
     // `stake_cents` : un séquestre vide veut dire que le livre n'a jamais engagé cette partie (une
     // ligne de la phase 02a), et on n'écrit alors rien.
     async renounceMatch({ matchId, userId, at }) {
-      const m = matches.find(x => String(x.id) === String(matchId) && x.user_id === userId);
+      const m = matches.find(x => memeId(x.id, matchId) && x.user_id === userId);
       if (!m || m.status !== 'open' || (m.net_cents !== undefined && m.net_cents !== null))
         return { match: null, deja: m || null };
       const engage = soldeDe(L.compteEnjeu(m.id));
@@ -742,6 +749,46 @@ await test('le martèlement d\'un pseudo est freiné', async () => {
     codes.push((await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { name: 'Nom' + i } })).code);
   assert.strictEqual(codes.filter(c => c === 429).length, 2, codes.join(','));
 });
+await test('GET /api/me A SON PROPRE SEAU, PARCE QU\'ELLE ÉCRIT', async () => {
+  // La route la plus chère à servir était la seule sans compteur : le contrôle de débit était placé
+  // APRÈS la branche `GET`, si bien que seuls PATCH et les quatre routes de partie en avaient un.
+  // Or `findOrCreate` ouvre une transaction d'ÉCRITURE — verrou `for update` sur la ligne `users`,
+  // deux soldes et trois agrégats, du `begin` au `commit` — et elle retient tout ce temps un client
+  // du bassin de dix connexions. Un seul onglet qui martèle un GET sans corps pouvait donc mettre en
+  // file le `POST .../renounce` d'un AUTRE joueur au-delà de sa fenêtre de dix secondes : sa mise
+  // restait au séquestre, et le jeu lui avait déjà affiché « LEAVE · REFUND STAKE ».
+  const app = appDe(fakeDb(), { limiterMe: makeLimiter({ max: 3, windowMs: 60_000 }) });
+  const codes = [];
+  for (let i = 0; i < 5; i++) codes.push((await appel(app, { token: 'ok:u1:Loic' })).code);
+  assert.deepStrictEqual(codes, [200, 200, 200, 429, 429], codes.join(','));
+  // ET LES SEAUX NE SE MANGENT PAS L'UN L'AUTRE, exactement comme `match:`, `trace:` et `result:`.
+  // Le seau des écritures de profil est intact : lire son profil ne doit pas empêcher de le
+  // changer, ni l'inverse.
+  const patch = await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { name: 'Neuf' } });
+  assert.strictEqual(patch.code, 200, JSON.stringify(patch.corps));
+  // Et celui d'un AUTRE joueur non plus : la clé porte son `authId`.
+  assert.strictEqual((await appel(app, { token: 'ok:u2:Autre' })).code, 200);
+});
+await test('le seau de lecture est SÉPARÉ de celui des écritures, et il est plus large', async () => {
+  // Deux seaux, deux compteurs. Le jeu appelle `Auth.sync()` à la connexion, à la reprise de
+  // session, après chaque renoncement et après chaque règlement : douze par minute serait jouable
+  // mais serré, et refuser une lecture de profil légitime coûte un écran de solde faux.
+  const db = fakeDb();
+  const app = appDe(db, { limiter: makeLimiter({ max: 1, windowMs: 60_000 }),
+                          limiterMe: makeLimiter({ max: 4, windowMs: 60_000 }) });
+  for (let i = 0; i < 4; i++)
+    assert.strictEqual((await appel(app, { token: 'ok:u1:Loic' })).code, 200, 'lecture ' + i);
+  assert.strictEqual((await appel(app, { token: 'ok:u1:Loic' })).code, 429);
+  // Le seau d'écriture n'a servi à rien pendant ces cinq lectures : il lui reste son unique jeton.
+  assert.strictEqual((await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { country: 'FR' } })).code, 200);
+  assert.strictEqual((await appel(app, { method: 'PATCH', token: 'ok:u1:Loic', body: { country: 'BE' } })).code, 429);
+  // Le seau par défaut du routeur est plus large que celui des écritures : c'est écrit dans
+  // `createApp`, et ce test le CONSTATE plutôt que de faire confiance au commentaire.
+  const large = appDe(fakeDb());
+  const codes = [];
+  for (let i = 0; i < 13; i++) codes.push((await appel(large, { token: 'ok:u1:Loic' })).code);
+  assert.ok(!codes.includes(429), 'douze lectures de profil d\'affilée doivent passer : ' + codes.join(','));
+});
 await test('le seau se vide avec le temps', () => {
   let t = 0;
   const allow = makeLimiter({ max: 2, windowMs: 1000, now: () => t });
@@ -845,8 +892,12 @@ await test('le billet livre la graine publique, jamais la secrète', async () =>
   assert.ok(!texte.includes(SECRETS[0]), 'la graine secrète a fui : ' + texte);
   assert.ok(!/secret/i.test(texte), texte);
   assert.deepStrictEqual(Object.keys(r.corps).sort(),
-    ['balanceCents', 'brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'quarantineCents',
+    ['balanceCents', 'brawler', 'expiresAt', 'id', 'mode', 'openedAt', 'quarantineCents', 'repris',
      'seats', 'teamSize', 'seed', 'stakeCents', 'status'].sort());
+  // `repris` PART AVEC LE BILLET, ET IL EST FAUX À L'OUVERTURE. Le jeu ne peut pas le déduire : un
+  // billet repris porte l'heure d'ouverture d'un sas précédent, donc le bouton QUITTER promettrait
+  // sur un chronomètre qui ne mesure pas l'âge de ce billet-là. Le serveur, lui, le sait déjà.
+  assert.strictEqual(r.corps.repris, false);
   // LES DEUX MONTANTS PARTENT AVEC LE BILLET, APRÈS LE DÉBIT : un aller-retour de moins pour le
   // jeu, et c'est la parole du serveur plutôt qu'une soustraction faite dans le navigateur.
   assert.strictEqual(r.corps.balanceCents, L.DOTATION_CENTS - r.corps.stakeCents);
@@ -881,19 +932,28 @@ await test('un corps chargé écrit exactement la même ligne qu\'un corps minim
   assert.deepStrictEqual(charge.db.matches, nu.db.matches);
   assert.deepStrictEqual(b.corps, a.corps);
 });
+// `repris` est le SEUL champ par lequel un rejeu se distingue du premier appel, et c'est une
+// exception écrite : il ne décrit pas le billet mais le CHEMIN qui l'a servi, et le jeu en a besoin
+// pour savoir que l'heure d'ouverture qu'il tient est celle d'un sas PRÉCÉDENT. Tout le reste de la
+// réponse doit rester indiscernable, et c'est ce que ce raccourci compare.
+const sansRepris = corps => { const { repris, ...reste } = corps; return reste; };
 await test('deux demandes d\'affilée rendent le même billet', async () => {
   const { db, app } = bancDeBillet();
   const un = await demander(app);
   const deux = await demander(app, { ...DEMANDE, clientKey: 'cle-2', mode: 'trio', stake: 10 });
   assert.strictEqual(deux.code, 200, 'un billet déjà ouvert n\'est pas une erreur, sinon un onglet fermé enferme le joueur');
-  assert.deepStrictEqual(deux.corps, un.corps, 'le billet ouvert est rendu tel quel, mode et mise compris');
+  assert.deepStrictEqual(sansRepris(deux.corps), sansRepris(un.corps),
+    'le billet ouvert est rendu tel quel, mode et mise compris');
+  assert.strictEqual(un.corps.repris, false, 'le premier appel ouvre : il ne reprend rien');
+  assert.strictEqual(deux.corps.repris, true, 'le second REPREND, et le jeu doit l\'apprendre');
   assert.strictEqual(db.matches.length, 1);
 });
 await test('la même clé rejouée rend la même réponse et n\'écrit pas de seconde ligne', async () => {
   const { db, app } = bancDeBillet();
   const un = await demander(app);
   const rejeu = await demander(app);
-  assert.deepStrictEqual(rejeu.corps, un.corps);
+  assert.deepStrictEqual(sansRepris(rejeu.corps), sansRepris(un.corps));
+  assert.strictEqual(rejeu.corps.repris, true, 'un rejeu de clé reprend le billet déjà ouvert');
   assert.strictEqual(db.matches.length, 1);
 });
 await test('après expiration, une nouvelle demande rend un nouveau billet et une autre graine', async () => {
@@ -1743,7 +1803,10 @@ await test('chaque requête rejouée deux fois : mêmes lignes, mêmes réponses
     const un = await envoi();
     const lignes = JSON.stringify(db.matches);
     const deux = await envoi();
-    assert.deepStrictEqual(deux.corps, un.corps, nom);
+    // `repris` mis à part, et l'exception est écrite là où elle naît, dans `app.js` : il décrit le
+    // CHEMIN qui a servi la réponse, pas le billet. Ce que l'idempotence promet reste entier — même
+    // identifiant, même graine, même mise, et la table n'a pas bougé d'un octet.
+    assert.deepStrictEqual(sansRepris(deux.corps), sansRepris(un.corps), nom);
     assert.strictEqual(JSON.stringify(db.matches), lignes, nom + ' : la table a bougé au rejeu');
     rejeux.push(nom);
   };
@@ -3121,8 +3184,12 @@ test('ledgerReconcile ne se plaint de rien quand tout s\'apparie, sur les cinq i
   // Une ligne OUVERTE : le séquestre porte la mise, et rien d'autre.
   const ouvert = { id: 2, user_id: 1, status: 'open', stake_cents: 50, net_cents: null };
   assert.deepStrictEqual(L.ledgerReconcile(ouvert, L.mouvementMise({ userId: 1, matchId: 2, miseCents: 50 })), []);
-  // Les quatre autres clôtures, séquestre vidé et aucun montant à retrouver.
-  for (const status of ['expired', 'rejected', 'abandoned', 'renounced']) {
+  // Les trois autres clôtures, séquestre vidé vers la contrepartie et aucun montant à retrouver.
+  // `renounced` N'EST PAS DE CETTE BOUCLE : un billet renoncé dont le séquestre part chez la maison
+  // en motif `gain` est un état que le code ne produit jamais — c'est la seule issue qui RENDE la
+  // mise — et l'y laisser aurait fait asserter qu'il ne produit aucun grief, ce que la règle de
+  // destination refuse désormais, à raison. Son cas légitime est juste en dessous.
+  for (const status of ['expired', 'rejected', 'abandoned']) {
     const clos = { id: 3, user_id: 1, status, stake_cents: 50, net_cents: null };
     const vide = L.mouvementMise({ userId: 1, matchId: 3, miseCents: 50 })
       .concat(L.mouvementGain({ matchId: 3, miseCents: 50, grossCents: 0, feeCents: 0, netCents: 0 }));
@@ -3171,6 +3238,72 @@ test('ledgerReconcile attrape un montant JUSTE posé sur le MAUVAIS compte', () 
   // 4. Le bon compte, le mauvais montant : le net d'une AUTRE partie.
   const faux = { ...ligne, net_cents: ligne.net_cents + 1, fee_cents: ligne.fee_cents - 1 };
   assert.strictEqual(L.ledgerReconcile(faux, livre).length, 2);
+
+  // 5. LE REMBOURSEMENT MAL DIRIGÉ, et c'est la sixième issue de la phase : elle n'avait qu'un cas
+  //    positif. Le joueur a renoncé DANS sa fenêtre, sa mise part chez la maison au lieu de revenir
+  //    sur son compte disponible — le livre boucle, le séquestre est vide, `net_cents` est nul.
+  const renonce = { id: 7, user_id: 1, status: 'renounced', stake_cents: 50, net_cents: null };
+  const rendu = L.mouvementMise({ userId: 1, matchId: 7, miseCents: 50 })
+    .concat(L.mouvementRemboursement({ userId: 1, matchId: 7, miseCents: 50 }));
+  assert.deepStrictEqual(L.ledgerReconcile(renonce, rendu), [], 'le cas légitime, pour référence');
+  const vole = rendu.map(t => t.motif === 'remboursement'
+    ? L.transfert(t.motif, t.reference, t.compteDebit, L.MAISON_CONTREPARTIE, t.montantCents) : t);
+  assert.strictEqual(totalDe(vole), 0, 'le livre boucle quand même : c\'est le piège');
+  const g5 = L.ledgerReconcile(renonce, vole);
+  assert.ok(g5.some(x => /joueur:1:disponible/.test(x)), g5.join(' | '));
+  assert.ok(g5.some(x => /maison:contrepartie/.test(x)), g5.join(' | '));
+});
+
+test('ledgerReconcile regarde OÙ le séquestre est parti, et pas seulement qu\'il est vide', () => {
+  // LA MOITIÉ AVEUGLE DU PRÉDICAT. Sur une ligne close SANS règlement — `expired`, `abandoned`,
+  // `rejected`, `renounced` — `net_cents` est nul, donc tout le bloc de comparaison des montants
+  // était sauté : la réconciliation vérifiait que le séquestre était vide, jamais où il était
+  // parti. « Ouvrir un billet, laisser expirer, se faire rembourser » se réconciliait en vert,
+  // c'est-à-dire très exactement le vol que la fenêtre de renoncement existe pour fermer.
+  const totalDe = l => { const s = new Set(); for (const t of l) { s.add(t.compteDebit); s.add(t.compteCredit); }
+                         let n = 0; for (const c of s) n += L.soldeDe(l, c); return n; };
+
+  // 1. Un billet PÉRIMÉ dont le séquestre revient chez le joueur : le veilleur ne rembourse pas.
+  const perime = { id: 11, user_id: 1, status: 'expired', stake_cents: 50, net_cents: null };
+  const rembourse = L.mouvementMise({ userId: 1, matchId: 11, miseCents: 50 })
+    .concat([L.transfert('gain', '11', L.compteEnjeu(11), L.compteJoueur(1), 50)]);
+  assert.strictEqual(totalDe(rembourse), 0, 'le livre boucle : c\'est le piège');
+  assert.strictEqual(L.soldeDe(rembourse, L.compteEnjeu(11)), 0, 'et le séquestre est bien vide');
+  const g1 = L.ledgerReconcile(perime, rembourse);
+  assert.ok(g1.some(x => /joueur:1:disponible/.test(x) && /maison:contrepartie/.test(x)), g1.join(' | '));
+
+  // 2. Un billet RENONCÉ dont la mise revient à QUELQU'UN D'AUTRE. Le compte crédité existe, le
+  //    montant est juste, le zéro global tient : seule la comparaison au `user_id` de la ligne
+  //    peut le voir.
+  const renonce = { id: 12, user_id: 1, status: 'renounced', stake_cents: 50, net_cents: null };
+  const voisin = L.mouvementMise({ userId: 1, matchId: 12, miseCents: 50 })
+    .concat([L.transfert('remboursement', '12', L.compteEnjeu(12), L.compteJoueur(9), 50)]);
+  assert.strictEqual(totalDe(voisin), 0);
+  const g2 = L.ledgerReconcile(renonce, voisin);
+  assert.ok(g2.some(x => /joueur:9:disponible/.test(x)), g2.join(' | '));
+
+  // 3. Un billet REFUSÉ dont le séquestre repart chez le joueur : même règle que le périmé.
+  const refuse = { id: 13, user_id: 4, status: 'rejected', stake_cents: 100, net_cents: null };
+  const repart = L.mouvementMise({ userId: 4, matchId: 13, miseCents: 100 })
+    .concat([L.transfert('gain', '13', L.compteEnjeu(13), L.compteJoueur(4), 100)]);
+  assert.strictEqual(totalDe(repart), 0);
+  assert.ok(L.ledgerReconcile(refuse, repart).length > 0);
+
+  // 4. Et un remboursement sur une issue qui ne rend PAS la mise est nommé pour ce qu'il est.
+  const abandon = { id: 14, user_id: 1, status: 'abandoned', stake_cents: 50, net_cents: null };
+  const melange = L.mouvementMise({ userId: 1, matchId: 14, miseCents: 50 })
+    .concat(L.mouvementRemboursement({ userId: 1, matchId: 14, miseCents: 50 }));
+  const g4 = L.ledgerReconcile(abandon, melange);
+  assert.ok(g4.some(x => /remboursement/.test(x)), g4.join(' | '));
+
+  // LE CONTRÔLE, sans lequel les quatre ci-dessus ne mesureraient rien : les mêmes issues, écrites
+  // par les mouvements du fichier, ne produisent aucun grief.
+  for (const status of ['expired', 'rejected', 'abandoned']) {
+    const clos = { id: 15, user_id: 2, status, stake_cents: 50, net_cents: null };
+    const vide = L.mouvementMise({ userId: 2, matchId: 15, miseCents: 50 })
+      .concat(L.mouvementGain({ matchId: 15, miseCents: 50, grossCents: 0, feeCents: 0, netCents: 0 }));
+    assert.deepStrictEqual(L.ledgerReconcile(clos, vide), [], status);
+  }
 });
 
 test('ledgerReconcile attrape un billet sans engagement et un engagement sans billet', () => {
@@ -3351,7 +3484,9 @@ await test('LE TEST QUI DÉCIDE : un POST rejoué avec la MÊME clientKey rend l
   assert.strictEqual(a.corps.balanceCents, L.DOTATION_CENTS - a.corps.stakeCents);
 
   const b = await demander(app);
-  assert.deepStrictEqual(b.corps, a.corps, 'un rejeu doit être indiscernable du premier appel');
+  assert.deepStrictEqual(sansRepris(b.corps), sansRepris(a.corps),
+    'un rejeu doit être indiscernable du premier appel, `repris` mis à part');
+  assert.strictEqual(b.corps.repris, true, 'et il dit par quel chemin il a été servi');
   assert.strictEqual(db.matches.length, 1);
   assert.strictEqual(misesDe(db).length, 1, 'le POST rejoué a débité une seconde fois');
   assert.strictEqual(soldeJoueur(db), L.DOTATION_CENTS - a.corps.stakeCents);
@@ -3976,6 +4111,82 @@ await test('les refus du renoncement sont NOMMÉS, jamais un 500, et aucun n\'en
     assert.strictEqual((await appel(app, { method: 'POST', path: chemin, token: 'ok:u1:Loic' })).code, 404, chemin);
   assert.strictEqual((await appel(app, { method: 'POST', path: '/api/match/1/renounce' })).code, 401);
   reconcilier(db, 'les refus du renoncement');
+});
+
+await test('UN ZÉRO DE TÊTE DANS LE CHEMIN N\'ATTEINT PLUS RIEN, et le grand livre se nomme sur la LIGNE', async () => {
+  // Deux défauts en un, et le second était masqué par la doublure. (1) Les trois motifs de route
+  // acceptaient `007` : Postgres convertit ce texte en `bigint` 7, donc `findMatch` retrouvait bien
+  // la ligne — mais `renounceMatch` nommait ensuite le séquestre avec le PARAMÈTRE reçu, et
+  // `compteEnjeu('007')` lève à juste titre (un identifiant de ligne est un entier positif sans
+  // zéro de tête). L'exception n'était pas un refus du livre : elle remontait, et la seule route
+  // qui rende une mise sortait en 500. (2) La doublure comparait les identifiants en TEXTE, donc
+  // elle répondait 404 à `007` là où la base répond 200 : elle prouvait la doublure.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  let vu500 = 0;
+  app.onError = () => { vu500++; };
+  const b = await demander(app);
+  assert.strictEqual(b.corps.id, '1');
+  horloge.t = Date.parse(b.corps.openedAt) + 1000;
+
+  // LA CEINTURE : un `bigserial` ne produit jamais de zéro de tête, donc un chemin qui en porte un
+  // n'est pas une route. Il est refusé avant l'authentification et avant la base — même raison que
+  // le `[1-9][0-9]*` de `COMPTE_RE_SQL`, écrite au même endroit.
+  for (const suffixe of ['renounce', 'result', 'trace']) {
+    const r = await appel(app, { method: 'POST', path: `/api/match/007/${suffixe}`,
+                                 token: 'ok:u1:Loic', body: {} });
+    assert.strictEqual(r.code, 404, suffixe + ' : ' + JSON.stringify(r.corps));
+    assert.strictEqual(r.corps.erreur, 'Route inconnue.', suffixe);
+  }
+  assert.strictEqual(db.matches[0].status, 'open', 'un chemin refusé n\'a rien clos');
+  assert.strictEqual(vu500, 0, 'un zéro de tête est sorti en 500');
+
+  // LES BRETELLES : la couche base, appelée directement avec le paramètre tel que la route l'aurait
+  // capturé. Elle doit nommer ses comptes sur l'`id` DE LA LIGNE relue, jamais sur ce qu'on lui a
+  // passé — c'est le patron que `reglerSequestre` applique déjà avec `ligne.id`.
+  const avant = soldeEnjeu(db, 1);
+  assert.strictEqual(avant, b.corps.stakeCents, 'le séquestre porte la mise');
+  const r = await db.renounceMatch({ matchId: '00' + b.corps.id, userId: db.users[0].id,
+                                     at: new Date(horloge.t) });
+  assert.ok(r.match, 'la ligne 1 doit être retrouvée, comme Postgres la retrouve');
+  assert.strictEqual(r.rembourseCents, b.corps.stakeCents, 'la mise n\'a pas été rendue');
+  assert.strictEqual(soldeEnjeu(db, 1), 0, 'le séquestre n\'a pas été vidé');
+  reconcilier(db, 'un renoncement demandé avec un zéro de tête');
+});
+
+test('GARDE TEXTUELLE : renounceMatch nomme ses comptes sur la ligne, jamais sur le paramètre', () => {
+  // `db-pg.js` n'est exécuté par aucune suite — c'est la dette écrite de la phase — donc ce qu'on
+  // peut encore en dire, on le dit par le texte. Le défaut se redéferait en une seule frappe.
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'db-pg.js'), 'utf8');
+  const rm = src.slice(src.indexOf('    async renounceMatch('), src.indexOf('    async lastRenounced('));
+  assert.ok(rm.length > 600, 'renounceMatch n\'a pas été retrouvée');
+  const code = rm.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(code.includes('const ligne = maj.rows[0];'), 'la ligne relue doit être nommée une fois');
+  assert.ok(code.includes('L.compteEnjeu(ligne.id)'), 'le séquestre se nomme avec l\'id de la ligne');
+  for (const interdit of ['compteEnjeu(matchId)', 'compteJoueur(userId)', 'compteQuarantaine(userId)',
+                          'matchId, miseCents', 'ligneMatch(maj.rows[0])'])
+    assert.ok(!code.includes(interdit), `renounceMatch nomme un compte avec le paramètre : ${interdit}`);
+});
+
+test('GARDE TEXTUELLE : la création de compte réessaie SOUS UN POINT DE REPRISE', () => {
+  // Sans le `savepoint`, le réessai de pseudo est mort-né : dans un bloc transactionnel, toute
+  // commande qui suit une erreur sort en `25P02` et jamais en `23505`, donc le test de code était
+  // faux, la transaction partait en `rollback`, et le SECOND compte jamais créé sortait en 500 —
+  // sans compte et sans dotation. Et ce n'était pas rare : Crossmint ne transporte pas de pseudo,
+  // donc tout nouveau compte se présente avec le même `NAME.fallback`, donc la même `name_key`.
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'db-pg.js'), 'utf8');
+  const fc = src.slice(src.indexOf('    async findOrCreate('), src.indexOf('    async updateProfile('));
+  assert.ok(fc.length > 800, 'findOrCreate n\'a pas été retrouvée');
+  const code = fc.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  assert.ok(code.includes("await client.query('savepoint pseudo');"), 'le point de reprise a disparu');
+  assert.ok(code.includes("await client.query('rollback to savepoint pseudo');"),
+    'un point de reprise qu\'on n\'annule pas ne protège rien');
+  assert.ok(code.includes("await client.query('release savepoint pseudo');"));
+  // Et il ENTOURE l'insertion : posé après, il ne protégerait rien.
+  assert.ok(code.indexOf("savepoint pseudo") < code.indexOf('insert into users'), code);
+  // Le repli du fournisseur est bien le même pour tout le monde : c'est ce qui rend la collision
+  // certaine plutôt que rare, et c'est pour cela que ce chemin doit marcher du premier coup.
+  assert.strictEqual(C.nameOr('', C.NAME.fallback), C.NAME.fallback);
+  assert.strictEqual(C.nameKey(C.NAME.fallback), C.nameKey(C.nameOr('', C.NAME.fallback)));
 });
 
 await test('LE VEILLEUR PASSÉ CENT FOIS : il ne rembourse jamais, il ne vide jamais deux fois, et chaque séquestre part chez la maison', async () => {

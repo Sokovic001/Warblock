@@ -563,10 +563,20 @@ Trois conséquences précises, parce que **deux économies vivent sur le même �
   aller-retour de moins, et c'est la parole du serveur. Une garde textuelle interdit tout
   `wallet -=`, `wallet +=` et toute écriture de `wallet` depuis une réponse serveur en dehors
   d'`applyAccount`.
-- Le bouton QUITTER du sas dit ce que partir coûte, en lisant `WBCore.renonciationOuverte` avec le
-  chronomètre du sas. Le chronomètre du client est **en avance** sur celui du serveur (la latence
-  joue dans ce sens), donc l'écran ferme la promesse un peu **avant** que le serveur ne la ferme :
-  il ne promet jamais un remboursement que le serveur refusera.
+- Le bouton QUITTER du sas dit ce que partir coûte, en lisant `WBCore.renonciationOuverte` avec une
+  **horloge monotone posée au clic**, et non avec le chronomètre du sas. *Corrigé après coup, et la
+  formulation d'origine est conservée ici parce qu'elle était fausse pour trois raisons, toutes
+  payées en mises perdues.* (a) Le chronomètre du sas compte des **tics de `setInterval`** : un
+  onglet en arrière-plan les bride à 1 Hz, donc il retarde sur l'horloge du serveur — et il retarde
+  dans le sens qui fait promettre un remboursement refusé. (b) La latence ne joue pas que dans un
+  sens : le vol **aller** de la demande de billet nous avantage, mais le vol **retour** du
+  renoncement nous désavantage, puisque le serveur date la fenêtre à SA réception. L'écran ferme
+  donc sa promesse une marge nommée — `RENONCE_MARGE_ECRAN_MS` — avant le serveur, et la propriété
+  ne tient que tant que ce vol retour reste sous la marge. (c) Un billet **repris** porte l'heure
+  d'ouverture d'un sas précédent : aucune horloge du sas courant ne mesure son âge, et l'écran ne
+  promet donc plus rien dès qu'il en tient un. C'est pour cela que `POST /api/match` rend `repris`.
+  Enfin, un renoncement refusé n'est plus avalé : le solde se redemande dans les deux cas, et le
+  joueur lit ce qu'est devenue sa mise.
 - Un refus `fonds` **arrête le sas**, affiche un message, et ne lance **aucune** partie. C'est une
   distinction à écrire, parce qu'elle contredit à moitié une règle de la 02a : une panne
   **silencieuse** (réseau, réponse illisible) laisse le jeu partir hors ligne comme avant — « un

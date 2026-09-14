@@ -146,6 +146,65 @@ async function main() {
     });
 
     // ---------------------------------------------------------------------------------------
+    await cas('DEUX COMPTES CRÉÉS D\'AFFILÉE : le second obtient un pseudo libre ET sa dotation', async () => {
+      // LE SEUL HARNAIS QUI PUISSE VOIR CE DÉFAUT-LÀ. Le scénario n'a rien d'exotique : c'est le
+      // second joueur qui s'inscrit. `identityFromClaims` rend toujours `name: ''` — Crossmint ne
+      // transporte pas de pseudo — donc `C.nameOr('', NAME.fallback)` rend « Player » pour TOUT
+      // nouveau compte, et `nameKey` rend « player » pour tous. Le second heurte donc `name_key` à
+      // coup sûr.
+      //
+      // Ce que la doublure d'`api/test.js` ne peut pas reproduire : elle résout la collision par un
+      // `while (users.some(...))` en mémoire, donc elle ne SUBIT jamais un refus d'insertion. Or
+      // dans un bloc transactionnel, une erreur avorte tout ce qui suit — la commande d'après sort
+      // en `25P02` et jamais en `23505` — si bien que le réessai de pseudo sortait en panne non
+      // nommée, donc en 500, sans compte et sans dotation. Le `savepoint` de `db-pg.js` est la
+      // réponse, et c'est ici, et seulement ici, qu'elle se vérifie.
+      //
+      // `db-check.js` éprouvait jusqu'ici la CONTRAINTE `name_key` sans jamais faire tourner la
+      // fonction qui la heurte. C'est la réserve écrite de la phase 03, appliquée à elle-même.
+      const base = pgDb(URL_BASE);
+      const repli = C.nameOr('', C.NAME.fallback);
+      try {
+        const un = await base.findOrCreate({ authId: 'sans-pseudo-1', email: 'p1@x.test',
+                                             name: repli, nameKey: C.nameKey, at: MAINTENANT });
+        const deux = await base.findOrCreate({ authId: 'sans-pseudo-2', email: 'p2@x.test',
+                                               name: repli, nameKey: C.nameKey, at: MAINTENANT });
+        if (un.user.name !== repli) throw new Error(`le premier s'appelle ${un.user.name}`);
+        if (deux.user.name !== repli + '2') {
+          throw new Error(`le second s'appelle ${deux.user.name} au lieu de ${repli}2`);
+        }
+        if (deux.user.id === un.user.id) throw new Error('les deux comptes n\'en font qu\'un');
+        // ET SA DOTATION : un compte sans dotation est un joueur qui ne peut rien faire et que rien
+        // ne réparerait, puisqu'il ne sera plus jamais créé.
+        for (const [quoi, r] of [['premier', un], ['second', deux]]) {
+          if (r.balanceCents !== L.DOTATION_CENTS) {
+            throw new Error(`le ${quoi} compte porte ${r.balanceCents} au lieu de ${L.DOTATION_CENTS}`);
+          }
+        }
+        // Et un TROISIÈME, pour que le suffixe ne soit pas une coïncidence à deux.
+        const trois = await base.findOrCreate({ authId: 'sans-pseudo-3', email: 'p3@x.test',
+                                                name: repli, nameKey: C.nameKey, at: MAINTENANT });
+        if (trois.user.name !== repli + '3') {
+          throw new Error(`le troisième s'appelle ${trois.user.name} au lieu de ${repli}3`);
+        }
+        // Une reconnexion ne crée rien et ne redote rien : elle retrouve le même compte.
+        const encore = await base.findOrCreate({ authId: 'sans-pseudo-2', email: 'p2@x.test',
+                                                 name: repli, nameKey: C.nameKey, at: MAINTENANT });
+        if (encore.user.id !== deux.user.id) throw new Error('une reconnexion a créé un second compte');
+        const dots = await client.query(
+          `select count(*) as n from ledger_entries where motif = 'dotation'`);
+        if (Number(dots.rows[0].n) !== 3) {
+          throw new Error(`${dots.rows[0].n} dotations écrites au lieu de trois`);
+        }
+      } finally {
+        await base.close().catch(() => {});
+        await client.query(
+          `delete from ledger_entries where reference in (select id::text from users where auth_id like 'sans-pseudo-%')`);
+        await client.query(`delete from users where auth_id like 'sans-pseudo-%'`);
+      }
+    });
+
+    // ---------------------------------------------------------------------------------------
     await cas('un seul billet ouvert : l\'index PARTIEL refuse le second, et libère la place au premier clos', async () => {
       await client.query('begin');
       const u = await creerJoueur(client, 'Ouvert');

@@ -296,6 +296,32 @@ le sas **pendant que la demande de billet est encore en vol**. Le serveur ouvre 
 débite ; personne ne renonce pour lui, et la mise reste au séquestre jusqu'à l'expiration. Le module
 renonce donc au billet qui arrive en retard, sur sa propre génération de requête.
 
+*Ce que la recette a trouvé ensuite, et pourquoi le raisonnement ci-dessus était juste et la mise en
+œuvre fausse.* « Le client est toujours en avance » était affirmé sur un chronomètre qui ne mesure
+pas le temps : `W.t` avance par tics de `setInterval(waitTick, 100)`, et les navigateurs brident ces
+tics à 1 Hz dans un onglet caché. Vingt secondes réelles n'y faisaient avancer `W.t` que de deux, le
+bouton promettait « LEAVE · REFUND STAKE », le serveur refusait en `409 fenetre_close`, et le jeu
+avalait ce refus en silence. La promesse se lit désormais sur `performance.now() − W.clic` — une
+horloge monotone, parce qu'un changement d'heure système n'a pas à décider d'un remboursement — et
+`W.t` reste ce qu'il est, le chronomètre de la **mise en scène** : le passer en temps réel ferait
+démarrer la partie sans le joueur au retour d'un onglet caché.
+
+Deux autres termes manquaient à l'argument, et chacun coûte la même mise. **La latence ne joue pas
+que dans un sens** : le vol aller de la demande de billet nous avantage, le vol retour du
+renoncement nous désavantage, puisque le serveur date la fenêtre à sa réception. L'écran ferme donc
+sa promesse une marge nommée avant le serveur, `RENONCE_MARGE_ECRAN_MS`, et la propriété tient tant
+que ce vol retour reste sous la marge — écrit, plutôt qu'affirmé sans réserve. Et **un billet REPRIS
+porte l'heure d'ouverture d'un sas précédent** : partir hors fenêtre garde le billet en main, un
+second clic sur la table le fait resservir tel quel, le nouveau sas repart de zéro, et aucune
+horloge de ce sas-là ne mesure l'âge du billet. Le serveur connaissait déjà la réponse — il calculait
+`repris` sur ses trois chemins — il ne la disait pas au client.
+
+Le test qui prétendait tenir la propriété était **vrai par construction** : il n'injectait qu'un
+`openedAt` décalé vers l'avant, c'est-à-dire le seul des deux vols qui joue dans le bon sens, et le
+banc du libellé fabriquait un `W` de deux champs où le temps réel valait le chronomètre par
+définition. Aucune valeur de latence ne pouvait le faire échouer, pas même 10⁹. C'est le patron du
+harnais qui recopiait les expressions de `faits`, et le journal l'a maintenant payé deux fois.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes

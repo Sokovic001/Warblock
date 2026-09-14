@@ -1315,6 +1315,25 @@ const WBCore = (function(){
   function renonceFenetreS(){
     return Math.floor(LOBBY.wait / LOBBY.pressureMax + LOBBY.dropIn) - RENONCE_MARGE_S;
   }
+  // ---- LA MARGE DE L'ÉCRAN, ET ELLE N'EST PAS LA MÊME QUE CELLE CI-DESSUS.
+  //
+  // `RENONCE_MARGE_S` couvre le vol ALLER de la demande de billet, qui joue dans le bon sens :
+  // `opened_at` est postérieur au clic, donc le serveur voit moins de temps écoulé que le client.
+  // Il restait un second vol, et celui-là joue dans le MAUVAIS sens : la requête de renoncement
+  // met elle aussi du temps à arriver, et le serveur date la fenêtre à SA réception. Un joueur qui
+  // clique à 9,9 s sur un réseau mobile où le POST met 400 ms se voit refuser par un serveur qui
+  // compte 10,27 s — après un bouton qui promettait « LEAVE · REFUND STAKE ».
+  //
+  // L'écran ferme donc sa promesse une marge d'aller-retour AVANT le serveur, au lieu de la fermer
+  // au même instant. Le joueur perd une seconde et demie sur dix d'une fenêtre où il peut de toute
+  // façon repartir ; l'autre côté de l'arbitrage est une mise perdue en silence, et c'est celui-là
+  // qui coûte de l'argent. La propriété « l'écran ne promet jamais ce que le serveur refusera »
+  // tient donc tant que le vol retour reste sous cette marge, et elle est écrite ici pour qu'on ne
+  // la croie pas inconditionnelle.
+  //
+  // Elle s'ajoute au temps ÉCOULÉ, jamais à `openedAt` : un `openedAt` positif éloigne l'ouverture
+  // dans le futur et ÉLARGIT la fenêtre, ce qui est exactement l'inverse de ce qu'on veut.
+  const RENONCE_MARGE_ECRAN_MS = 1500;
   // PURE : elle ne lit aucune horloge, elle la REÇOIT. C'est ce qui permet au sas de l'appeler avec
   // son propre chronomètre et au serveur avec le sien, sans que l'un ait à deviner l'autre. Le
   // chronomètre du client est en AVANCE sur celui du serveur, donc l'écran ferme la promesse un peu
@@ -2482,12 +2501,23 @@ const WBCore = (function(){
     return REFUS_SAS.includes(code) ? code : null;
   }
   // Ce qu'on montre au joueur, et rien de plus. Même doctrine qu'`authMessage` : on dit ce qu'il
-  // peut faire, jamais le détail technique. Aucun de ces trois cas ne laisse le lobby mort — dans
-  // les trois, rien n'a été débité et le joueur peut retenter.
+  // peut faire, jamais le détail technique. Aucun des trois refus du SAS ne laisse le lobby mort —
+  // dans les trois, rien n'a été débité et le joueur peut retenter.
+  //
+  // `fenetre_close` N'EST PAS DE CEUX-LÀ, et c'est pour cela qu'il a son cas ici sans être dans
+  // `REFUS_SAS` : il n'arrive pas en réponse à une demande de billet, il arrive en réponse à un
+  // RENONCEMENT, et sa conséquence est de l'argent. Le jeu l'avalait en silence — un `if(r.ok)` et
+  // rien d'autre — donc le joueur revenait au lobby persuadé d'avoir été remboursé, avec une mise
+  // au séquestre et un billet encore jouable côté serveur. Une mise qui disparaît sans un mot est
+  // le pire des deux mondes.
   function refusMessage(code, data) {
     const d = data || {};
     if (code === 'fonds')  return 'Not enough credits for this table. Pick a smaller buy-in.';
     if (code === 'livre')  return 'That entry could not be recorded. Nothing was charged — try again.';
+    if (code === 'fenetre_close')
+      return 'Too late to get that buy-in back — the room had already started. Your entry still counts.';
+    if (code === 'billet_clos')
+      return 'That entry was already closed, so there was nothing left to give back.';
     if (code === 'renonce_recent') {
       const s = Number(d.windowSeconds);
       const n = Number.isFinite(s) && s > 0 ? Math.ceil(s) : renonceFenetreS();
@@ -2858,7 +2888,7 @@ const WBCore = (function(){
   }
   return { MAP, PLAYERS, BOXES, MODES, GAMES, RESPAWN, RESPAWN_SHIELD, LIVES, livesFor, ONLINE, NAME, EMOTES, EMOTE_WHEEL, EMOTE, validEmote, avatarList, validAvatar, sanitizeName, validName, nameKey, nameOr,
            AUTH, AUTH_STEPS, crossmintEnv, crossmintApi, authUrl, cleanEmail, validEmail, otpDigits, otpReady,
-           authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, RENONCE_MARGE_S, renonceFenetreS, renonciationOuverte, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, HOLD_REPEAT, BRAWLERS, BRAWLER_IDS,
+           authNext, jwtExpiry, sessionLive, refreshDelay, nextRefresh, authMessage, applyAccount, MUSIC, tension, beatTime, CHAT, botLine, sanitizeChat, QUALITY, guessTier, nextTier, preset, LOBBY, joinRate, seatsAt, fillTime, RENONCE_MARGE_S, RENONCE_MARGE_ECRAN_MS, renonceFenetreS, renonciationOuverte, onlineTotal, queueFor, playersInGame, pickWeighted, winAmount, modeLabel, makeWinEvent, waitEstimate, CASHOUT, gameOf, cents, LOOT_GOLD, PROPS, propKind, CRIT, critWindow, critShot, cashoutReady, cashoutPayout, bucketAfterKill, teamPayout, RAKE, START_WALLET, GRACE, TIERS, CUBE, BOX_HP, HEAL, HEART, BOX_DROP, boxDrop, BOT, HOLD_REPEAT, BRAWLERS, BRAWLER_IDS,
            SMOKE_READY, SMOKE, smokeStart, smokeTick, canThrowSmoke, smokeThrown, smokeRoom, smokePicked, smokeThrowDist, smokeLanding, smokeCoversThrower, smokeHoldAim, smokeHoldDist,
            smokeRadius, segmentHitsDisc, smokeSeeThrough, smokeWindowLeft, smokeCover, smokeSightBlocked,
            SIM, simSteps, SPEED, derivedSpeed, makeRng, makeNoise, generateMap, generateBiomes, BIOMES, BIOME_COUNT, BLOCKING, payout, tierFor, maxHp, dmgMult, hexDamage, botAimError,
@@ -4347,6 +4377,24 @@ const Auth=(function(){
     if(p.quarantine!==null) quarantine=p.quarantine;
     renderProfile(); renderWallet(); render();
   }
+  // LES DEUX MONTANTS QUE LE SERVEUR REND AVEC LE BILLET, ET RIEN D'AUTRE. `POST /api/match` les
+  // livre apres le debit, et c'est la parole du serveur : sans ce point, l'ecran gardait le solde
+  // d'avant la mise jusqu'au prochain reglement, et les tables restaient allumees alors que le
+  // serveur repondait deja `409 fonds`. Le corps de ce 409 porte lui aussi le solde reel, et c'est
+  // lui qui doit eteindre la table au lieu de laisser le joueur recliquer.
+  //
+  // POURQUOI PAS `adopter` : un billet n'est pas un compte. `applyAccount` remet les statistiques a
+  // zero sur un objet qui n'en porte pas — c'est une regle voulue et testee, une statistique fausse
+  // ne redescendrait jamais autrement — et un billet n'en porte aucune. Les compteurs du lobby
+  // tomberaient donc a zero a chaque entree dans le sas. Le seul point de conversion reste
+  // `applyAccount`, et un montant ABSENT rend `null` et ne s'ecrit pas : un billet sans montants —
+  // le repli de la 02a — n'ecrit rien du tout.
+  function adopterMontants(data){
+    const p=C.applyAccount(profile,data,AVATARS);
+    if(p.wallet!==null) wallet=p.wallet;
+    if(p.quarantine!==null) quarantine=p.quarantine;
+    renderWallet();
+  }
   async function sync(){
     if(!has()||!ACCOUNT.api) return;
     const r=await call(mine('/api/me'),{headers:{authorization:'Bearer '+session.jwt}});
@@ -4448,7 +4496,7 @@ const Auth=(function(){
     if(C.sessionLive(s.jwt)){ plan(); render(); sync(); }
     else renew();
   }
-  return { wire, restore, pushProfile, signOut, online, send, sync };
+  return { wire, restore, pushProfile, signOut, online, send, sync, montants:adopterMontants };
 })();
 Auth.wire(); Auth.restore();
 // ---------- le billet de partie, le rapport, et le chemin de secours ----------
@@ -4485,6 +4533,11 @@ const Match=(function(){
   // donc il previent, et c'est l'ecran qui arrete le sas et affiche le message.
   let refuse=null;
   function surRefus(fn){ refuse=fn; }
+  // Et ce qu'il doit faire d'un RENONCEMENT refuse, qui n'est pas la meme chose : le sas n'existe
+  // deja plus, il n'y a rien a arreter, mais il y a une mise dont le joueur croit qu'elle lui est
+  // revenue. Meme discipline — le module previent, l'ecran parle.
+  let echoue=null;
+  function surRenoncementRefuse(fn){ echoue=fn; }
   // La cle d'idempotence, tiree par le client : sans elle, un POST dont la reponse se perd est
   // indistinguable d'un POST jamais arrive. Une cle NEUVE par tentative, comme l'API le demande.
   function cleNeuve(){
@@ -4521,6 +4574,11 @@ const Match=(function(){
       // billet — mais dans le second, l'ecran arrete le sas au lieu de le laisser filer.
       const refus=C.refusDuBillet(r.status,r.data);
       step=C.matchFlow(step,r.status?'echec':'delai');
+      // LE CORPS DU REFUS PORTE LE MONTANT REEL, et c'est lui qui doit eteindre la table. Sans
+      // cela, l'ecran gardait un montant que le serveur venait de contredire, le joueur recliquait
+      // la meme table, et il reprenait le meme refus en boucle. Un refus qui ne porte aucun montant
+      // — `livre`, `renonce_recent` — n'ecrit rien : `applyAccount` rend alors `null`.
+      Auth.montants(r.data);
       if(refus&&refuse) refuse(refus,r.data);
       return;
     }
@@ -4528,8 +4586,19 @@ const Match=(function(){
     // rien faire. `seedFor` est deja le juge de cette question, on ne lui invente pas un double.
     if(C.seedFor(r.data,null)===null||!r.data.id){ step=C.matchFlow(step,'illisible'); return; }
     ticket=r.data;
+    // LE SOLDE ARRIVE AVEC LE BILLET, APRES LE DEBIT DE LA MISE. C'est un aller-retour de moins et
+    // c'est la parole du serveur : sans cette ligne, l'ecran gardait le montant d'avant la mise
+    // jusqu'au prochain reglement, et un sas quitte hors fenetre le laissait faux jusqu'a la
+    // partie suivante.
+    Auth.montants(r.data);
     step=C.matchFlow(step,'billet');
   }
+  // CE QUE LE SAS A EN MAIN, ET C'EST UNE QUESTION D'ARGENT. Un billet REPRIS — rejeu de cle, ou
+  // billet deja ouvert que le serveur rend tel quel — porte l'heure d'ouverture d'un sas
+  // PRECEDENT : le chronometre du sas actuel ne mesure alors pas son age, et le bouton QUITTER
+  // promettrait un remboursement que le serveur refuse. Le module ne lit toujours aucune horloge,
+  // il dit seulement ce que le serveur lui a repondu.
+  function billetRepris(){ return !!ticket && ticket.repris===true; }
   // Le coup d'envoi. Il rend le billet a jouer, ou null — et il ne demande rien a personne : a ce
   // moment precis le reseau n'a plus voix au chapitre.
   function coupDenvoi(modeKey,stakeCents){
@@ -4571,7 +4640,19 @@ const Match=(function(){
     // compte, exactement comme un reglement n'en est pas un : le lire comme tel est le piege nomme
     // de la 02a, et il coute cette fois le portefeuille entier a l'ecran. `Auth.sync` redemande
     // /api/me, et c'est `applyAccount` qui arbitre.
-    if(r.ok) Auth.sync();
+    //
+    // ET ON LE REDEMANDE DANS LES DEUX CAS. Un renoncement refuse laisse l'ecran sur un montant que
+    // le serveur n'a jamais confirme — la mise est au sequestre, le billet est encore jouable — et
+    // c'est le serveur qui a la parole, pas l'absence de reponse.
+    Auth.sync();
+    if(r.ok) return true;
+    // UN REFUS NE S'AVALE PAS. `if(r.ok) Auth.sync()` et rien d'autre : le joueur revenait au lobby
+    // persuade d'avoir ete rembourse, et le veilleur balayait sa mise chez la maison. Un refus
+    // NOMME a une consequence que le joueur doit lire ; une panne silencieuse — statut 0, reseau
+    // coupe — n'en nomme aucune et ne dit donc rien, comme partout ailleurs dans ce module.
+    const code=r.status&&r.data&&typeof r.data.code==='string'?r.data.code:'';
+    if(code&&echoue) echoue(code,r.data);
+    return false;
   }
   // Fin de partie. Le rapport ne part que s'il y a un billet qui decrit CETTE partie ; sinon
   // personne n'attend rien et l'enchainement se termine sur place.
@@ -4631,7 +4712,7 @@ const Match=(function(){
     // avatar inconnu conserve, reponse tronquee sans effet sur le pseudo.
     Auth.sync();
   }
-  return { sas, coupDenvoi, fin, quitterLeSas, surRefus };
+  return { sas, coupDenvoi, fin, quitterLeSas, billetRepris, surRefus, surRenoncementRefuse };
 })();
 /*MATCH-END*/
 const rulesEl=$('rules');
@@ -6375,7 +6456,18 @@ function enterWaiting(stake){
   const queue=C.queueFor(C.onlineTotal(),selMode,stake), rate=C.joinRate(queue,seats);
   // `enLigne` est fige a l'entree : ce que le bouton QUITTER promet ne doit pas changer parce que
   // le jeton a expire au milieu du sas.
-  W={stake,mode,seats,rate,t:0,seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,enLigne:Auth.online(),
+  //
+  // `clic` EST UNE HORLOGE, ET ELLE NE SERT QU'A LA QUESTION DU REMBOURSEMENT. `W.t` compte des
+  // TICS de `setInterval` : un onglet en arriere-plan est bride a 1 Hz, donc vingt secondes reelles
+  // n'y font avancer `W.t` que de deux — et il retarde dans le mauvais sens, celui qui fait
+  // promettre un remboursement que le serveur refuse. `performance.now()` et non `Date.now()`
+  // parce qu'un changement d'heure systeme ne doit pas decider d'un remboursement. Pose au CLIC,
+  // donc anterieur a `opened_at` de toute la latence aller : l'avance de l'ecran sur le serveur
+  // reste vraie, et cette fois pour une raison qui tient. `W.t` n'est pas touche — il pilote les
+  // sieges, l'arc et le decompte, et le passer en temps reel ferait demarrer la partie sans le
+  // joueur au retour d'un onglet cache.
+  W={stake,mode,seats,rate,t:0,clic:performance.now(),seated:1,full:false,lastSec:-1,drop:C.LOBBY.wait,
+     enLigne:Auth.online(),
      names:BOT_NAMES.slice().sort(()=>Math.random()-0.5),ni:0};
   // On demande son billet au serveur ici, et on n'en reparle plus : le sas d'attente garde son
   // chronometre, la partie partira a l'heure avec ou sans reponse. Sans compte ou sans
@@ -6429,7 +6521,14 @@ $('wLeave').onclick=()=>{
   // En ligne, ni credit ni debit ici : la mise est au sequestre du serveur, et c'est sa route de
   // renoncement qui la rend — puis `Auth.sync` redemande le solde. Hors ligne, le portefeuille de
   // demonstration rend la mise qu'il avait prise a l'entree.
-  demoCredit(W.stake);
+  //
+  // L'ECONOMIE DE SORTIE EST CELLE DE L'ENTREE, et c'est `W.enLigne` qui la nomme — jamais
+  // `Auth.online()`, qui repond a l'instant du CLIC. Si le jeton meurt pendant le sas, `demoDebit`
+  // n'a rien pris a l'entree et `demoCredit` rendrait ici une mise que le portefeuille de
+  // demonstration n'a jamais payee et que le sequestre du serveur detient : un centime de
+  // l'economie du grand livre atterrit dans celle de la demonstration, et rien ne le corrigera
+  // puisque la session est morte. Meme lecture, et meme raison, que `wLeaveLabel`.
+  if(!W.enLigne) demoCredit(W.stake);
   Match.quitterLeSas(rendu);
   sortirDuSas('');
 };
@@ -6448,16 +6547,41 @@ $('wLeave').onclick=()=>{
 // Rien a rendre au portefeuille de demonstration : un refus n'arrive que connecte, et connecte il
 // n'a pas pris la mise a l'entree du sas.
 Match.surRefus((code,data)=>{ sortirDuSas(C.refusMessage(code,data)); });
+// ET UN RENONCEMENT REFUSE SE DIT AU LOBBY. Le sas n'existe deja plus quand la reponse arrive — on
+// ne peut plus rien arreter — mais il y a une mise dont le joueur croit qu'elle lui est revenue :
+// `fenetre_close` veut dire qu'elle est au sequestre et que le billet est encore jouable. La taire
+// etait le pire des deux mondes. On n'ecrase pas le lobby si le joueur est deja reparti en partie
+// ou dans un autre sas : le message ne s'affiche que si le lobby est bien ce qu'il a sous les yeux.
+Match.surRenoncementRefuse((code,data)=>{
+  if(W||G) return;
+  lobbyMsg(C.refusMessage(code,data));
+});
 // CE QUE PARTIR COUTE, ET LA REGLE QUI LE DIT EST CELLE DU SERVEUR. `renonciationOuverte` vit dans
 // WBCore precisement pour cela : l'ecran doit annoncer ce que le serveur arbitrera, et deux
 // definitions de cette fenetre seraient la troisieme copie du patron condamne pour `terminal`.
 //
-// ON L'APPELLE AVEC LE CHRONOMETRE DU SAS, jamais avec une horloge lue ici. Ce chronometre est en
-// AVANCE sur celui du serveur — il part du clic, le serveur ne date le billet qu'a reception de la
-// requete, et la latence ne va que dans ce sens — donc l'ecran ferme la promesse un peu AVANT que
-// le serveur ne la ferme. Il ne promet jamais un remboursement qui sera refuse.
+// TROIS CHOSES LA SEPARENT DE CE QU'ELLE ETAIT, ET LES TROIS ONT COUTE UNE MISE.
+//
+// (1) ELLE NE LIT PLUS `W.t`. Ce chronometre compte des TICS de `setInterval`, pas du temps : un
+// onglet en arriere-plan est bride a 1 Hz, donc `W.t` retarde sur l'horloge du serveur, et il
+// retarde dans le sens qui fait promettre un remboursement que le serveur refuse. `W.clic` est une
+// horloge monotone posee au clic ; le bridage ne change plus que la frequence de rafraichissement
+// de l'ecran, plus la valeur qu'il annonce.
+//
+// (2) ELLE FERME LA PROMESSE UNE MARGE AVANT LE SERVEUR. `W.clic` est anterieur a `opened_at` de
+// tout le vol ALLER, ce qui joue pour nous ; mais le POST de renoncement a son propre vol, et
+// celui-la joue contre nous — le serveur date la fenetre a SA reception. `RENONCE_MARGE_ECRAN_MS`
+// couvre ce retour, et elle s'ajoute au temps ECOULE : la mettre dans `openedAt` elargirait la
+// fenetre au lieu de la retrecir.
+//
+// (3) ELLE NE PROMET RIEN SUR UN BILLET REPRIS. Un billet repris porte l'heure d'ouverture d'un sas
+// PRECEDENT — le joueur est reparti hors fenetre, a reclique la table, et le serveur lui a rendu le
+// meme billet — donc aucune horloge de CE sas ne mesure son age. Tant qu'aucun billet n'est en main
+// on promet comme avant, et c'est indispensable : sinon `quitterLeSas(false)` cesserait de renoncer
+// au billet qui arrive en retard, et ce trou-la coute une mise entiere.
 function sasRemboursable(){
-  return !!W && C.renonciationOuverte({openedAt:0},W.t*1000);
+  if(!W || Match.billetRepris()) return false;
+  return C.renonciationOuverte({openedAt:0},(performance.now()-W.clic)+C.RENONCE_MARGE_ECRAN_MS);
 }
 function wLeaveLabel(){
   const b=$('wLeave'); if(!b||!W) return;

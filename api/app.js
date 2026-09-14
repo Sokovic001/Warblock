@@ -28,18 +28,24 @@ const METHODES = new Map([
 // ci-dessus, mais elle en suit la règle : une liste de méthodes, donc un 405 et un pré-vol qui ne
 // peuvent pas diverger. L'identifiant est laissé en CHAÎNE — `id` est un `bigserial`, et le
 // convertir en nombre perdrait des parties au-delà de 2^53.
-const RESULTAT = /^\/api\/match\/([0-9]{1,19})\/result$/;
+//
+// ET IL NE PORTE PAS DE ZÉRO DE TÊTE, sur les trois routes. Un `bigserial` n'en produit jamais ;
+// Postgres, lui, convertit « 007 » en 7 et retrouve donc la ligne, si bien que le paramètre brut
+// pouvait servir à nommer un compte du grand livre — où « 007 » est refusé, à juste titre, et où le
+// refus sortait en 500. Le chemin est refusé ici, avant d'atteindre quoi que ce soit, et c'est la
+// même raison écrite au même endroit que le `[1-9][0-9]*` de `COMPTE_RE_SQL`.
+const RESULTAT = /^\/api\/match\/([1-9][0-9]{0,18})\/result$/;
 const RESULTAT_METHODES = ['POST'];
 // La trace a SA route, séparée de celle qui règle l'argent. C'est ce qui permet de lui donner une
 // borne de corps plus large sans toucher à celle du règlement, et c'est aussi ce qui la rend
 // inoffensive : elle n'écrit que dans `match_traces`, en insertion seule, et jamais dans `matches`.
-const TRACE = /^\/api\/match\/([0-9]{1,19})\/trace$/;
+const TRACE = /^\/api\/match\/([1-9][0-9]{0,18})\/trace$/;
 const TRACE_METHODES = ['POST'];
 // LE RENONCEMENT. Il a sa route parce qu'il n'est ni un résultat ni une trace : il ne juge rien, il
 // ne rejoue rien, il CLÔT un billet et rend la mise — le seul chemin du dossier qui rende une mise.
 // Il suit la même règle que les deux autres : une liste de méthodes, donc un 405 et un pré-vol qui
 // ne peuvent pas diverger.
-const RENONCE = /^\/api\/match\/([0-9]{1,19})\/renounce$/;
+const RENONCE = /^\/api\/match\/([1-9][0-9]{0,18})\/renounce$/;
 const RENONCE_METHODES = ['POST'];
 const METHODES_CORS = [...new Set([].concat(...METHODES.values(), RESULTAT_METHODES, TRACE_METHODES,
                                             RENONCE_METHODES)), 'OPTIONS'].join(',');
@@ -265,7 +271,14 @@ const moi = (u, s, argent) => ({
 // Le billet, tel qu'il part au client. Même liste blanche explicite que `moi`, et une raison de
 // plus ici : la ligne porte une colonne `seed_secret` qui ne doit JAMAIS traverser le réseau. Un
 // `select *` rendu tel quel la publierait le jour où quelqu'un ajoute une colonne sans y penser.
-const billet = m => ({
+// `repris` n'est pas une colonne : c'est ce que `createMatch` a décidé sur CE chemin-là, et il le
+// calcule déjà partout — faux à l'insertion, vrai sur le rejeu de clé comme sur le billet déjà
+// ouvert. Il manquait seulement le passage au client, et il lui manque pour une raison d'argent :
+// UN BILLET REPRIS PORTE L'HEURE D'OUVERTURE D'UN SAS PRÉCÉDENT. Le jeu ne peut alors pas déduire
+// son âge de son propre chronomètre, et le bouton QUITTER promettait un remboursement que le
+// serveur refusait. Le serveur connaît déjà la réponse ; il suffisait de la dire.
+const billet = (m, repris) => ({
+  repris: !!repris,
   id: String(m.id),
   mode: m.mode,
   stakeCents: m.stake_cents,
@@ -314,6 +327,12 @@ const reglement = m => ({
 
 function createApp({
   db, verifyToken, origins = [], limiter = makeLimiter(),
+  // UN SECOND SEAU, PLUS LARGE, POUR LA SEULE LECTURE DE PROFIL. Il est séparé parce que son
+  // domaine l'est : le jeu appelle `Auth.sync()` à la connexion, à la reprise de session, après
+  // chaque renoncement et après chaque règlement, et douze par minute finirait par refuser une
+  // lecture parfaitement légitime. Il ne peut pas pour autant ne pas exister — voir le commentaire
+  // de la branche `GET` dans `handler` : cette route ÉCRIT.
+  limiterMe = makeLimiter({ max: 60, windowMs: 60_000 }),
   // La source de hasard est injectée comme la base et la vérification du jeton : c'est ce qui rend
   // les graines observables dans les tests. Par défaut, le générateur du système — une graine tirée
   // sur `Math.random` serait devinable, et l'une des deux ne doit jamais l'être.
@@ -496,11 +515,18 @@ function createApp({
     // d'être créé ou qu'il existait déjà rendrait le rejeu distinguable du premier appel, ce qui
     // est précisément ce que l'idempotence promet d'effacer.
     //
+    // `repris` EST L'EXCEPTION ÉCRITE À CETTE RÈGLE, et elle est étroite. Ce qu'elle promet reste
+    // entier : même identifiant, même graine, même mise, même écriture — un rejeu ne produit
+    // toujours aucun effet de plus. Ce champ ne décrit pas le BILLET, il décrit le CHEMIN, et le
+    // client en a besoin pour une raison d'argent : un billet repris porte l'heure d'ouverture d'un
+    // sas précédent, donc le bouton QUITTER ne peut pas déduire son âge de son propre chronomètre.
+    // Le taire faisait promettre à l'écran un remboursement que le serveur refusait.
+    //
     // LES DEUX MONTANTS PARTENT AVEC LE BILLET, APRÈS LE DÉBIT. C'est un aller-retour de moins pour
     // le jeu, et surtout c'est la parole du serveur : en ligne, l'écran ne décrémente plus son
     // portefeuille lui-même, il affiche ce que le livre dit.
     return envoyer(res, 200, {
-      ...billet(ouverture.match),
+      ...billet(ouverture.match, ouverture.repris),
       balanceCents: nombre(ouverture.balanceCents),
       quarantineCents: nombre(ouverture.quarantineCents),
     }, origin);
@@ -999,6 +1025,15 @@ function createApp({
 
       // ---------- lecture ----------
       if (req.method === 'GET') {
+        // LE SEAU EST ICI, ET PAS PLUS BAS. Cette route ne coûte au client qu'un GET sans corps,
+        // et elle ouvre pourtant une transaction d'ÉCRITURE depuis la phase 03 : `findOrCreate`
+        // retient un client du bassin du `begin` au `commit`, verrou de ligne `for update` et trois
+        // agrégats compris. Laisser la route la plus chère à servir être la seule sans compteur,
+        // c'est offrir au bassin de dix connexions de `db-pg.js` le retard qui fera rater sa fenêtre
+        // de renoncement à un AUTRE joueur : dix secondes, une seule tentative côté jeu, et la mise
+        // reste au séquestre. Le seau est séparé et plus large — voir `limiterMe`.
+        if (!limiterMe('me:' + identite.authId))
+          return envoyer(res, 429, { erreur: 'Trop de lectures de profil d\'affilée. Réessaie dans une minute.' }, origin);
         // La première connexion crée le compte, LE DOTE, et le recharge s'il est au-dessous du
         // plancher. Les trois se décident côté serveur, dans la même transaction, et le client
         // n'a aucune route pour en déclencher une.

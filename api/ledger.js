@@ -412,10 +412,60 @@ function ledgerReconcile(ligneMatch, transferts) {
       griefs.push(`billet ${ref} : statut inconnu du grand livre (${String(m.status)})`);
     }
 
+    // SUR UNE LIGNE CLOSE SANS RÈGLEMENT, `matches` NE PORTE AUCUN MONTANT — MAIS IL PORTE LE
+    // STATUT, et le statut dit à lui seul où le séquestre avait le droit de partir. Sans ce
+    // contrôle, « le séquestre est vide » se contente de constater que l'argent est parti, jamais
+    // où : un veilleur qui recréditerait le joueur au lieu de la maison bouclerait le zéro global et
+    // se réconcilierait en vert. C'est très exactement le vol que la fenêtre de renoncement ferme,
+    // et c'était la moitié aveugle de ce prédicat.
+    //
+    // La destination est entièrement déterminée par le statut, et elle n'a qu'un seul écrivain de
+    // chaque côté : `renounced` vient de `renounceMatch` et rend la mise au joueur ; `expired`,
+    // `abandoned` et `rejected` viennent de `reglerSequestre`, à net nul, vers la contrepartie.
+    //
+    // Rien n'est dit quand le séquestre n'a jamais été habité : c'est une ligne de la phase 02a, et
+    // le grief « aucun engagement » la couvre déjà quelques lignes plus haut.
+    const sansReglement = m.net_cents === null || m.net_cents === undefined;
+    if (sansReglement && CLOS.includes(m.status)) {
+      const sorties = livre.filter(t => t.compteDebit === enjeu);
+      const dest = m.status === 'renounced' ? compteJoueur(m.user_id) : MAISON_CONTREPARTIE;
+      const ailleurs = sorties.filter(t => t.compteCredit !== dest);
+      if (ailleurs.length > 0) {
+        const montant = ailleurs.reduce((a, t) => a + t.montantCents, 0);
+        const ou = [...new Set(ailleurs.map(t => t.compteCredit))].join(', ');
+        griefs.push(`billet ${ref} ${m.status} : ${montant} sortis du séquestre vers ${ou} au lieu de ${dest}`);
+      }
+    }
+
+    // LE REMBOURSEMENT A SA PROPRE RÈGLE, ET ELLE NE DÉPEND PAS DE `net_cents`. C'est la sixième
+    // issue, celle que la phase ajoute, et elle n'avait qu'un cas positif : un remboursement
+    // détourné bouclait le livre, vidait le séquestre, et ne disait rien. La ligne `matches` suffit
+    // à trancher — `renounced` ne vient que de `renounceMatch`, et le veilleur ne touche que des
+    // lignes `open`.
+    const rembs = livre.filter(t => t.motif === 'remboursement' && t.reference === ref);
+    if (m.status === 'renounced') {
+      const joueur = compteJoueur(m.user_id);
+      const rendu = rembs.reduce((a, t) => a + (t.compteCredit === joueur ? t.montantCents : 0), 0);
+      // Une ligne dont le livre n'a jamais connu l'engagement est une ligne de la phase 02a : elle
+      // n'a rien à rendre, et le grief « aucun engagement » l'a déjà dit quelques lignes plus haut.
+      // Ajouter « 0 rendus au lieu de 50 » ne nommerait pas un second défaut, il répéterait le
+      // premier — c'est la même raison qui fait taire la règle de destination sur un séquestre
+      // jamais habité.
+      if (mises.length > 0 && rendu !== m.stake_cents) {
+        griefs.push(`billet ${ref} renoncé : ${rendu} rendus sur ${joueur} au lieu de la mise ${m.stake_cents}`);
+      }
+      const ailleurs = rembs.reduce((a, t) => a + (t.compteCredit === joueur ? 0 : t.montantCents), 0);
+      if (ailleurs !== 0) {
+        griefs.push(`billet ${ref} renoncé : ${ailleurs} remboursés sur un compte qui n'a rien à recevoir de cette ligne`);
+      }
+    } else if (rembs.length > 0) {
+      griefs.push(`billet ${ref} ${m.status} : ${rembs.length} écriture(s) de remboursement sur une issue qui ne rend pas la mise`);
+    }
+
     // Sur une ligne réglée, les montants de `matches` se retrouvent AU CENTIME, et sur le bon
     // compte. `digest_match === false` est la seule marque de divergence : le gain part alors en
     // quarantaine, et le solde dépensable ne doit pas en voir un centime.
-    if (m.net_cents !== null && m.net_cents !== undefined) {
+    if (!sansReglement) {
       const gains = livre.filter(t => t.motif === 'gain' && t.reference === ref);
       const commission = gains.reduce((a, t) => a + (t.compteCredit === MAISON_COMMISSION ? t.montantCents : 0), 0);
       if (commission !== m.fee_cents) {

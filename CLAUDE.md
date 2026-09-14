@@ -50,8 +50,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 395 tests sur le jeu (`node test.js`) et
-  204 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+- **Lancer `npm test` après chaque modification.** 405 tests sur le jeu (`node test.js`) et
+  210 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
   pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
   quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
   installation, pour que les deux promesses tiennent.
@@ -124,15 +124,30 @@ porte : le reste a besoin d'un navigateur pour tourner.
   fonctions qui le mutent, elles ne font rien en ligne, et une garde textuelle interdit tout autre
   `wallet -=`, `wallet +=` ou écriture venue d'une réponse serveur. Le bouton de recharge disparaît
   en ligne, et le geste est refusé en plus d'être caché. Un montant **absent** rend `null` et ne
-  s'écrit pas : lire un règlement comme un compte ne remet aucun solde à zéro.
+  s'écrit pas : lire un règlement comme un compte ne remet aucun solde à zéro. Les montants arrivent
+  de `GET /api/me` **et de `POST /api/match`**, qui les rend avec le billet après le débit — et du
+  corps du `409 fonds`, qui porte le solde réel et doit éteindre la table au lieu de laisser le
+  joueur recliquer. Ces deux-là passent par `adopterMontants`, et non par `adopter` : un billet n'a
+  pas de statistiques, et `applyAccount` les remet à zéro sur un objet qui n'en porte pas. Cinq
+  points d'écriture de `wallet`, tous nommés par la garde textuelle. Enfin, le crédit de sortie du
+  sas lit `W.enLigne`, l'économie **figée à l'entrée**, et jamais `Auth.online()` : un jeton qui
+  meurt au milieu du sas ferait sinon encaisser au portefeuille de démonstration une mise que le
+  séquestre du serveur détient.
 - **Un refus NOMMÉ arrête le sas ; une panne SILENCIEUSE ne l'arrête pas.** `fonds`, `livre` et
   `renonce_recent` — liste fermée dans `WBCore.REFUS_SAS`, confrontée par `api/test.js` aux codes que
   l'API émet vraiment — ferment le sas, affichent un message et ne lancent aucune partie, sans
   laisser le lobby mort. Tout le reste, y compris un 500 et un 429, retombe dans le repli hors ligne.
 - **Le bouton QUITTER du sas dit ce que partir coûte**, en appelant `WBCore.renonciationOuverte` avec
-  le chronomètre du **sas**. Ce chronomètre est en avance sur celui du serveur, donc l'écran ferme la
-  promesse un peu avant : il ne promet jamais un remboursement que le serveur refusera. Confronté au
-  dixième de seconde sur toute la durée d'un sas, et sur toute la plage de latences plausibles.
+  une **horloge monotone** posée au clic — `performance.now() − W.clic` — et jamais avec `W.t`, qui
+  compte des tics de `setInterval` et retarde dès qu'un onglet passe en arrière-plan, c'est-à-dire
+  dans le sens qui fait promettre un remboursement refusé. Il ne promet jamais un remboursement que
+  le serveur refusera, et la propriété repose sur **trois** choses, pas sur la seule latence : cette
+  horloge ; une marge nommée, `RENONCE_MARGE_ECRAN_MS`, qui couvre le vol **retour** du renoncement,
+  celui qui joue contre nous — la promesse tient tant que ce vol reste sous la marge ; et le fait
+  qu'on ne promette **rien** sur un billet **repris**, dont l'heure d'ouverture est celle d'un sas
+  précédent. Confronté au dixième de seconde sur toute la durée d'un sas, sur trois régimes de
+  minuteur bridé, et sur les deux vols séparément. Un renoncement refusé n'est plus avalé : le solde
+  se redemande dans les deux cas, et le joueur lit ce qu'est devenue sa mise.
 - Chaque bloc `<script>` d'`index.html` est du JavaScript valide — un test l'extrait et le fait
   parser par `vm.Script`. Ils sont exactement **trois**, tous **internes** : aucun `src=` ne pointe
   vers un fichier local, sans quoi le fichier unique ne serait plus unique.
@@ -262,9 +277,14 @@ porte : le reste a besoin d'un navigateur pour tourner.
   `repris` n'écrit **jamais** une seconde mise. Le règlement écrit la ligne et le gain ensemble. Un
   billet clos vide son séquestre : `solde(enjeu:<match>)` vaut la mise sur une ligne ouverte et zéro
   sur toute ligne close. `ledgerReconcile` est appelé à la fin de **chaque** scénario, et cinquante
-  parties de bout en bout vérifient la somme globale à **chaque étape**. Le verrou, lui, n'est
-  prouvé nulle part dans `npm test` : une doublure mono-fil sérialise gratuitement, et seul
-  `api/db-check.js` peut l'éprouver.
+  parties de bout en bout vérifient la somme globale à **chaque étape**. Sur une ligne close **sans
+  règlement**, il ne se contente pas de constater que le séquestre est vide : il regarde **où** il
+  est parti — le statut suffit à le dire — et il traite le motif `remboursement` indépendamment de
+  `net_cents`. Sans ces deux règles, « ouvrir un billet, laisser expirer, se faire rembourser » se
+  réconciliait en vert, c'est-à-dire très exactement le vol que la phase existe pour fermer. Le
+  verrou, lui, n'est prouvé nulle part dans `npm test` : une doublure mono-fil sérialise
+  gratuitement, et seul `api/db-check.js` peut l'éprouver — comme le réessai de pseudo de
+  `findOrCreate`, dont le point de reprise ne se vérifie que contre une vraie base.
 - **Une divergence est mesurée, jamais punie.** La ligne est réglée et payée, marquée
   `digest_match = false`, avec `divergence_step` et `replay_ms`. Le grand livre de la phase 03 ne
   lira que des lignes convergées, et le **taux de divergence** est un agrégat exposé pour que ce
@@ -273,7 +293,12 @@ porte : le reste a besoin d'un navigateur pour tourner.
   reçoit `chrono` (une durée) en plus de `now` (une date). Treize refus nommés — les huit du rejeu,
   plus `fonds` et `livre` arrivés avec le grand livre, plus `fenetre_close`, `billet_clos` et
   `renonce_recent` arrivés avec la fenêtre de renoncement — tous en 400 ou 409, aucun en 500, aucun
-  ne laissant un joueur enfermé dans un billet mort.
+  ne laissant un joueur enfermé dans un billet mort. **Un compte se nomme avec l'`id` de la ligne
+  relue, jamais avec le paramètre d'URL** : Postgres retrouve la ligne 7 à partir de « 007 », mais le
+  grand livre refuse « 007 » à juste titre, et la seule route qui rende une mise sortait alors en
+  500. Les trois motifs de route refusent désormais un zéro de tête, et un `bigserial` n'en produit
+  jamais. **`GET /api/me` a son propre seau de débit, plus large, parce qu'elle ÉCRIT** — une
+  transaction, un verrou de ligne et trois agrégats — et qu'elle était la seule route sans compteur.
 - **Une mise ne se rend QUE pendant la fenêtre de renoncement**, dix secondes à l'horloge du
   **serveur**, arbitrée par `WBCore.renonciationOuverte` et par elle seule. Passé cette fenêtre, rien
   ne rend la mise : le veilleur clôt sans rembourser, et vide le séquestre vers
