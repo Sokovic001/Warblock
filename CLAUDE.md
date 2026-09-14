@@ -391,7 +391,20 @@ tout solde y est modifiable depuis la console.
   non. Jusqu'à ce qu'il soit vert une fois, **un test qui passe contre la doublure prouve la
   doublure**, et le verrou de ligne qui empêche deux onglets de dépenser le même solde n'est éprouvé
   nulle part. **Aucun euro n'entre** : les comptes sont en crédits fictifs, dotés par la maison.
-- Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
+- Phase 04 — l'argent réel. Comme la 02, elle s'est révélée être deux chantiers, et les deux moitiés
+  sont nommées pour qu'on ne croie jamais la phase finie alors qu'elle ne l'est qu'à moitié :
+  - Phase 04a — le **bord** de l'argent réel. **EN COURS**, spécification écrite :
+    `docs/PHASE-04A.md`. Elle ne contient aucun dépôt : elle livre les prérequis que ce fichier et
+    `docs/HISTORIQUE.md` déclarent eux-mêmes bloquants — un **plafond d'exposition** décidé à
+    l'ouverture du billet, le **compte des sièges payés** que `matches` n'enregistre pas, et **qui a
+    le droit de contre-passer** — plus une cascade de schéma qui détruit aujourd'hui les pièces
+    justificatives d'un compte effacé, et un **plancher d'horloge** sur les règlements qui paient.
+    Six modules. Rien n'y ouvre de table en argent réel, `SIM_VERSION` ne bouge pas, et le jeu ne
+    reçoit qu'un membre de plus dans `WBCore.REFUS_SAS` et une fonction pure de plus dans `WBCore`.
+  - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
+    idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
+    livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.
+- Phases 05 et 06 — retraits, exploitation. **Rien de réel avant que 01 à 04 soient finies.**
 
 **L'économie, tranchée le 2026-09-15.** Les bots sont un **bouchon** qui remplit les sièges vides
 tant que la population ne suffit pas, jamais un modèle économique : l'objectif est une table pleine
@@ -401,12 +414,14 @@ qui sort de la caisse et ce qui a réellement été misé**. `mouvementGain` l'�
 La commission de 20 % porte sur un pot notionnel : sur une table à $0,50 dont un seul siège est payé,
 elle vaut $0,10 de réel, pas $2, et un joueur qui emporte toute la table coûte $7,50 à la maison.
 
-Deux choses restent ouvertes, et elles bloquent la phase 04 : **un plafond** — le grand livre mesure
+Deux choses restaient ouvertes et bloquaient la phase 04 : **un plafond** — le grand livre mesure
 l'exposition, il ne la borne pas, et rien n'empêche un joueur fort de la moissonner sur des tables
 remplies de bots ; et **le compte des sièges réellement payés**, que `matches` n'enregistre pas.
 Aujourd'hui la réponse est toujours « un », donc personne n'en a eu besoin ; au premier remplissage
 partiel elle variera, et sans elle l'exposition ne sera plus attribuable après coup. Détail et
-raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ».
+raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ». **Les deux sont
+le sujet de la phase 04a, en cours et pas encore livrée** — tant qu'elle ne l'est pas, la mesure
+existe et la borne non.
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
 n'existe pas ; le client ne peut écrire que son pseudo, son avatar et son pays ; aucun secret dans
