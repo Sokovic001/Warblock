@@ -51,10 +51,12 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 405 tests sur le jeu (`node test.js`) et
-  210 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf, de bout en bout avec de la vraie cryptographie,
-  quand `jose` est installé — l'intégration continue le lance deux fois, avant et après
-  installation, pour que les deux promesses tiennent.
+  201 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 210 en tout — de bout en bout avec de la vraie
+  cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
+  après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
+  endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
+  recette de la 02b puis à celle de la 03 : on relit les quatre, pas les trois qu'on a touchés.
 - **La syntaxe des blocs `<script>` est vérifiée par `npm test`** : un test extrait les trois blocs
   d'`index.html` et les fait parser par `vm.Script`. Une erreur de syntaxe dans le bloc `Game` — le
   mode de défaillance le plus fréquent de ce dépôt — tombe donc avant d'ouvrir le navigateur, et

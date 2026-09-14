@@ -322,6 +322,56 @@ banc du libellé fabriquait un `W` de deux champs où le temps réel valait le c
 définition. Aucune valeur de latence ne pouvait le faire échouer, pas même 10⁹. C'est le patron du
 harnais qui recopiait les expressions de `faits`, et le journal l'a maintenant payé deux fois.
 
+### Le compte des tests a décroché une SECONDE fois, et la règle de relecture n'a pas suffi — phase 03, recette
+
+La recette de la 02b avait trouvé un seul écart entre ce que le dépôt dit et ce qu'il est : un
+nombre de tests faux dans `README.md`. Elle en avait tiré une règle de relecture — « après une
+phase, on relit les **quatre** endroits, pas les trois qu'on a touchés » — et écarté la correction
+structurelle au motif que centraliser le compte demanderait de le générer, pour un nombre qui ne
+décide de rien.
+
+Une phase plus tard, **trois des quatre endroits sont faux**, et le quatrième est faux d'une autre
+façon. `README.md`, `api/README.md` et la section « État après la phase 03 » de ce journal
+annonçaient encore les chiffres de la 02b — 395 et 204 — alors que les suites en comptent 405 et
+201. `CLAUDE.md`, lui, portait un chiffre juste attribué à la mauvaise colonne : il annonçait
+« 210 sur l'API, aucune dépendance », puis « neuf de plus avec `jose` », ce qui promettait 219. La
+réalité est 201 sans `jose` et 210 avec. Une erreur qu'aucune relecture attentive n'attrape, parce
+que le nombre écrit **existe** — il est simplement du mauvais côté de l'installation.
+
+Ce que la seconde occurrence apprend et que la première ne disait pas : la règle de relecture est
+une discipline, et une discipline n'est pas un test. Le nombre ne décide toujours de rien, et c'est
+précisément pour cela qu'il dérive sans que rien ne casse — la première page que lit un arrivant est
+la seule du dépôt que rien ne vérifie. La correction structurelle reste écartée pour la même raison
+qu'en 02b, mais l'arbitrage est désormais **écrit avec son prix** : on accepte que ce chiffre soit
+faux entre deux recettes, et la recette est le seul moment où il redevient vrai. Si une troisième
+phase le retrouve faux, c'est que le prix est trop élevé, et il faudra le générer.
+
+### Ce que la recette de la 03 a laissé passer, sciemment : le crédit de l'écran de FIN
+
+La recette a corrigé le crédit de sortie du **sas**, qui lisait `Auth.online()` au lieu de
+`W.enLigne`, l'économie figée à l'entrée : un jeton mort au milieu du sas faisait rendre au
+portefeuille de démonstration une mise que le séquestre du serveur détenait. Elle a écrit dans le
+même geste, dans le banc de test, que `demoCredit` « a un second appelant légitime, l'écran de fin
+de partie, qui doit continuer de le consulter » — **et cette phrase est une décision affirmée sans
+raison écrite**.
+
+Le scénario symétrique existe, et il est plus cher que celui qu'on a fermé : connecté au coup
+d'envoi, le serveur a débité la mise au séquestre ; le jeton meurt **pendant la partie** ; le joueur
+gagne ; `Auth.online()` répond désormais faux, donc `demoCredit(take.net)` crédite au portefeuille de
+démonstration un gain que le grand livre n'a pas accordé — et ne l'accordera pas, puisque le rapport
+ne partira jamais. En Resurgence à 10 $ ce gain vaut quarante fois la mise, là où le sas n'en valait
+qu'une.
+
+Ce qui retient la main, et pourquoi ce n'est **pas** réparé ici : hors ligne, le portefeuille de
+démonstration est une variable que le bouton de recharge remet à `START_WALLET` en un clic, donc un
+gain indu n'y vaut rien ; et ne pas créditer laisserait l'écran de fin annoncer « +6,40 CARRIED OUT »
+au-dessus d'un solde qui ne bouge pas. Les deux options mentent, à des endroits différents. C'est un
+arbitrage de conception, pas une réparation évidente, et une recette ne renverse pas une décision
+écrite sur son seul jugement. Ce qui est **fautif**, en revanche, et ce qui reste à corriger : la
+décision n'a ni raison écrite ni test, alors que sa jumelle en a deux. Il n'existe aucun `G.enLigne`
+— l'économie figée au coup d'envoi — à côté du `W.enLigne` qui existe pour le sas, et
+`startMatch` a pourtant un appelant unique.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -622,7 +672,7 @@ passe contre la doublure prouve la doublure.
   l'écran dit laquelle il montre : « Demo wallet » et son bouton de recharge hors ligne,
   « Credits » sans bouton en ligne. Treize refus nommés, tous en 400 ou 409, dont trois arrêtent le
   sas au lieu de laisser partir une partie gratuite.
-- **395 tests sur le jeu, 204 sur l'API** sans rien installer, 213 avec `jose`. Aucune base, aucun
+- **405 tests sur le jeu, 201 sur l'API** sans rien installer, 210 avec `jose`. Aucune base, aucun
   réseau, aucun navigateur : tout est injecté.
 - **LA DETTE LA PLUS SILENCIEUSE DU DOSSIER N'EST PAS SOLDÉE.** `api/db-check.js` et son job
   `services: postgres` existent ; le job n'a **jamais été vert**. La phase a livré la recette, pas le
@@ -681,6 +731,13 @@ passe contre la doublure prouve la doublure.
   couverte, pas sa dramaturgie — les bots y sont remplacés par une conduite de quelques lignes. Le
   trou se referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
   ennuyeuses reste un humain qui joue une partie entière.
+- **L'écran de FIN crédite le portefeuille de démonstration sur l'économie de l'instant, pas sur
+  celle du coup d'envoi.** Le sas a été corrigé à la recette de la 03 — il lit `W.enLigne` — l'écran
+  de fin ne l'a pas été : `demoCredit(take.net)` y consulte `Auth.online()`, si bien qu'un jeton mort
+  pendant la partie fait atterrir dans l'économie de démonstration un gain que le grand livre n'a pas
+  accordé, jusqu'à quarante fois la mise. La raison de la retenue et le prix des deux options sont
+  écrits plus haut, avec la recette ; ce qui manque est une **décision écrite** et un test, à prendre
+  avec la session de jeu réelle, qui verra les deux écrans.
 - **La session de jeu réelle due après le module 1 de la 02b n'a toujours pas eu lieu**, et la phase
   03 est finie sans elle non plus. Elle a maintenant un **cinquième** point à juger, arrivé avec le
   module 5 de la phase 03 : **deux économies sur le même écran**, connecté et hors ligne. Ce que

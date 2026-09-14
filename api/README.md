@@ -1101,7 +1101,7 @@ db-pg.js            Postgres                                       ← touche la
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             204 tests sans rien installer, 213 avec jose
+test.js             201 tests sans rien installer, 210 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1204,8 +1204,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 204 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 213 : les 204, plus la chaîne complète de vérification
+node api/test.js          # 201 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 210 : les 201, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 ```
