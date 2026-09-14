@@ -396,6 +396,33 @@ Ce n'est ni un bug ni une dette technique : c'est une décision d'exploitation. 
 **avant** la phase 04, pas découverte au premier relevé. Elle ne figure nulle part dans les sept
 phases parce que les sept phases décrivent la mécanique de l'argent, jamais son économie.
 
+#### TRANCHÉ le 2026-09-15 : la deuxième issue, et les bots sont un bouchon
+
+**Le pot affiché est tenu, et la maison paie la différence.** Les bots ne sont pas un modèle
+économique : ils sont un bouchon qui remplit les sièges vides tant que la population ne suffit pas.
+L'objectif est une table pleine de joueurs réels à chaque partie, et la contrepartie de la maison
+est donc un coût de démarrage destiné à décroître, pas une ligne de revenu.
+
+Ce que cela veut dire, écrit sans enjoliver : la commission de 20 % porte sur un pot notionnel, et
+sur une table à $0,50 où un seul siège est payé, 20 % de ce qui entre vraiment vaut $0,10 — pas $2.
+Quand le joueur emporte toute la table, la maison verse $7,50 d'argent réel pour une mise de $0,50,
+et jusqu'à $390 sur la Resurgence à $10. `mouvementGain` l'écrit déjà, et le faisait avant que la
+décision ne soit prise : `maison:contrepartie → enjeu` de la différence entre le brut et la mise.
+
+**Le solde négatif de `maison:contrepartie` EST l'exposition**, partie par partie et en cumul. Le
+grand livre la mesure ; il ne la borne pas. Deux choses restent donc ouvertes, et elles ne sont pas
+de la même nature que celle qu'on vient de fermer :
+
+- **Un plafond.** Rien n'empêche aujourd'hui un joueur fort de moissonner la contrepartie sur des
+  tables remplies de bots qui ne rivalisent pas avec lui. Mesurable n'est pas borné, et un chiffre
+  qu'on lit après coup n'a jamais arrêté personne. À trancher avant que le premier euro n'entre.
+- **Le compte des sièges réellement payés.** `matches` fige `seats` — le nombre notionnel du mode —
+  mais rien ne dit combien de sièges un humain a payés. Aujourd'hui la réponse est toujours « un »,
+  donc personne n'en a eu besoin. Le jour du remplissage partiel, elle variera d'une partie à
+  l'autre, et sans elle l'exposition ne sera plus attribuable après coup : on saura ce que la maison
+  a versé, jamais pour combien de sièges vides. La colonne doit exister **avant** le remplissage,
+  pas après, pour la même raison que `seats` et `team_size` sont figés sur le billet.
+
 ### Le rejeu ne sera opposable que sur le même runtime
 
 La phase 02b promettra un rejeu : mêmes graines, mêmes entrées, même partie. Cette promesse a une

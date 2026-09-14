@@ -389,6 +389,21 @@ tout solde y est modifiable depuis la console.
   nulle part. **Aucun euro n'entre** : les comptes sont en crédits fictifs, dotés par la maison.
 - Phases 04 à 06 — dépôts, retraits, exploitation. **Rien de réel avant que 01 à 03 soient finies.**
 
+**L'économie, tranchée le 2026-09-15.** Les bots sont un **bouchon** qui remplit les sièges vides
+tant que la population ne suffit pas, jamais un modèle économique : l'objectif est une table pleine
+de joueurs réels. Le pot affiché est donc tenu tel quel, et **la maison paie la différence entre ce
+qui sort de la caisse et ce qui a réellement été misé**. `mouvementGain` l'écrit — `maison:contrepartie
+→ enjeu` du brut moins la mise — et le solde négatif de ce compte EST l'exposition de la maison.
+La commission de 20 % porte sur un pot notionnel : sur une table à $0,50 dont un seul siège est payé,
+elle vaut $0,10 de réel, pas $2, et un joueur qui emporte toute la table coûte $7,50 à la maison.
+
+Deux choses restent ouvertes, et elles bloquent la phase 04 : **un plafond** — le grand livre mesure
+l'exposition, il ne la borne pas, et rien n'empêche un joueur fort de la moissonner sur des tables
+remplies de bots ; et **le compte des sièges réellement payés**, que `matches` n'enregistre pas.
+Aujourd'hui la réponse est toujours « un », donc personne n'en a eu besoin ; au premier remplissage
+partiel elle variera, et sans elle l'exposition ne sera plus attribuable après coup. Détail et
+raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque pot ».
+
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
 n'existe pas ; le client ne peut écrire que son pseudo, son avatar et son pays ; aucun secret dans
 le dépôt, `.env` est ignoré.
