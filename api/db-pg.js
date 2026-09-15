@@ -93,23 +93,40 @@ async function ledgerWrite(client, transferts) {
     effet.set(t.compteDebit, (effet.get(t.compteDebit) || 0) - t.montantCents);
     effet.set(t.compteCredit, (effet.get(t.compteCredit) || 0) + t.montantCents);
   }
-  for (const [compte, delta] of effet) {
-    // Un compte hors grammaire n'est pas notre affaire ici : c'est le `check` de la colonne qui le
-    // refusera, et il le nommera mieux que nous.
-    if (delta >= 0 || !L.compteValide(compte) || L.decouvertAutorise(compte)) continue;
-    const solde = await ledgerSolde(client, compte);
-    if (solde + delta < 0) {
-      const e = new Error(`grand livre : ${compte} porte ${solde} et ce mouvement lui demande ${-delta}`);
-      e.code = 'decouvert';
-      e.compte = compte; e.solde = solde; e.requis = -delta;
-      throw e;
-    }
-  }
+  // ON INSÈRE D'ABORD, ON VÉRIFIE LE DÉCOUVERT ENSUITE — dans la même transaction, donc un découvert
+  // annule toujours tout, et rien n'est jamais écrit à moitié. L'ordre inverse paraissait le plus
+  // prudent et il donnait la mauvaise réponse : au REJEU d'une contre-passation déjà posée, le
+  // découvert parlait le premier, précisément parce que le compte de commission avait été vidé par
+  // la contre-passation d'origine. L'opérateur lisait « maison:commission porte 0 » là où la vérité
+  // est « c'était déjà fait », et la raison du refus dépendait du solde d'un compte au lieu du fait,
+  // pourtant certain, que l'écriture existait déjà. Le job `db` l'a vu ; aucune doublure ne le
+  // pouvait, puisqu'elle n'a pas de clé d'unicité à faire parler.
+  //
+  // Une clé d'idempotence est un FAIT, un solde est un ÉTAT. Quand les deux refusent, c'est le fait
+  // qui doit nommer le refus : `ledger_entries_mouvement_uniq` lève son `23505` avant qu'un solde
+  // ne soit seulement lu, et l'appelant le traduit en « déjà fait ».
   for (const t of lignes) {
     await client.query(
       `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents)
        values ($1,$2,$3,$4,$5)`,
       [t.motif, t.reference, t.compteDebit, t.compteCredit, t.montantCents]);
+  }
+  for (const [compte, delta] of effet) {
+    // Un compte hors grammaire n'est pas notre affaire ici : c'est le `check` de la colonne qui le
+    // refusera, et il le nommera mieux que nous.
+    if (delta >= 0 || !L.compteValide(compte) || L.decouvertAutorise(compte)) continue;
+    // Le solde est lu APRÈS les insertions, donc il les porte déjà : la question n'est plus « ce
+    // mouvement tiendrait-il ? » mais « le compte est-il resté positif ? ». C'est la même règle, et
+    // elle n'a plus à simuler ce que la base vient d'écrire. Le message, lui, continue de dire le
+    // solde d'AVANT, qui est ce que l'appelant comprend.
+    const solde = await ledgerSolde(client, compte);
+    if (solde < 0) {
+      const avant = solde - delta;
+      const e = new Error(`grand livre : ${compte} porte ${avant} et ce mouvement lui demande ${-delta}`);
+      e.code = 'decouvert';
+      e.compte = compte; e.solde = avant; e.requis = -delta;
+      throw e;
+    }
   }
   return { ecrites: lignes.length };
 }
