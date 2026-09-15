@@ -973,9 +973,11 @@ deux moitiés :
   second gain devrait débiter un séquestre déjà vide) et la clause `where status = 'open' and
   net_cents is null` du règlement de `matches`. Trois protections qui se recouvrent, et c'est voulu.
 
-Deux index de lecture, `(compte_debit)` et `(compte_credit)` : le solde est une **somme** sur ces
-lignes, et c'est cette somme qui remplace la case qu'on ne crée pas. L'échappatoire nommée, le jour
-où elle coûtera trop cher, est l'instantané de clôture — jamais une colonne mise à jour.
+Deux index de lecture, `(compte_debit)` et `(compte_credit)` — **passés à `(compte, cree_le)` au
+module 4 de la phase 04a**, quand le plafond a commencé à lire une fenêtre glissante : le solde est
+une **somme** sur ces lignes, et c'est cette somme qui remplace la case qu'on ne crée pas.
+L'échappatoire nommée, le jour où elle coûtera trop cher, est l'instantané de clôture — jamais une
+colonne mise à jour.
 
 `matches.status` reçoit au passage sa **sixième** valeur, `'renounced'`. Elle entre ici et pas au
 module qui l'écrira, parce que `ledgerReconcile` la connaît déjà : un statut que le code reconnaît
@@ -1290,6 +1292,105 @@ Ils **ne prouvent toujours pas** ce que Postgres fait de la clause de la purge �
 concaténation qui construit un nom de compte, un solde recalculé en SQL sur trois tables. C'est
 `api/db-check.js` qui l'éprouve, et il n'a **jamais** tourné contre une base.
 
+## `operateur.js` — qui a le droit de contre-passer
+
+Phase 04a, module 5. Le grand livre n'a qu'un chemin de correction, la contre-passation, et
+`mouvementContrepassation` existait depuis la phase 03 **sans un seul appelant** : personne n'avait
+écrit qui pouvait l'emprunter. `docs/HISTORIQUE.md` le disait sans détour — « le premier incident réel
+se réglera à la main dans `psql`, un dimanche soir, et c'est ce jour-là que la règle "aucun `update`"
+tombe ». Ce module est l'appelant qui manquait, et la trace qui va avec.
+
+**C'est un OUTIL EN LIGNE DE COMMANDE, jamais une route.** Une route d'administration est une surface
+d'attaque **permanente** pour un geste qui arrive deux fois par an, et elle demanderait une
+authentification de second ordre — un rôle dans `users`, un second facteur — que rien d'autre du
+dossier ne justifie. L'opérateur détient déjà les identifiants de la base : il n'y a rien à lui
+accorder qu'il n'ait pas. Même patron et même garde que « il n'existe aucune route
+`POST /api/credits` » : un test vérifie qu'`api/app.js` ne charge jamais `api/operateur.js`, ne nomme
+ni `contrepass`, ni `ledger_audit`, ni `/api/admin`, et que la table des routes vaut toujours
+exactement `/api/match` et `/api/me`. L'outil, de son côté, ne parle pas HTTP et ne s'écoute nulle
+part.
+
+**Il sait LIRE avant de savoir écrire, et `montrer` arrive en premier.** Le premier geste d'un
+incident réel n'est pas de corriger, c'est de regarder. Trois lectures, qui n'écrivent **rien** et
+n'exigent aucune confirmation :
+
+```
+montrer mouvement <motif> <reference>   les jambes, le total, le billet désigné
+montrer billet <id>                     la ligne, ses écritures, son séquestre, le verdict de plafond
+montrer exposition <userId>             l'exposition réalisée sur la fenêtre, et la marge restante
+```
+
+`montrer billet` répond en particulier à « pourquoi ce billet a-t-il été refusé en `plafond` », et il
+y répond avec **la requête qui refuse** — `expositionJoueurCents` passe par `EXPOSITION_FENETRE_SQL`,
+pas par une requête réécrite pour l'occasion. Un outil qui montrerait un autre chiffre que celui qui
+décide ne servirait à rien. Un test vérifie que les trois verbes ne laissent **aucune** ligne dans
+`ledger_entries` ni dans `ledger_audit`, et ne touchent pas `matches`.
+
+**`contrepasser` montre, puis exige trois choses.** Une raison écrite, un nom d'opérateur, et
+`--confirme`. Sans `--confirme`, la commande affiche ce qu'elle poserait et **n'écrit rien**. Avec, la
+contre-passation et sa raison partent **dans la même transaction**.
+
+```
+contrepasser <motif> <reference> --par "<qui>" --raison "<pourquoi>" [--confirme]
+```
+
+**La partie qui décide est PURE**, et elle vit dans `api/ledger.js` :
+`planCorrection(transferts, { par, raison, billet })`. Elle rend un plan gelé ou un **refus nommé**,
+jamais une exception — un opérateur qui lit une pile d'appels un dimanche soir n'apprend rien, et ces
+refus sont des cas normaux. Les codes : `mouvement_vide`, `operateur_vide`, `raison_vide` (les blancs
+ne comptent pas : sinon « pourquoi » serait une case à cocher), `mouvement_heterogene`,
+`double_contrepassation`, `billet_inconnu`, `billet_etranger`, `billet_statut_inconnu`, et
+`billet_ouvert`. Un dixième refus vient du **livre** et non du plan : contre-passer une dotation que
+le joueur a déjà dépensée demande à son compte plus qu'il ne porte, et la règle uniforme du découvert
+l'arrête. C'est un refus, pas une panne — l'opérateur lit une phrase, et **aucun compte ne passe en
+négatif, pas même par une correction**.
+
+**`billet_ouvert` est le seul refus qui regarde ailleurs que dans le livre, et c'est le seul cas qui
+laisserait un séquestre incohérent avec son statut.** Sur une ligne `open`, `solde(enjeu:<id>)` doit
+valoir la mise : contre-passer la mise le viderait, contre-passer un gain le remplirait, et
+`ledgerReconcile` produirait un grief sur une ligne que personne n'a touchée. **Un billet ouvert
+coincé se règle par la clôture normale — le veilleur — jamais par une correction du livre**, et c'est
+écrit dans l'aide de l'outil pour que personne ne le cherche là.
+
+**Contre-passer une contre-passation est REFUSÉ**, et cela solde une dette nommée au module 1. Le
+double geste produit la référence `contrepassation:gain:42`, que `referenceBillet` et sa traduction
+SQL ne ramènent à **aucun** billet : l'écriture cesserait de compter dans l'exposition, et le plafond
+serait faux sans que rien ne le dise. `docs/PHASE-04A.md` chiffrait les deux réponses possibles —
+élargir la règle des deux côtés, ou fermer le chemin. On ferme : le geste n'a pas d'usage, et une
+correction fautive se corrige sur le **mouvement d'origine**.
+
+**`ledger_audit`, en insertion seule, partage la transaction de l'écriture d'argent.** Quand, par
+qui, pourquoi, le `(motif, reference)` d'origine, la référence posée, le nombre de jambes et le
+montant total. C'est toute sa raison d'être : une raison consignée **après coup** peut ne jamais
+l'être — le shell se ferme, la connexion tombe — et une contre-passation sans raison est
+indistinguable d'une erreur de manipulation. Un fichier de journal ou une sortie de terminal ne
+partagent aucune transaction : ils ont été écartés pour cela. La table porte un **`geste`** plutôt que
+d'être une table `contrepassations` : le module 6 y écrira l'anonymisation d'un compte, qui ne touche
+pas un centime mais relève du même registre. La liste des gestes est **fermée à un membre
+aujourd'hui** — l'y ajouter d'avance serait une case en attente d'être créée de travers, exactement ce
+que le dossier refuse depuis le motif de libération de quarantaine.
+
+**Rejouer l'outil ne pose rien, et il LE DIT.** La clé `(motif, reference, compte_debit,
+compte_credit)` refuse la seconde pose ; ce `23505` devient « DÉJÀ POSÉE », pas une pile d'appels. Un
+opérateur qui relance sa commande parce que sa connexion a lâché doit lire que c'était déjà fait :
+sortir en erreur sur un geste idempotent est très exactement ce qui fait ouvrir `psql` pour
+« vérifier ».
+
+**Aucune dépendance nouvelle, aucun secret.** Les identifiants de base viennent de `DATABASE_URL`,
+comme `api/main.js`. Sans elle, l'outil affiche son aide et sort 0 ; un verbe qui a besoin de la base
+le dit et sort 2. Le contrôle est **avant** le `require('./db-pg')`, donc avant `pg` : l'intégration
+continue lance `node api/test.js` avant `npm install`, et ce fichier y est chargé pour ses fonctions
+pures. Un test le **lance** pour de bon plutôt que de relire son texte.
+
+**Ce que les tests prouvent ici, et ce qu'ils ne prouvent pas.** Contre la doublure : les refus de
+`planCorrection` un par un, l'audit qui échoue et ne laisse aucune contre-passation, le rejeu qui ne
+pose rien, le retour **au centime** des quatre comptes touchés par un gain contre-passé, le zéro
+global, et l'exposition qui retombe avec eux. Un grief **légitime** reste, et il est nommé plutôt que
+tu : contre-passer le gain d'une ligne réglée **réhabite** son séquestre, et `ledgerReconcile` a
+raison de le dire — l'outil corrige le livre, il ne décide pas de la suite. Ce qu'ils **ne prouvent
+pas** : que la transaction est arbitrée par Postgres plutôt que par l'ordre des `await` d'un mono-fil.
+C'est `api/db-check.js` qui l'éprouve, en faisant échouer l'audit sur une **vraie** contrainte.
+
 ## `db-check.js` — la vraie Postgres, et ce qui est livré est la RECETTE
 
 **Livrer un script n'est pas l'avoir lancé.** Ce qui est livré ici, c'est la recette : un script, un
@@ -1340,6 +1441,15 @@ doublure se contente d'imiter.
   `Seq Scan` sur `ledger_entries` et exige que l'un des deux index `(compte, cree_le)` serve. C'est
   la seule façon de prouver qu'un index **sert**, et personne ne peut la donner sur la machine de
   travail.
+- **Et depuis le module 5, deux de plus encore.** (1) **La contre-passation et son audit partagent la
+  transaction, arbitrée par Postgres** : on fait échouer l'insertion de l'audit sur une **vraie**
+  contrainte — la raison vidée, refusée par `check (char_length(raison) between 3 and 500)` — et on
+  constate qu'aucune jambe de contre-passation n'a survécu, puis que le cas nominal les pose toutes
+  les deux ensemble, puis que **la clé unique refuse réellement la seconde pose** et que l'outil
+  traduit ce `23505` en « déjà posée » au lieu d'une panne. Une doublure mono-fil décide de l'ordre de
+  ses `await` ; ici c'est la base qui annule. (2) **`ledger_audit` refuse** une raison vide, une raison
+  de deux blancs, un nom d'opérateur vide, un geste hors liste et une contre-passation amputée de ses
+  colonnes — cinq refus nommés par leur contrainte, qu'une doublure ne peut qu'imiter.
 
 Le job `db` de `.github/workflows/test.yml` monte un service `postgres:16` et le lance. Le job
 existant ne change pas d'une ligne, et un test compare ses étapes une à une.
@@ -1360,9 +1470,12 @@ crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sa
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
+operateur.js        l'outil de correction du grand livre, en LIGNE DE COMMANDE. Jamais une route,
+                    et `app.js` ne le charge pas — une garde textuelle le vérifie.
 main.js             assemble les trois et écoute
-schema.sql          users, matches, match_traces, ledger_entries. Aucune colonne « solde ».
-test.js             227 tests sans rien installer, 236 avec jose
+schema.sql          users, matches, match_traces, ledger_entries, ledger_audit.
+                    Aucune colonne « solde ».
+test.js             237 tests sans rien installer, 246 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1465,10 +1578,11 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 227 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 236 : les 227, plus la chaîne complète de vérification
+node api/test.js          # 237 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 246 : les 237, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
+DATABASE_URL=postgres://… node api/operateur.js  # l'outil d'opération, hors de npm test aussi
 ```
 
 La base, la vérification du jeton, la source de graines et l'horloge sont injectées dans

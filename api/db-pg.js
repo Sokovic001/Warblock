@@ -144,6 +144,44 @@ async function ledgerDe(client, { reference }) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// LE JOURNAL DES GESTES D'OPÉRATION, ET IL PREND LE MÊME CLIENT EN TRANSACTION QUE L'ÉCRIVAIN
+// D'ARGENT. C'est toute la raison d'être de cette fonction : l'écriture et sa justification doivent
+// échouer ou réussir ENSEMBLE. Une raison consignée après coup peut ne jamais l'être, et une
+// contre-passation sans raison est indistinguable d'une erreur de manipulation.
+//
+// `ledger_audit` est en INSERTION SEULE comme `ledger_entries` : il n'existe ici ni `update`, ni
+// `delete`, ni `on conflict`. Une trace qu'on peut réécrire ne trace rien.
+//
+// Le nom de la liste de colonnes n'est PAS `LEDGER_AUDIT_COLS`, et ce n'est pas un caprice : une
+// garde d'`api/test.js` relit toute constante nommée `LEDGER_*` comme une liste de colonnes du
+// GRAND LIVRE, et exigerait de `geste` ou de `raison` qu'elles soient des colonnes de
+// `ledger_entries`.
+const AUDIT_COLS = 'id, geste, operateur, raison, motif_origine, reference_origine, ' +
+                   'reference_posee, jambes, montant_cents, cree_le';
+
+// LE JOURNAL SE RELIT, ET C'EST AUSSI IMPORTANT QUE DE L'ÉCRIRE. Un audit que seul `psql` sait lire
+// est une invitation à ouvrir `psql` — c'est-à-dire ce que ce module existe pour éviter. Il se relit
+// par le mouvement qu'il corrige, parce que c'est ce dont l'opérateur part.
+async function ledgerAuditDe(client, { motif, reference }) {
+  const r = await client.query(
+    `select ${AUDIT_COLS} from ledger_audit
+      where motif_origine = $1 and reference_origine = $2 order by id`, [motif, reference]);
+  return r.rows.map(l => ({ ...l, id: String(l.id),
+                            jambes: Number(l.jambes), montant_cents: Number(l.montant_cents) }));
+}
+
+async function ledgerAuditWrite(client, plan) {
+  await client.query(
+    `insert into ledger_audit
+       (geste, operateur, raison, motif_origine, reference_origine, reference_posee,
+        jambes, montant_cents)
+     values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [plan.geste, plan.par, plan.raison, plan.motifOrigine, plan.referenceOrigine,
+     plan.referencePosee, plan.jambes, plan.montantCents]);
+  return { ecrites: 1 };
+}
+
+// ---------------------------------------------------------------------------------------------
 // L'EXPOSITION RÉALISÉE, ET LA REQUÊTE QUI NE FAIT AUCUN CAST SUR LA RÉFÉRENCE.
 //
 // `ledger_entries.reference` est du TEXTE, et `mouvementContrepassation` y écrit `gain:42` et non
@@ -1014,6 +1052,130 @@ function pgDb(connectionString) {
       }
     },
 
+    // ---------------------------------------------------------------------------------------
+    // CE QUI SUIT N'EXISTE QUE POUR `api/operateur.js`, L'OUTIL EN LIGNE DE COMMANDE.
+    //
+    // Aucune route ne les appelle, `api/app.js` ne les connaît pas, et une garde textuelle vérifie
+    // qu'il ne charge jamais l'outil. Une route d'administration serait une surface d'attaque
+    // permanente pour un geste qui arrive deux fois par an, et elle demanderait une authentification
+    // de second ordre que rien d'autre du dossier ne justifie. L'opérateur, lui, détient déjà les
+    // identifiants de la base : c'est le même patron que « il n'existe aucune route
+    // `POST /api/credits` », et la même garde.
+    //
+    // TROIS LECTURES AVANT UNE ÉCRITURE, ET C'EST L'ORDRE QUI COMPTE. Le premier geste d'un incident
+    // réel n'est pas de corriger, c'est de regarder ; un outil qui n'aurait que des verbes
+    // d'écriture renverrait l'opérateur dans `psql` un dimanche soir, c'est-à-dire très exactement le
+    // geste et le jour que ce module existe pour empêcher.
+
+    // Les jambes d'UN mouvement, c'est-à-dire d'un couple `(motif, reference)`. `ledgerDe` relit par
+    // la seule référence, ce qui ramène la mise ET le gain d'un même billet : ici on veut le
+    // mouvement, parce que c'est lui qu'on contre-passe.
+    async lireMouvement({ motif, reference }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `select ${LEDGER_COLS} from ledger_entries
+            where motif = $1 and reference = $2 order by id`, [motif, reference]);
+        return r.rows.map(l => ({ ...l, id: String(l.id), montant_cents: Number(l.montant_cents) }));
+      } finally {
+        client.release();
+      }
+    },
+
+    // Les écritures qui portent une référence, et le solde d'un compte. Ce sont les deux lectures
+    // que `ledgerDe` et `ledgerSolde` savent déjà faire ; elles prennent un client EN TRANSACTION
+    // parce que leurs appelants en ont un, et l'outil n'en a pas. On leur ouvre donc une connexion,
+    // et rien de plus : aucune règle n'est réécrite ici. La doublure d'`api/test.js` porte les deux
+    // mêmes noms depuis la phase 03, ce qui permet à l'outil de tourner contre elle.
+    async ledgerDe({ reference }) {
+      const client = await pool.connect();
+      try {
+        return await ledgerDe(client, { reference });
+      } finally {
+        client.release();
+      }
+    },
+    async ledgerSolde(compte) {
+      const client = await pool.connect();
+      try {
+        return await ledgerSolde(client, compte);
+      } finally {
+        client.release();
+      }
+    },
+
+    // Les gestes d'opération déjà consignés sur ce mouvement. Un journal qu'on ne peut relire qu'en
+    // ouvrant `psql` est une invitation à ouvrir `psql`.
+    async lireAudit({ motif, reference }) {
+      const client = await pool.connect();
+      try {
+        return await ledgerAuditDe(client, { motif, reference });
+      } finally {
+        client.release();
+      }
+    },
+
+    // Le billet, SANS `user_id` dans la clause — et c'est la seule lecture du dépôt qui se le
+    // permette. `findMatch` met le joueur dans la recherche parce qu'un identifiant deviné ne doit
+    // rien apprendre sur la partie de quelqu'un d'autre ; ici il n'y a personne à protéger de
+    // l'opérateur, qui lit déjà la base entière, et il ne CONNAÎT pas le joueur : il part d'une
+    // écriture du livre, dont la référence ne porte que le billet.
+    async lireBillet({ matchId }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(
+          `select ${MATCH_COLS} from matches where id = $1`, [matchId]);
+        return ligneMatch(r.rows[0]) || null;
+      } finally {
+        client.release();
+      }
+    },
+
+    // L'exposition d'un joueur sur la fenêtre, hors de toute transaction : c'est une LECTURE, elle
+    // ne décide de rien. La requête est celle de `createMatch`, et pas une requête réécrite pour
+    // l'occasion — si l'outil montrait un autre chiffre que celui qui refuse, il ne servirait à rien.
+    async expositionJoueurCents({ userId, maintenant }) {
+      const client = await pool.connect();
+      try {
+        return await expositionJoueur(client, userId, fenetreDepuis(maintenant));
+      } finally {
+        client.release();
+      }
+    },
+
+    // LA CONTRE-PASSATION ET SA RAISON, DANS LA MÊME TRANSACTION. C'est la propriété entière du
+    // module, et c'est aussi celle qu'une doublure mono-fil flatte : seul `api/db-check.js`, contre
+    // une vraie base, peut la faire arbitrer par Postgres plutôt que par l'ordre des `await`.
+    //
+    // REJOUER L'OUTIL NE POSE RIEN, ET IL LE DIT. La clé `(motif, reference, compte_debit,
+    // compte_credit)` refuse la seconde pose ; on traduit ce refus-là en réponse, pas en panne. Un
+    // opérateur qui relance sa commande parce que sa connexion a lâché doit lire « c'était déjà
+    // fait » et non une pile d'appels — c'est exactement ce genre de nuit qui fait ouvrir `psql`.
+    async contrepasser(plan) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        await ledgerWrite(client, plan.contrepassation);
+        await ledgerAuditWrite(client, plan);
+        await client.query('commit');
+        return { pose: true, jambes: plan.jambes, montantCents: plan.montantCents };
+      } catch (e) {
+        await client.query('rollback').catch(() => {});
+        if (e && e.code === '23505') return { pose: false, deja: true };
+        // LE DÉCOUVERT EST UN REFUS, PAS UNE PANNE, ET IL ARRIVE VRAIMENT ICI : contre-passer une
+        // dotation que le joueur a déjà dépensée, ou un gain qu'il a rejoué, demande à son compte
+        // plus qu'il ne porte. La règle uniforme du découvert l'arrête — c'est ce qu'on veut — et
+        // l'opérateur doit lire une phrase, pas une pile d'appels.
+        if (e && e.code === 'decouvert') {
+          return { pose: false, refus: 'decouvert', message: e.message,
+                   compte: e.compte, solde: e.solde, requis: e.requis };
+        }
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+
     close: () => pool.end(),
   };
 }
@@ -1026,5 +1188,5 @@ function pgDb(connectionString) {
 // pose un `explain (format json)` sur LA REQUÊTE RÉELLE, et pas sur une requête réécrite pour
 // l'occasion. Un harnais qui recopie ce qu'il vérifie ne vérifie rien — le dossier l'a déjà payé une
 // fois — et c'est le seul contrôle qui puisse dire qu'un index SERT.
-module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe, reglerSequestre, jourDe,
-                   EXPOSITION_FENETRE_SQL, fenetreDepuis };
+module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe, ledgerAuditWrite, ledgerAuditDe,
+                   reglerSequestre, jourDe, EXPOSITION_FENETRE_SQL, fenetreDepuis, AUDIT_COLS };

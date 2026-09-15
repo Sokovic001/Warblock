@@ -24,7 +24,7 @@ En ligne : voir [docs/DEPLOY.md](docs/DEPLOY.md). Le dépôt se publie tout seul
 ## Tests
 
 ```bash
-npm test        # 412 tests sur le jeu + 227 sur l'API, sans dépendance
+npm test        # 412 tests sur le jeu + 237 sur l'API, sans dépendance
 ```
 
 Les règles du jeu vivent dans deux blocs purs à l'intérieur de `index.html`, sans DOM ni WebGL :

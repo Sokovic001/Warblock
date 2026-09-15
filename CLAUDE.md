@@ -51,8 +51,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 412 tests sur le jeu (`node test.js`) et
-  227 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 236 en tout — de bout en bout avec de la vraie
+  237 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 246 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -333,6 +333,26 @@ porte : le reste a besoin d'un navigateur pour tourner.
   une partie gagnée. Les deux index de lecture du livre portent désormais `(compte, cree_le)` ; que
   ces index **servent** n'a de preuve qu'en intégration continue, par un `explain` dans
   `api/db-check.js`.
+- **La contre-passation a UN appelant, et c'est un OUTIL, jamais une route.** `api/operateur.js`, en
+  ligne de commande : une route d'administration est une surface d'attaque **permanente** pour un
+  geste qui arrive deux fois par an, et l'opérateur détient déjà les identifiants de la base. Même
+  garde que « il n'existe aucune route `POST /api/credits` » — `app.js` ne charge jamais l'outil et
+  ne nomme aucune route d'administration. **L'outil sait LIRE avant d'écrire, et `montrer` arrive en
+  premier** : trois lectures qui n'écrivent rien, dont celle qui répond à « pourquoi ce billet a-t-il
+  été refusé en `plafond` », avec **la requête qui refuse** et pas une requête réécrite. `contrepasser`
+  montre, exige une raison écrite, un nom et `--confirme`, puis pose l'écriture **et sa raison dans la
+  même transaction** : une raison consignée après coup peut ne jamais l'être, et une contre-passation
+  sans raison est indistinguable d'une erreur de manipulation. `ledger_audit` est en insertion seule
+  et porte un **`geste`** — le module 6 y écrira l'anonymisation — mais sa liste est **fermée à un
+  membre** tant que personne n'écrit le second. La partie qui décide est **pure** :
+  `WBCore` n'en sait rien, `planCorrection` vit dans `api/ledger.js` et rend un refus **nommé** plutôt
+  que de lancer. **Un mouvement portant sur un billet encore `open` est refusé** (`billet_ouvert`) :
+  c'est le seul cas qui laisserait un séquestre incohérent avec son statut, et un billet ouvert coincé
+  se clôt par le veilleur — l'aide de l'outil le dit. **Contre-passer une contre-passation est refusé**
+  aussi : la référence `contrepassation:gain:42` ne se ramène à aucun billet, donc l'exposition
+  cesserait de la voir. Rejouer l'outil ne pose rien et **le dit**, et un gain contre-passé rend les
+  quatre comptes touchés au centime — mais **réhabite le séquestre** de sa ligne, grief légitime que
+  `ledgerReconcile` prononce et qu'un test asserte au lieu de le taire.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Le solde est une SOMME d'écritures, et les routes l'écrivent.** La dotation et la recharge sont
@@ -486,6 +506,12 @@ tout solde y est modifiable depuis la console.
     `(compte, cree_le)`, et `WBCore.REFUS_SAS` à quatre membres avec un message qui lit la portée.
     Second module de la phase à toucher des clauses SQL : le job `db` le concerne, et il n'a pas pu
     être lancé sur la machine de travail.
+    *Module 5* : **livré**. Qui a le droit de contre-passer — `ledger_audit` en insertion seule et
+    dans la MÊME transaction que l'écriture d'argent, `api/operateur.js` en ligne de commande avec
+    `montrer` d'abord et `contrepasser` ensuite, `planCorrection` pure dans `api/ledger.js`, le refus
+    nommé `billet_ouvert`, et la garde « aucune route d'administration ». `mouvementContrepassation`
+    cesse d'être du code mort. Troisième module de la phase à toucher des clauses SQL : le job `db` le
+    concerne, et il n'a pas pu être lancé sur la machine de travail.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.

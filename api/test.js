@@ -13,6 +13,11 @@ const C = require('./core');
 // qu'une source. Une doublure qui recopierait ces deux listes serait le patron du `respawn()` défini
 // deux fois, et elle mentirait dans le mauvais sens — en acceptant ce que la base refuse.
 const L = require('./ledger');
+// L'OUTIL D'OPÉRATION. Il est requis ICI, en tête, et cela n'exige RIEN : il ne charge `./db-pg` —
+// donc `pg` — qu'à l'intérieur de son pilote, après avoir constaté `DATABASE_URL`. L'intégration
+// continue lance ce fichier AVANT `npm install` ; un `require('./db-pg')` en tête de `operateur.js`
+// ferait échouer tout `node api/test.js` par « module introuvable ». Un test le lance pour de bon.
+const OP = require('./operateur');
 // Le bloc de simulation du jeu, chargé par le serveur depuis index.html. Il est requis ICI, en tête
 // de fichier, parce que depuis le module 7 les tests de la route de résultat doivent JOUER de
 // vraies parties : le serveur ne croit plus aucun fait déclaré, donc un rapport écrit à la main ne
@@ -109,7 +114,11 @@ function fakeDb(seed = [], horloge = null) {
   // règle « aucun `update`, aucun `delete` » commence par l'objet en mémoire. Le seul chemin de
   // correction est une contre-passation, c'est-à-dire une insertion de plus.
   const ledger = [];
-  let next = users.length + 1, nextMatch = 1, nextEcriture = 1;
+  // `ledger_audit`, EN INSERTION SEULE ELLE AUSSI, et pour une raison de plus : une trace qu'on peut
+  // réécrire ne trace rien. Elle PARTAGE LA TRANSACTION de l'écriture d'argent — c'est toute sa
+  // raison d'être, et c'est la propriété que `contrepasser` ci-dessous imite ligne à ligne.
+  const audit = [];
+  let next = users.length + 1, nextMatch = 1, nextEcriture = 1, nextAudit = 1;
   // Les contraintes de `ledger_entries`, imitées une par une pour que la doublure MENTE COMME LE
   // VRAI PILOTE. Sans elles un test verrait passer ce que Postgres refuse, et la classe de panne la
   // plus coûteuse du dossier — une écriture d'argent qui échoue en plein milieu — resterait
@@ -124,7 +133,9 @@ function fakeDb(seed = [], horloge = null) {
   };
   // Le solde d'un compte : la somme de ses crédits moins celle de ses débits, comme l'agrégat SQL
   // de db-pg.js. Il n'y a nulle part de case à lire, ici pas plus qu'en base.
-  const panne = { ledger: null };
+  // `audit` rejoint `ledger` dans les pannes provoquées, et c'est ce crochet-là qui rend testable la
+  // seule propriété du module : l'écriture d'argent et sa justification vivent ou meurent ensemble.
+  const panne = { ledger: null, audit: null };
   // Les deux seuls échecs du livre que l'appelant traduit en refus nommé, jamais en 500 : le miroir
   // de `refusDuLivre` de db-pg.js.
   const refusDuLivre = e => !!e && (e.code === '23505' || e.code === 'decouvert');
@@ -203,6 +214,43 @@ function fakeDb(seed = [], horloge = null) {
     }
     for (const n of nouvelles) ledger.push(n);
     return { ecrites: nouvelles.length };
+  }
+  // L'ÉCRIVAIN DU JOURNAL D'OPÉRATION, et ses contraintes imitées une par une comme celles du grand
+  // livre. Les bornes ne sont pas recopiées : elles viennent d'`api/ledger.js`, qui est aussi ce que
+  // `schema.sql` recopie — une doublure qui écrirait ses propres bornes mentirait dans le mauvais
+  // sens, en acceptant une raison vide que la colonne refuse.
+  const refuseAudit = contrainte => {
+    const e = new Error(`new row for relation "ledger_audit" violates constraint "${contrainte}"`);
+    e.code = '23514'; e.constraint = contrainte;
+    return e;
+  };
+  function ecrireAudit(plan) {
+    // LA PANNE PROVOQUÉE SUR L'AUDIT. Sans elle, « l'écriture et sa raison partagent la transaction »
+    // ne serait qu'une phrase : il faut pouvoir faire échouer la SECONDE moitié pour constater que
+    // la première n'a rien laissé.
+    if (panne.audit && panne.audit(plan)) throw refuseAudit('ledger_audit_raison_check');
+    if (!L.AUDIT_GESTES.includes(plan.geste)) throw refuseAudit('ledger_audit_geste_check');
+    if (typeof plan.par !== 'string' || plan.par.length < 1 || plan.par.length > L.AUDIT_OPERATEUR_MAX) {
+      throw refuseAudit('ledger_audit_operateur_check');
+    }
+    if (typeof plan.raison !== 'string' || plan.raison.length < L.AUDIT_RAISON_MIN
+        || plan.raison.length > L.AUDIT_RAISON_MAX) {
+      throw refuseAudit('ledger_audit_raison_check');
+    }
+    // Une contre-passation porte ses cinq colonnes, ou elle n'est pas une contre-passation.
+    if (plan.geste === 'contrepassation'
+        && [plan.motifOrigine, plan.referenceOrigine, plan.referencePosee,
+            plan.jambes, plan.montantCents].some(v => v === null || v === undefined)) {
+      throw refuseAudit('ledger_audit_contrepassation_complete');
+    }
+    verifierColonnes({ montant_cents: plan.montantCents });
+    audit.push(Object.freeze({
+      id: String(nextAudit++), geste: plan.geste, operateur: plan.par, raison: plan.raison,
+      motif_origine: plan.motifOrigine, reference_origine: plan.referenceOrigine,
+      reference_posee: plan.referencePosee, jambes: plan.jambes,
+      montant_cents: plan.montantCents,
+      cree_le: horloge ? new Date(horloge()).toISOString() : '2026-01-01T00:00:00Z' }));
+    return { ecrites: 1 };
   }
   // L'EXPOSITION, ET ELLE PASSE PAR LES FONCTIONS PURES DU GRAND LIVRE. La doublure ne réécrit ni la
   // règle qui ramène une écriture à un billet, ni la liste des comptes de maison, ni celle des
@@ -556,6 +604,62 @@ function fakeDb(seed = [], horloge = null) {
                    .map(l => ({ id: l.id, motif: l.motif, reference: l.reference,
                                 compte_debit: l.compte_debit, compte_credit: l.compte_credit,
                                 montant_cents: l.montant_cents, cree_le: l.cree_le }));
+    },
+    // ---- CE QUE `api/operateur.js` DEMANDE, ET RIEN D'AUTRE NE L'APPELLE. Aucune route ne les
+    // connaît : l'outil est en ligne de commande, jamais en HTTP, et une garde textuelle vérifie
+    // qu'`api/app.js` ne charge pas l'outil et ne porte aucune route d'administration.
+    //
+    // `ledger_audit` est exposée comme `ledger` et pour la même raison : pour être OBSERVÉE par les
+    // tests. Ses lignes sont gelées elles aussi.
+    ledgerAudit: audit,
+    // Les jambes d'UN mouvement, c'est-à-dire d'un couple `(motif, reference)` — et pas de la seule
+    // référence, qui ramènerait la mise ET le gain d'un même billet.
+    async lireMouvement({ motif, reference }) {
+      return ledger.filter(l => l.motif === motif && l.reference === reference)
+                   .map(l => ({ ...l }));
+    },
+    // Les gestes déjà consignés sur ce mouvement. Un journal qu'on ne peut relire qu'en ouvrant
+    // `psql` est une invitation à ouvrir `psql`.
+    async lireAudit({ motif, reference }) {
+      return audit.filter(l => l.motif_origine === motif && l.reference_origine === reference)
+                  .map(l => ({ ...l }));
+    },
+    // Le billet SANS `user_id` dans la clause : l'outil part d'une écriture du livre, dont la
+    // référence ne porte que le billet, et il n'y a personne à protéger de l'opérateur.
+    async lireBillet({ matchId }) {
+      return matches.find(x => memeId(x.id, matchId)) || null;
+    },
+    async expositionJoueurCents({ userId, maintenant }) {
+      return expositionFenetre(userId, fenetreDepuis(maintenant));
+    },
+    // LA CONTRE-PASSATION ET SA RAISON, DANS LA MÊME TRANSACTION — imitée, et il faut dire comment.
+    // La doublure n'a pas de transaction : elle pose le livre d'abord, comme le vrai pilote, puis
+    // l'audit, et elle DÉFAIT ce qu'elle vient de poser si l'audit échoue. C'est le seul endroit du
+    // fichier qui raccourcisse `ledger`, et c'est un `rollback`, pas une modification : la règle
+    // « aucun update, aucun delete » parle de lignes COMMISES.
+    //
+    // CE QUE CELA NE PROUVE PAS : que Postgres se comporte ainsi. Un mono-fil JavaScript décide de
+    // l'ordre de ses `await` ; seul `api/db-check.js`, contre une vraie base, fait arbitrer
+    // l'atomicité par la base elle-même, et c'est écrit dans `docs/PHASE-04A.md`.
+    async contrepasser(plan) {
+      const avant = ledger.length;
+      try {
+        ecrireLedger(plan.contrepassation);
+        ecrireAudit(plan);
+      } catch (e) {
+        ledger.length = avant;
+        // LA CLÉ D'IDEMPOTENCE A REFUSÉ LA SECONDE POSE, ET CE N'EST PAS UNE PANNE : l'outil le dit
+        // au lieu de sortir en erreur. Le découvert non plus n'est pas une panne — contre-passer une
+        // dotation déjà dépensée demande au compte plus qu'il ne porte, et la règle uniforme
+        // l'arrête. Le miroir exact de `contrepasser` de db-pg.js.
+        if (e && e.code === '23505') return { pose: false, deja: true };
+        if (e && e.code === 'decouvert') {
+          return { pose: false, refus: 'decouvert', message: e.message,
+                   compte: e.compte, solde: e.solde, requis: e.requis };
+        }
+        throw e;
+      }
+      return { pose: true, jambes: plan.jambes, montantCents: plan.montantCents };
     },
     // LA DOTATION ET LA RECHARGE SONT ÉCRITES ICI, PAR LE SERVEUR, et il n'existe aucune route que
     // le client puisse appeler pour en déclencher une. Le miroir exact de `findOrCreate` de
@@ -2209,7 +2313,8 @@ test('aucun compteur nulle part, et l\'agrégat ne lit que les parties réglées
       `${f} parle encore d'une table de compteurs`);
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8').replace(/--[^\n]*/g, '');
   assert.deepStrictEqual((sql.match(/create table if not exists (\w+)/g) || []).sort(),
-    ['create table if not exists ledger_entries', 'create table if not exists match_traces',
+    ['create table if not exists ledger_audit', 'create table if not exists ledger_entries',
+     'create table if not exists match_traces',
      'create table if not exists matches', 'create table if not exists users']);
   // « Une partie refusée ou restée ouverte ne compte pour rien » se prouve plus haut contre la
   // doublure ; la vraie requête, elle, n'est jamais exécutée par un test. On relit donc son texte.
@@ -6037,8 +6142,12 @@ test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis le
   // des DEUX : l'écrivain, et la fonction qui l'appelle pour vider un séquestre.
   //
   // — `settleMatch` et `expireMatches` : les deux qui règlent un séquestre sans écrire eux-mêmes.
+  //
+  // — `contrepasser` : l'UNIQUE appelant de `mouvementContrepassation`, arrivé au module 5 de la
+  //   phase 04a. Il n'est atteignable que par `api/operateur.js`, en ligne de commande : aucune
+  //   route ne le nomme, et une garde plus bas vérifie qu'`api/app.js` ne charge jamais l'outil.
   const APPELANTS_LEDGER = ['findOrCreate', 'createMatch', 'reglerSequestre', 'renounceMatch',
-                            'settleMatch', 'expireMatches'];
+                            'settleMatch', 'expireMatches', 'contrepasser'];
   const pg = PG_NU();
   assert.strictEqual((pg.match(/^async function ledgerWrite\s*\(/gm) || []).length, 1,
     'l\'écrivain du grand livre doit être défini une fois et une seule');
@@ -6071,7 +6180,7 @@ test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis le
   const temoins = sites('ligneMatch').map(englobante);
   assert.ok(temoins.length >= 4, `seulement ${temoins.length} appels témoins`);
   for (const t of temoins)
-    assert.ok(/^(createMatch|findMatch|settleMatch|markPlayed|expireMatches|renounceMatch|lastRenounced)$/.test(t),
+    assert.ok(/^(createMatch|findMatch|settleMatch|markPlayed|expireMatches|renounceMatch|lastRenounced|lireBillet)$/.test(t),
       `le détecteur de fonction englobante rend « ${t} » : il ne marche plus`);
 
   for (const nom of ['ledgerWrite', 'reglerSequestre']) for (const appel of sites(nom)) {
@@ -6088,6 +6197,458 @@ test('GARDE TEXTUELLE : l\'écrivain du grand livre n\'est appelé que depuis le
   const app = lireApi('app.js');
   for (const interdit of ['ledgerWrite', 'ledger_entries'])
     assert.ok(!app.includes(interdit), `app.js parle de ${interdit} : le routeur écrirait de l'argent`);
+});
+
+console.log('Qui a le droit de contre-passer');
+
+// LE BANC D'INCIDENT : un joueur doté, un billet, sa mise, et — s'il est clos — son gain. C'est
+// exactement l'état devant lequel un opérateur se retrouve quand on l'appelle. Le gain est posé
+// APRÈS qu'on a relevé les soldes, pour que « tout retombe exactement » se mesure contre un état
+// observé et non contre une formule recopiée.
+const SIEGES_CHERE = C.seatsOf(C.MODES.resurgence);
+async function bancIncident({ statut = 'settled', miseCents = 1000 } = {}) {
+  const db = fakeDb();
+  const userId = 1, matchId = 77;
+  const clos = statut !== 'open';
+  const p = C.cashoutCents(C.purseBound(miseCents, SIEGES_CHERE).maxCents);
+  const quand = new Date(T0).toISOString();
+  db.matches.push({
+    id: matchId, user_id: userId, mode: 'resurgence', stake_cents: miseCents, seats: SIEGES_CHERE,
+    team_size: 1, paid_seats: 1, brawler: BRAWLER, seed_public: 1, seed_secret: SECRETS[0],
+    sim_version: SIM.SIM_VERSION, client_key: 'incident', status: statut,
+    first_result_at: clos ? quand : null, opened_at: quand, expires_at: quand,
+    settled_at: clos ? quand : null, issue: clos ? 'encaissement' : null, controle: null, motif: null,
+    gross_cents: clos ? p.grossCents : null, fee_cents: clos ? p.feeCents : null,
+    net_cents: clos ? p.netCents : null, purse_cents: clos ? 0 : null,
+    declared_net_cents: null, ecart_cents: null,
+    seconds: 1, kills: 0, deaths: 0, rank: 1, cubes: 0, damage: 0, cashed_out: clos,
+    trace_steps: 1, replay_digest: null, digest_match: clos ? true : null,
+    divergence_step: null, replay_ms: 0,
+  });
+  await db.ledgerWrite(L.mouvementDotation({ userId, montantCents: L.DOTATION_CENTS }));
+  await db.ledgerWrite(L.mouvementMise({ userId, matchId, miseCents }));
+  // LES QUATRE COMPTES QUE LE GAIN TOUCHE, relevés AVANT lui. C'est la référence contre laquelle la
+  // contre-passation doit ramener le livre, au centime.
+  const COMPTES = [L.compteEnjeu(matchId), L.MAISON_CONTREPARTIE, L.MAISON_COMMISSION,
+                   L.compteJoueur(userId)];
+  const soldes = () => COMPTES.map(c => L.soldeDe(livreDe(db), c));
+  const exposition = () => L.expositionDe(livreDe(db), [String(matchId)]);
+  const avant = { soldes: soldes(), exposition: exposition() };
+  if (clos) {
+    await db.ledgerWrite(L.mouvementGain({ userId, matchId, miseCents, grossCents: p.grossCents,
+      feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  }
+  return { db, userId, matchId, miseCents, p, COMPTES, soldes, exposition, avant };
+}
+// Un collecteur de sortie : l'outil n'imprime que par `sortie`, donc un test peut lire ce que
+// l'opérateur aurait lu.
+function bancOutil(db) {
+  const lignes = [];
+  return { lignes, texte: () => lignes.join('\n'),
+           lancer: argv => OP.executer(argv, { db, sortie: l => lignes.push(l),
+                                               maintenant: () => T0 }) };
+}
+const OP_SIGNE = ['--par', 'Loïc', '--raison', 'double règlement du 14, ticket 118'];
+
+test('planCorrection REFUSE un mouvement vide, une raison vide, un opérateur vide, et un paquet hétéroclite', () => {
+  // Les quatre refus que la partie PURE doit tenir, donc les quatre qui se prouvent sans base. Ils
+  // sont RENDUS et non lancés : un opérateur qui lit une pile d'appels un dimanche soir n'apprend
+  // rien, et ce sont des cas normaux — un couple qui ne désigne rien, une option oubliée.
+  const mise = L.mouvementMise({ userId: 3, matchId: 9, miseCents: 50 });
+  const billet = { id: 9, status: 'expired' };
+  const bon = { par: 'Loïc', raison: 'ticket 118', billet };
+
+  for (const vide of [[], null, undefined, 'pas un tableau'])
+    assert.strictEqual(L.planCorrection(vide, bon).code, 'mouvement_vide', String(vide));
+
+  for (const par of ['', '   ', null, undefined, 42])
+    assert.strictEqual(L.planCorrection(mise, { ...bon, par }).code, 'operateur_vide', String(par));
+  assert.strictEqual(L.planCorrection(mise, { ...bon, par: 'x'.repeat(L.AUDIT_OPERATEUR_MAX + 1) }).code,
+    'operateur_trop_long');
+
+  // LA RAISON EST LE CŒUR DU MODULE : une contre-passation sans raison écrite est indistinguable
+  // d'une erreur de manipulation. Les blancs ne comptent pas — sinon « pourquoi » serait une case à
+  // cocher, et une espace suffirait à la cocher.
+  for (const raison of ['', '   ', '\n\t ', 'ab', null, undefined, 0])
+    assert.strictEqual(L.planCorrection(mise, { ...bon, raison }).code, 'raison_vide', String(raison));
+  assert.strictEqual(L.planCorrection(mise, { ...bon, raison: 'x'.repeat(L.AUDIT_RAISON_MAX + 1) }).code,
+    'raison_trop_longue');
+  // Et une raison valide est CONSERVÉE DÉBARRASSÉE DE SES BLANCS : c'est elle qui part en base.
+  assert.strictEqual(L.planCorrection(mise, { ...bon, raison: '  ticket 118  ' }).raison, 'ticket 118');
+  assert.strictEqual(L.planCorrection(mise, { ...bon, par: ' Loïc ' }).par, 'Loïc');
+
+  // UN MOUVEMENT EST UN ENSEMBLE DE TRANSFERTS PARTAGEANT `(motif, reference)`. Contre-passer un
+  // paquet hétéroclite produirait un inverse qui ne correspond à rien de nommable.
+  const autreRef = L.mouvementMise({ userId: 3, matchId: 11, miseCents: 50 });
+  assert.strictEqual(L.planCorrection([...mise, ...autreRef], bon).code, 'mouvement_heterogene');
+  const gain = L.mouvementGain({ userId: 3, matchId: 9, miseCents: 50, grossCents: 0, feeCents: 0,
+                                 netCents: 0, convergee: true });
+  assert.strictEqual(L.planCorrection([...mise, ...gain], bon).code, 'mouvement_heterogene');
+
+  // Et le cas nominal passe, avec tout ce que l'audit devra porter.
+  const plan = L.planCorrection(mise, bon);
+  assert.strictEqual(plan.ok, true, plan.message);
+  assert.strictEqual(plan.geste, 'contrepassation');
+  assert.strictEqual(plan.motifOrigine, 'mise');
+  assert.strictEqual(plan.referenceOrigine, '9');
+  assert.strictEqual(plan.referencePosee, 'mise:9');
+  assert.strictEqual(plan.jambes, 1);
+  assert.strictEqual(plan.montantCents, 50);
+  assert.strictEqual(plan.billet, '9');
+  assert.ok(Object.isFrozen(plan) && Object.isFrozen(plan.contrepassation));
+  // L'inverse EXACT, jambe par jambe : les deux comptes échangés, le montant identique.
+  assert.strictEqual(plan.contrepassation[0].compteDebit, mise[0].compteCredit);
+  assert.strictEqual(plan.contrepassation[0].compteCredit, mise[0].compteDebit);
+});
+
+test('planCorrection REFUSE un mouvement portant sur un billet encore `open`, et le refus est NOMMÉ', () => {
+  // LE SEUL CAS QUI LAISSERAIT UN SÉQUESTRE INCOHÉRENT AVEC SON STATUT, et c'est pour cela qu'il a
+  // un nom à lui. Sur une ligne `open`, `solde(enjeu:<id>)` doit valoir la mise : contre-passer la
+  // mise le viderait, contre-passer un gain le remplirait, et `ledgerReconcile` produirait un grief
+  // sur une ligne que personne n'a touchée.
+  const mise = L.mouvementMise({ userId: 3, matchId: 9, miseCents: 50 });
+  const bon = { par: 'Loïc', raison: 'ticket 118' };
+  const refus = L.planCorrection(mise, { ...bon, billet: { id: 9, status: 'open' } });
+  assert.strictEqual(refus.ok, false);
+  assert.strictEqual(refus.code, 'billet_ouvert');
+  // Et le refus DIT OÙ ALLER : la clôture normale, c'est-à-dire le veilleur.
+  assert.match(refus.message, /veilleur/);
+
+  // Les cinq statuts clos passent, et eux seuls.
+  for (const status of L.STATUTS_CLOS)
+    assert.strictEqual(L.planCorrection(mise, { ...bon, billet: { id: 9, status } }).ok, true, status);
+  assert.strictEqual(L.planCorrection(mise, { ...bon, billet: { id: 9, status: 'zombie' } }).code,
+    'billet_statut_inconnu');
+
+  // NE PAS RELIRE LE BILLET N'EST PAS UNE FAÇON DE CONTOURNER LE CONTRÔLE. Sans la ligne, on ne
+  // peut pas savoir si le séquestre est habité : on refuse, on ne suppose pas.
+  for (const billet of [undefined, null, {}, { id: null }])
+    assert.strictEqual(L.planCorrection(mise, { ...bon, billet }).code, 'billet_inconnu', String(billet));
+  assert.strictEqual(L.planCorrection(mise, { ...bon, billet: { id: 12, status: 'settled' } }).code,
+    'billet_etranger');
+
+  // ET UNE ÉCRITURE QUI NE DÉSIGNE AUCUN BILLET N'A AUCUN BILLET À RELIRE : la dotation et la
+  // recharge passent sans ligne `matches`, parce que `referenceBillet` les rend `null`.
+  for (const mvt of [L.mouvementDotation({ userId: 3, montantCents: 5000 }),
+                     L.mouvementRecharge({ userId: 3, jour: '2026-01-01', montantCents: 1000 })]) {
+    const p = L.planCorrection(mvt, bon);
+    assert.strictEqual(p.ok, true, p.message);
+    assert.strictEqual(p.billet, null);
+  }
+
+  // Et l'AIDE de l'outil le dit aussi, pour que personne ne cherche le déblocage d'un billet ouvert
+  // du côté de la correction du livre.
+  assert.match(OP.AIDE, /billet_ouvert/);
+  assert.match(OP.AIDE, /CL[ÔO]TURE NORMALE/i);
+  assert.match(OP.AIDE, /veilleur/);
+});
+
+test('planCorrection REFUSE de contre-passer une contre-passation, et ferme la limite du module 1', () => {
+  // LA DETTE DU MODULE 1, SOLDÉE ICI PLUTÔT QU'ÉLARGIE. Le double geste produit la référence
+  // `contrepassation:gain:42`, que `referenceBillet` — et sa traduction SQL — ne ramènent à AUCUN
+  // billet : l'écriture cesserait de compter dans l'exposition, et le plafond serait faux sans que
+  // rien ne le dise. `docs/PHASE-04A.md` chiffrait les deux réponses possibles ; on ferme le chemin.
+  const gain = L.mouvementGain({ userId: 3, matchId: 42, miseCents: 50, grossCents: 0, feeCents: 0,
+                                 netCents: 0, convergee: true });
+  const contre = L.mouvementContrepassation({ transferts: gain });
+  assert.strictEqual(contre[0].reference, 'gain:42');
+  const refus = L.planCorrection(contre, { par: 'Loïc', raison: 'ticket 118',
+                                           billet: { id: 42, status: 'settled' } });
+  assert.strictEqual(refus.code, 'double_contrepassation');
+  // La raison du refus est vérifiable, pas seulement écrite : la référence que le double geste
+  // produirait ne se ramène à aucun billet, des deux côtés de la règle.
+  const doublee = L.mouvementContrepassation({ transferts: contre });
+  assert.strictEqual(doublee[0].reference, 'contrepassation:gain:42');
+  assert.strictEqual(L.referenceBillet('contrepassation', doublee[0].reference), null);
+  assert.ok(!L.REFERENCE_BILLET_SQL.includes('contrepassation:'),
+    'la règle SQL a été élargie d\'un côté seulement');
+});
+
+await test('L\'ÉCRITURE ET SA RAISON PARTAGENT LA TRANSACTION : un audit qui échoue ne laisse AUCUNE contre-passation', async () => {
+  // La propriété entière du module. Une raison consignée APRÈS COUP peut ne jamais l'être — le shell
+  // se ferme, la connexion tombe — et une contre-passation sans raison est indistinguable d'une
+  // erreur de manipulation. On fait donc échouer la SECONDE moitié et on regarde la première.
+  const { db, matchId, avant, soldes, exposition } = await bancIncident();
+  const outil = bancOutil(db);
+  const lignes = await db.lireMouvement({ motif: 'gain', reference: String(matchId) });
+  assert.strictEqual(lignes.length, 3, 'le gain maximal porte trois jambes');
+  const apresGain = db.ledger.length;
+
+  db.panne.audit = () => true;
+  await assert.rejects(() => outil.lancer(['contrepasser', 'gain', String(matchId), ...OP_SIGNE, '--confirme']),
+    e => e.code === '23514');
+  assert.strictEqual(db.ledger.length, apresGain,
+    'l\'audit a échoué et la contre-passation est restée : l\'argent et sa raison ne partagent plus la transaction');
+  assert.strictEqual(db.ledgerAudit.length, 0);
+  assert.ok(!db.ledger.some(l => l.motif === 'contrepassation'));
+
+  // Et sans la panne, les deux arrivent ENSEMBLE.
+  db.panne.audit = null;
+  assert.strictEqual(await outil.lancer(['contrepasser', 'gain', String(matchId), ...OP_SIGNE, '--confirme']), 0);
+  assert.strictEqual(db.ledger.filter(l => l.motif === 'contrepassation').length, 3);
+  assert.strictEqual(db.ledgerAudit.length, 1);
+  const trace = db.ledgerAudit[0];
+  assert.strictEqual(trace.geste, 'contrepassation');
+  assert.strictEqual(trace.operateur, 'Loïc');
+  assert.strictEqual(trace.raison, 'double règlement du 14, ticket 118');
+  assert.strictEqual(trace.motif_origine, 'gain');
+  assert.strictEqual(trace.reference_origine, String(matchId));
+  assert.strictEqual(trace.reference_posee, `gain:${matchId}`);
+  assert.strictEqual(trace.jambes, 3);
+  assert.strictEqual(trace.montant_cents, lignes.reduce((s, l) => s + l.montant_cents, 0));
+  // La ligne d'audit est GELÉE : la règle « aucun update, aucun delete » commence par l'objet en
+  // mémoire, et une trace qu'on peut réécrire ne trace rien.
+  assert.ok(Object.isFrozen(trace));
+  assert.throws(() => { trace.raison = 'autre chose'; }, TypeError);
+  assert.match(outil.texte(), /POSÉE : 3 jambe/);
+  // ET LA TRACE SE RELIT PAR L'OUTIL, sur le mouvement qu'elle corrige : c'est de là que part un
+  // opérateur, et c'est ce qui évite le `select` à la main.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['montrer', 'mouvement', 'gain', String(matchId)]), 0);
+  assert.match(outil.texte(), /contrepassation par Loïc/);
+  assert.match(outil.texte(), /double règlement du 14, ticket 118/);
+
+  // TOUT RETOMBE EXACTEMENT, sur les quatre comptes touchés, et le zéro global tient.
+  assert.deepStrictEqual(soldes(), avant.soldes,
+    'la contre-passation d\'un gain n\'a pas ramené les quatre comptes là où ils étaient');
+  zeroGlobal(db, 'après une contre-passation de gain');
+  // ET L'EXPOSITION RETOMBE AVEC EUX : un gain contre-passé ne compte plus. C'est le piège de la
+  // phase, et il se vérifie ici de bout en bout — l'écriture porte `gain:77`, que seule
+  // `referenceBillet` sait ramener au billet 77.
+  assert.strictEqual(exposition(), avant.exposition);
+  assert.strictEqual(exposition(), 0, 'le livre ne portait qu\'une mise avant le gain');
+
+  // LE GRIEF QUI RESTE EST LÉGITIME, ET IL EST NOMMÉ PLUTÔT QUE TU : contre-passer le gain d'une
+  // ligne réglée RÉHABITE son séquestre, et `ledgerReconcile` a raison de le dire. L'outil corrige
+  // le livre, il ne décide pas de la suite — c'est à l'opérateur de poser le mouvement juste, ou de
+  // faire clore la ligne.
+  const griefs = L.ledgerReconcile(db.matches, livreDe(db));
+  assert.strictEqual(griefs.length, 1, griefs.join(' | '));
+  assert.match(griefs[0], /séquestre n'est pas vidé/);
+});
+
+await test('REJOUER L\'OUTIL NE POSE RIEN, et il LE DIT au lieu de sortir en erreur', async () => {
+  // La clé `(motif, reference, compte_debit, compte_credit)` refuse la seconde pose. Un opérateur
+  // qui relance sa commande parce que sa connexion a lâché doit lire « c'était déjà fait » : sortir
+  // en erreur sur un geste idempotent est exactement ce qui fait ouvrir `psql` pour « vérifier ».
+  const { db, matchId } = await bancIncident();
+  const outil = bancOutil(db);
+  const argv = ['contrepasser', 'gain', String(matchId), ...OP_SIGNE, '--confirme'];
+  assert.strictEqual(await outil.lancer(argv), 0);
+  const apres = db.ledger.length;
+
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(argv), 0, 'le rejeu doit sortir proprement, pas en erreur');
+  assert.match(outil.texte(), /DÉJÀ POSÉE/);
+  assert.strictEqual(db.ledger.length, apres, 'le rejeu a posé des écritures');
+  // ET L'AUDIT NON PLUS : la seconde raison n'est pas consignée, puisque rien n'a été écrit. Une
+  // trace sans écriture raconterait un geste qui n'a pas eu lieu.
+  assert.strictEqual(db.ledgerAudit.length, 1);
+  zeroGlobal(db, 'après un rejeu de l\'outil');
+
+  // ET LE DÉCOUVERT EST UN REFUS, PAS UNE PANNE. Contre-passer la DOTATION d'un joueur qui a déjà
+  // dépensé ses crédits demande à son compte plus qu'il ne porte : la règle uniforme l'arrête, et
+  // l'opérateur lit une phrase au lieu d'une pile d'appels. Aucun compte ne passe en négatif, pas
+  // même par une correction.
+  const vide = fakeDb();
+  await vide.ledgerWrite(L.mouvementDotation({ userId: 5, montantCents: L.DOTATION_CENTS }));
+  await vide.ledgerWrite(L.mouvementMise({ userId: 5, matchId: 3, miseCents: L.DOTATION_CENTS }));
+  const o = bancOutil(vide);
+  assert.strictEqual(await o.lancer(['contrepasser', 'dotation', '5', ...OP_SIGNE, '--confirme']), 1);
+  assert.match(o.texte(), /REFUSÉ \(decouvert\)/);
+  assert.ok(!vide.ledger.some(l => l.motif === 'contrepassation'));
+  assert.strictEqual(vide.ledgerAudit.length, 0, 'une raison a été consignée sans son argent');
+});
+
+await test('le verbe `montrer` n\'écrit RIEN : aucune ligne dans ledger_entries, aucune dans ledger_audit', async () => {
+  // Le premier geste d'un incident réel n'est pas de corriger, c'est de regarder. Un verbe de
+  // lecture qui écrirait — ne serait-ce qu'une trace — ferait de « aller voir » une décision.
+  const { db, matchId, userId } = await bancIncident();
+  const outil = bancOutil(db);
+  const avant = { livre: db.ledger.length, audit: db.ledgerAudit.length,
+                  matches: JSON.stringify(db.matches) };
+
+  assert.strictEqual(await outil.lancer(['montrer', 'mouvement', 'gain', String(matchId)]), 0);
+  assert.match(outil.texte(), /3 jambe\(s\)/);
+  assert.match(outil.texte(), new RegExp(`billet désigné : ${matchId}`));
+  // LE JOURNAL SE RELIT PAR LE MÊME OUTIL QUI L'ÉCRIT. « Quelqu'un y a-t-il déjà touché, et
+  // pourquoi ? » est la première question d'un incident réel ; sans réponse ici, elle en a une dans
+  // `psql`.
+  assert.match(outil.texte(), /aucun geste d'opération consigné/);
+
+  // Un identifiant illisible est REFUSÉ avant de partir en SQL : `where id = $1` sur « abc » lève
+  // `22P02`, et l'opérateur lirait une pile d'appels au lieu d'une phrase.
+  for (const mauvais of ['abc', '007', '0', '-1'])
+    assert.strictEqual(await outil.lancer(['montrer', 'billet', mauvais]), 2, mauvais);
+
+  assert.strictEqual(await outil.lancer(['montrer', 'billet', String(matchId)]), 0);
+  assert.match(outil.texte(), /statut settled/);
+  assert.match(outil.texte(), new RegExp(`séquestre ${L.compteEnjeu(matchId)} : 0 centimes`));
+  assert.match(outil.texte(), /exposition réalisée du joueur sur 24 h/);
+
+  assert.strictEqual(await outil.lancer(['montrer', 'exposition', String(userId)]), 0);
+  assert.match(outil.texte(), new RegExp(`plafond\\s+: ${L.PLAFOND_JOUEUR_CENTS} centimes`));
+
+  // Et l'aide, qui n'a besoin d'aucune base.
+  assert.strictEqual(await outil.lancer([]), 0);
+  assert.match(outil.texte(), /montrer mouvement/);
+
+  assert.strictEqual(db.ledger.length, avant.livre, 'un verbe de lecture a écrit dans le grand livre');
+  assert.strictEqual(db.ledgerAudit.length, avant.audit, 'un verbe de lecture a écrit dans le journal');
+  assert.strictEqual(JSON.stringify(db.matches), avant.matches, 'un verbe de lecture a touché matches');
+
+  // ET IL MONTRE AVANT D'ÉCRIRE : sans `--confirme`, `contrepasser` n'est qu'un verbe de lecture de
+  // plus, et il le dit.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['contrepasser', 'gain', String(matchId), ...OP_SIGNE]), 0);
+  assert.match(outil.texte(), /RIEN N'A ÉTÉ ÉCRIT/);
+  assert.match(outil.texte(), /--confirme/);
+  assert.strictEqual(db.ledger.length, avant.livre);
+  assert.strictEqual(db.ledgerAudit.length, avant.audit);
+
+  // UN BILLET ENCORE OUVERT EST REFUSÉ PAR L'OUTIL, avec le code nommé et sans rien écrire.
+  const ouvert = await bancIncident({ statut: 'open' });
+  const o2 = bancOutil(ouvert.db);
+  assert.strictEqual(await o2.lancer(['contrepasser', 'mise', String(ouvert.matchId), ...OP_SIGNE, '--confirme']), 1);
+  assert.match(o2.texte(), /REFUSÉ \(billet_ouvert\)/);
+  assert.strictEqual(ouvert.db.ledger.filter(l => l.motif === 'contrepassation').length, 0);
+  assert.strictEqual(ouvert.db.ledgerAudit.length, 0);
+  reconcilier(ouvert.db, 'un billet ouvert qu\'on a refusé de contre-passer');
+});
+
+test('l\'analyseur d\'arguments de l\'outil est pur, et une option sans valeur n\'avale pas la suivante', () => {
+  // Une raison avalée par une option collée se découvre un dimanche soir. Les deux écritures sont
+  // acceptées — `--par X` et `--par=X` — parce que les deux se tapent, et une option inconnue est
+  // REFUSÉE plutôt qu'ignorée : ignorer `--raion` poserait une contre-passation sans raison.
+  const a = OP.lireArguments(['contrepasser', 'gain', '42', '--par', 'Loïc', '--raison=ticket 118', '--confirme']);
+  assert.strictEqual(a.verbe, 'contrepasser');
+  assert.deepStrictEqual(a.positions, ['gain', '42']);
+  assert.strictEqual(a.par, 'Loïc');
+  assert.strictEqual(a.raison, 'ticket 118');
+  assert.strictEqual(a.confirme, true);
+
+  assert.strictEqual(OP.lireArguments([]).verbe, '');
+  assert.strictEqual(OP.lireArguments(['montrer']).confirme, false);
+  assert.match(OP.lireArguments(['--raison']).erreur, /--raison attend une valeur/);
+  assert.match(OP.lireArguments(['--raison', '--confirme']).erreur, /--raison attend une valeur/);
+  assert.match(OP.lireArguments(['--raion', 'x']).erreur, /option inconnue/);
+  assert.match(OP.lireArguments(['--confirme=oui']).erreur, /ne prend pas de valeur/);
+
+  // La traduction des colonnes vers les transferts du grand livre, une seule fois et ici : le fichier
+  // pur ne sait pas ce qu'est une colonne.
+  const brut = [{ motif: 'mise', reference: '9', compte_debit: 'joueur:3:disponible',
+                  compte_credit: 'enjeu:9', montant_cents: 50 }];
+  assert.deepStrictEqual(OP.enTransferts(brut), [{ motif: 'mise', reference: '9',
+    compteDebit: 'joueur:3:disponible', compteCredit: 'enjeu:9', montantCents: 50 }]);
+  assert.deepStrictEqual(OP.enTransferts(null), []);
+});
+
+test('GARDE TEXTUELLE : ledger_audit est en INSERTION SEULE, et ses bornes sont celles d\'api/ledger.js', () => {
+  // Une trace qu'on peut réécrire ne trace rien. Même garde que sur `ledger_entries`, et pour une
+  // raison de plus : c'est la seule pièce qui dira, six mois plus tard, POURQUOI de l'argent a bougé.
+  const commente = lireApi('schema.sql');
+  const i = commente.indexOf('create table if not exists ledger_audit');
+  assert.ok(i > 0, 'la table du journal d\'opération a disparu de schema.sql');
+  const entete = commente.slice(commente.lastIndexOf('Phase 04a', i), i);
+  assert.match(entete, /INSERTION SEULE/, 'la doctrine a disparu de l\'en-tête de la table');
+  assert.match(entete, /MÊME TRANSACTION|PARTAGE LA TRANSACTION/i,
+    'la raison d\'être de la table — partager la transaction — n\'est plus écrite à côté d\'elle');
+  const sql = SQL_NU();
+  assert.ok(!/\bupdate\s+ledger_audit\b/i.test(sql) && !/\bdelete\s+from\s+ledger_audit\b/i.test(sql));
+  // ET DANS LE PILOTE : un seul écrivain, aucune modification, aucun `on conflict` qui avalerait.
+  const pg = PG_NU();
+  for (const q of (pg.match(/`[^`]*`/g) || [])) {
+    if (!/ledger_audit/.test(q)) continue;
+    assert.ok(!/\bupdate\s+ledger_audit\b/i.test(q), 'un update vise ledger_audit : ' + q);
+    assert.ok(!/\bdelete\s+from\s+ledger_audit\b/i.test(q), 'un delete vise ledger_audit : ' + q);
+    assert.ok(!/on conflict/i.test(q), 'l\'écriture du journal avale un doublon : ' + q);
+  }
+  assert.strictEqual((pg.match(/insert into ledger_audit/gi) || []).length, 1,
+    'le journal d\'opération doit avoir un seul écrivain');
+  assert.strictEqual((pg.match(/^async function ledgerAuditWrite\s*\(/gm) || []).length, 1);
+
+  // LES DEUX LISTES ET LES DEUX BORNES SE CONFRONTENT, exactement comme les motifs du grand livre.
+  // Un `check` qui diverge du code se découvre au premier geste réel, c'est-à-dire au pire moment.
+  const bloc = sql.slice(sql.indexOf('create table if not exists ledger_audit'));
+  const gestes = bloc.match(/check \(geste in \(([^)]*)\)\)/);
+  assert.ok(gestes, 'la liste des gestes a disparu du schéma');
+  assert.deepStrictEqual((gestes[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1)),
+    L.AUDIT_GESTES.slice(), 'le schéma et api/ledger.js ne connaissent pas les mêmes gestes');
+  // UN SEUL MEMBRE AUJOURD'HUI, ET C'EST VOULU : le module 6 y ajoutera `anonymisation`. L'y mettre
+  // d'avance serait ce que le dossier refuse depuis le motif de libération de quarantaine — un membre
+  // de liste fermée que personne n'écrit est une case en attente d'être créée de travers.
+  assert.deepStrictEqual(L.AUDIT_GESTES.slice(), ['contrepassation']);
+  assert.ok(bloc.includes(`check (char_length(raison) between ${L.AUDIT_RAISON_MIN} and ${L.AUDIT_RAISON_MAX})`),
+    'les bornes de la raison divergent entre schema.sql et api/ledger.js');
+  assert.ok(bloc.includes(`check (char_length(operateur) between 1 and ${L.AUDIT_OPERATEUR_MAX})`),
+    'la borne du nom de l\'opérateur diverge entre schema.sql et api/ledger.js');
+  // Et la liste des motifs d'origine est bien celle du grand livre, pas une seconde écriture qui
+  // dériverait. Elle est relue par le même chemin que celle de `ledger_entries`.
+  const motifs = bloc.match(/check \(motif_origine in \(([\s\S]*?)\)\)/);
+  assert.ok(motifs, 'la liste des motifs d\'origine a disparu');
+  assert.deepStrictEqual((motifs[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1)).sort(),
+    L.MOTIFS.slice().sort());
+  // Aucune case de solde n'est entrée par cette porte-là non plus.
+  assert.ok(!/\b(solde|balance|wallet)\b/i.test(bloc));
+});
+
+await test('GARDE : api/app.js ne charge JAMAIS api/operateur.js, et il n\'existe aucune route d\'administration', () => {
+  // Même patron et même garde que « il n'existe aucune route `POST /api/credits` ». Une route
+  // d'administration est une surface d'attaque PERMANENTE pour un geste qui arrive deux fois par an,
+  // et elle demanderait une authentification de second ordre que rien d'autre du dossier ne justifie.
+  // L'opérateur détient déjà les identifiants de la base : il n'y a rien à lui accorder.
+  const app = lireApi('app.js');
+  for (const interdit of ['operateur', 'ledger_audit', 'contrepass', 'planCorrection',
+                          '/api/admin', '/api/ops', '/api/audit', '/api/contrepassation'])
+    assert.ok(!app.includes(interdit), `app.js parle de ${interdit} : une porte d'administration s'ouvre`);
+  // Les routes connues sont celles de la table, et elles n'ont pas changé — la même assertion que
+  // pour les routes de crédit, relue avec elle.
+  const table = app.slice(app.indexOf('const METHODES = new Map'), app.indexOf('const RESULTAT ='));
+  assert.deepStrictEqual((table.match(/'\/api\/[a-z]+'/g) || []).sort(), ["'/api/match'", "'/api/me'"]);
+  // ET L'OUTIL N'EST PAS UN SERVEUR : il ne parle pas HTTP, il ne s'écoute nulle part. Les
+  // commentaires sont retirés d'abord — le même piège que sur `schema.sql` et `db-pg.js`, une fois
+  // de plus : « expression » contient « express », et une garde qui lit les commentaires ne garde
+  // rien. Cela m'a coûté un aller-retour.
+  const outil = lireApi('operateur.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  for (const interdit of ['node:http', 'createServer', 'listen(', 'require(\'express\')'])
+    assert.ok(!outil.includes(interdit), `api/operateur.js devient un serveur : ${interdit}`);
+  // Il lit ses identifiants de base dans l'environnement, comme `api/main.js`, et aucun secret ne
+  // vit dans le dépôt.
+  assert.match(outil, /process\.env\.DATABASE_URL/);
+  // `contrepasser` est l'UNIQUE appelant de `mouvementContrepassation` dans tout le dossier : la
+  // fonction existait depuis la phase 03 sans en avoir un seul.
+  const appelants = ['app.js', 'db-pg.js', 'operateur.js', 'ledger.js']
+    .map(f => [f, (lireApi(f).match(/mouvementContrepassation\s*\(/g) || []).length]);
+  assert.deepStrictEqual(appelants,
+    [['app.js', 0], ['db-pg.js', 0], ['operateur.js', 0], ['ledger.js', 2]],
+    'la contre-passation a repris un appelant hors de planCorrection');
+});
+
+await test('api/operateur.js sans DATABASE_URL affiche l\'aide et SORT 0, sans charger `pg`', () => {
+  // La même sémantique et le même piège que `db-check.js` : `npm test` tourne sans base et sans
+  // réseau, et l'intégration continue lance `node api/test.js` AVANT `npm install`. Un
+  // `require('./db-pg')` en tête de fichier ferait échouer tout le harnais par « module
+  // introuvable », c'est-à-dire un code 1 sur une machine parfaitement saine. On LANCE le fichier
+  // plutôt que de relire son texte — une garde textuelle ne dit pas ce qu'un processus fait.
+  const { spawnSync } = require('node:child_process');
+  const chemin = require('node:path').join(__dirname, 'operateur.js');
+  const vide = { env: { PATH: process.env.PATH || '' }, encoding: 'utf8' };
+  const aide = spawnSync(process.execPath, [chemin], vide);
+  assert.strictEqual(aide.status, 0, `operateur.js sort ${aide.status} : ${aide.stderr || aide.stdout}`);
+  assert.match(aide.stdout, /montrer mouvement/);
+  assert.strictEqual(aide.stderr, '');
+  // Et un verbe qui a besoin de la base le dit, au lieu d'échouer sur un module manquant.
+  const sans = spawnSync(process.execPath, [chemin, 'montrer', 'mouvement', 'gain', '42'], vide);
+  assert.strictEqual(sans.status, 2, sans.stderr || sans.stdout);
+  assert.match(sans.stderr, /DATABASE_URL/);
+  assert.ok(!/Cannot find module/.test(sans.stderr), sans.stderr);
+  // La garde textuelle en second, pour nommer le piège : le `require` du pilote est APRÈS le
+  // contrôle. Les commentaires sont retirés d'abord — celui qui explique ce piège le cite.
+  const src = lireApi('operateur.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const controle = src.indexOf('process.env.DATABASE_URL'), pilote = src.indexOf('require(\'./db-pg\')');
+  assert.ok(controle > 0 && pilote > 0, 'api/operateur.js a changé de forme');
+  assert.ok(controle < pilote,
+    'api/operateur.js charge `pg` avant de constater l\'absence de DATABASE_URL : les tests échoueraient sans dépendances');
 });
 
 await test('db-check.js sans DATABASE_URL SORT 0, et il le dit', () => {

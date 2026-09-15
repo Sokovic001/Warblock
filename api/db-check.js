@@ -859,6 +859,144 @@ async function main() {
       }
       await client.query('rollback');
     });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('LA CONTRE-PASSATION ET SON AUDIT PARTAGENT LA TRANSACTION, arbitrée par Postgres', async () => {
+      // LA PROPRIÉTÉ QUE LA DOUBLURE FLATTE, ET LA PHASE 03 A PAYÉ CETTE LEÇON UNE FOIS. Dans
+      // `api/test.js`, « l'audit échoue, la contre-passation ne reste pas » est vrai parce qu'un
+      // mono-fil JavaScript décide de l'ordre de ses `await` et défait ce qu'il vient de poser. Ici,
+      // c'est Postgres qui annule — on fait échouer l'insertion de l'audit sur une CONTRAINTE RÉELLE,
+      // la raison vide, et on regarde ce que la table d'argent porte après le `rollback`.
+      const base = pgDb(URL_BASE);
+      const u = await creerJoueur(client, 'Contre');
+      const m = await ouvrirBillet(client, u, { status: 'settled' });
+      await ledgerWrite(client, L.mouvementDotation({ userId: u, montantCents: 5000 }));
+      await ledgerWrite(client, L.mouvementMise({ userId: u, matchId: m, miseCents: 50 }));
+      const p = C.cashoutCents(C.purseBound(50, 20).maxCents);
+      await ledgerWrite(client, L.mouvementGain({ userId: u, matchId: m, miseCents: 50,
+        grossCents: p.grossCents, feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+      // CE CAS NE PREND AUCUNE TRANSACTION SUR LA CONNEXION PARTAGÉE, et c'est délibéré : la suite
+      // passe par `pgDb`, donc par d'AUTRES connexions du bassin, et elles ne verraient rien d'une
+      // transaction ouverte ailleurs — pire, elles attendraient ses verrous. Chaque instruction
+      // ci-dessus s'est donc validée toute seule, et le nettoyage final efface tout.
+      try {
+        const lignes = await base.lireMouvement({ motif: 'gain', reference: String(m) });
+        if (lignes.length < 2) throw new Error(`${lignes.length} jambes de gain relues`);
+        const transferts = lignes.map(l => ({ motif: l.motif, reference: l.reference,
+          compteDebit: l.compte_debit, compteCredit: l.compte_credit,
+          montantCents: Number(l.montant_cents) }));
+        const billet = await base.lireBillet({ matchId: m });
+        const plan = L.planCorrection(transferts, {
+          par: 'db-check', raison: 'épreuve de la transaction partagée', billet });
+        if (!plan.ok) throw new Error(`plan refusé : ${plan.code} ${plan.message}`);
+
+        // L'AUDIT ÉCHOUE, SUR UNE VRAIE CONTRAINTE. `raison` est vidée après coup : la colonne porte
+        // `check (char_length(raison) between 3 and 500)`, donc Postgres refuse — et il refuse APRÈS
+        // que les jambes d'argent ont été insérées dans la même transaction.
+        const sansRaison = { ...plan, raison: '' };
+        let leve = null;
+        try { await base.contrepasser(sansRaison); } catch (e) { leve = e; }
+        if (!leve) throw new Error('la base a ACCEPTÉ une contre-passation sans raison écrite');
+        if (leve.code !== '23514') throw new Error(`code ${leve.code} au lieu de 23514`);
+
+        const restes = await base.lireMouvement({ motif: 'contrepassation', reference: `gain:${m}` });
+        if (restes.length !== 0) {
+          throw new Error(`${restes.length} jambes de contre-passation ont survécu à l'échec de l'audit`);
+        }
+        const orphelines = await base.lireAudit({ motif: 'gain', reference: String(m) });
+        if (orphelines.length !== 0) throw new Error('une trace est restée sans son argent');
+
+        // ET MAINTENANT LE CAS NOMINAL : les deux arrivent ensemble.
+        const pose = await base.contrepasser(plan);
+        if (!pose.pose) throw new Error('la contre-passation n\'a pas été posée');
+        const apres = await base.lireMouvement({ motif: 'contrepassation', reference: `gain:${m}` });
+        if (apres.length !== plan.jambes) {
+          throw new Error(`${apres.length} jambes posées au lieu de ${plan.jambes}`);
+        }
+        // La trace se relit par la LECTURE RÉELLE de l'outil, pas par une requête réécrite pour
+        // l'occasion : un harnais qui recopie ce qu'il vérifie ne vérifie rien.
+        const traces = await base.lireAudit({ motif: 'gain', reference: String(m) });
+        if (traces.length !== 1) throw new Error(`${traces.length} traces au lieu d'une`);
+        const trace = traces[0];
+        if (trace.geste !== 'contrepassation' || trace.operateur !== 'db-check'
+            || trace.reference_posee !== `gain:${m}` || trace.jambes !== plan.jambes
+            || trace.montant_cents !== plan.montantCents) {
+          throw new Error('la trace ne décrit pas le geste : ' + JSON.stringify(trace));
+        }
+        // `jambes` et `montant_cents` sont des `integer` : le pilote les rend en nombres, et la
+        // comparaison stricte ci-dessus le prouve — une chaîne « 3 » n'est pas 3.
+        if (typeof trace.jambes !== 'number' || typeof trace.montant_cents !== 'number') {
+          throw new Error('la trace revient en chaîne : ' + JSON.stringify(trace));
+        }
+
+        // ET LA CLÉ UNIQUE REFUSE RÉELLEMENT LA SECONDE POSE — sans lever. C'est la moitié qu'une
+        // doublure imite : ici c'est `ledger_entries_mouvement_uniq` qui arbitre, et l'outil traduit
+        // son `23505` en « c'était déjà fait ».
+        const rejeu = await base.contrepasser(plan);
+        if (rejeu.pose || !rejeu.deja) throw new Error('le rejeu a posé une seconde contre-passation');
+        const encore = await base.lireMouvement({ motif: 'contrepassation', reference: `gain:${m}` });
+        if (encore.length !== plan.jambes) {
+          throw new Error(`${encore.length} jambes après le rejeu au lieu de ${plan.jambes}`);
+        }
+        const deux = await pool.query('select count(*) as n from ledger_audit where reference_origine = $1',
+          [String(m)]);
+        if (Number(deux.rows[0].n) !== 1) throw new Error('le rejeu a consigné une seconde raison');
+
+        // LE LIVRE BOUCLE TOUJOURS : chaque ligne pose `+m` quelque part et `−m` ailleurs, une
+        // contre-passation comprise.
+        const zero = await pool.query(
+          `select coalesce(sum(montant_cents), 0) as debits from ledger_entries`);
+        if (Number(zero.rows[0].debits) <= 0) throw new Error('le livre est vide : le cas ne prouve rien');
+      } finally {
+        await base.close().catch(() => {});
+        const net = await pool.connect();
+        try {
+          await net.query('delete from ledger_audit where reference_origine = $1', [String(m)]);
+          await net.query(
+            `delete from ledger_entries where reference in ($1, $2, $3, $4)`,
+            [String(m), `gain:${m}`, `mise:${m}`, String(u)]);
+          await net.query('delete from match_traces where match_id = $1', [m]);
+          await net.query('delete from matches where user_id = $1', [u]);
+          await net.query('delete from users where id = $1', [u]);
+        } finally { net.release(); }
+      }
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('ledger_audit REFUSE une raison vide, un geste inconnu et une contre-passation amputée', async () => {
+      // « Pourquoi » ne doit pas pouvoir devenir une case cochée. `not null` laisse passer la chaîne
+      // vide : c'est le `check (char_length(raison) between …)` qui tient, et une doublure ne peut
+      // pas SUBIR une contrainte, elle ne fait que l'imiter.
+      await client.query('begin');
+      const poser = (geste, operateur, raison) => [
+        `insert into ledger_audit (geste, operateur, raison, motif_origine, reference_origine,
+                                   reference_posee, jambes, montant_cents)
+         values ($1,$2,$3,'gain','42','gain:42',3,900)`, [geste, operateur, raison]];
+      for (const vide of ['', '  ']) {
+        await refuse(client, '23514', 'ledger_audit_raison_check', ...poser('contrepassation', 'op', vide));
+      }
+      await refuse(client, '23514', 'ledger_audit_raison_check',
+        ...poser('contrepassation', 'op', 'x'.repeat(L.AUDIT_RAISON_MAX + 1)));
+      await refuse(client, '23514', 'ledger_audit_operateur_check',
+        ...poser('contrepassation', '', 'ticket 118'));
+      // La liste des gestes est fermée, et elle n'a qu'un membre aujourd'hui : le module 6 y ajoutera
+      // `anonymisation`, et ce refus-là tombera avec lui. C'est voulu — on ne crée pas une case que
+      // personne n'écrit.
+      for (const inconnu of ['anonymisation', 'correction', 'ajustement', '']) {
+        await refuse(client, '23514', 'ledger_audit_geste_check',
+          ...poser(inconnu, 'op', 'ticket 118'));
+      }
+      // Une contre-passation amputée se lirait comme un geste tracé qui ne dit plus sur quoi il
+      // portait.
+      await refuse(client, '23514', 'ledger_audit_contrepassation_complete',
+        `insert into ledger_audit (geste, operateur, raison) values ('contrepassation','op','ticket 118')`);
+      // Et la ligne complète passe, avec son horodatage par défaut.
+      const ok = await client.query(...poser('contrepassation', 'op', 'ticket 118'));
+      if (ok.rowCount !== 1) throw new Error('la ligne complète a été refusée');
+      const relu = await client.query('select cree_le from ledger_audit order by id desc limit 1');
+      if (!relu.rows[0].cree_le) throw new Error('la trace n\'est pas datée');
+      await client.query('rollback');
+    });
   } finally {
     partage = null;
     client.release();

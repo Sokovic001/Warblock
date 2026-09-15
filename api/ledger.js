@@ -551,6 +551,148 @@ function plafondVerdict({ expositionRealiseeCents, expositionBilletCents, plafon
   return Object.freeze({ franchi: expositionCents > plafondCents, expositionCents, plafondCents });
 }
 
+// ---------- Qui a le droit de contre-passer ----------
+//
+// `mouvementContrepassation` existait depuis la phase 03 et n'avait AUCUN appelant. Ce qui suit lui
+// en donne un, et lui pose ses conditions. La fonction qui DÉCIDE est ici, pure, parce que c'est ici
+// qu'elle se teste : `api/operateur.js` est un pilote — il lit la base, il écrit, il imprime — et
+// une décision qui vit dans un pilote ne se prouve qu'en le lançant.
+//
+// LES GESTES TRACÉS, liste fermée à UN membre. Le module 6 y ajoutera `anonymisation` ; l'y mettre
+// aujourd'hui serait exactement ce que le dossier refuse depuis le motif de libération de
+// quarantaine — « un membre de liste fermée que personne n'écrit est une case en attente d'être
+// créée de travers ». Le coût de l'ajout est chiffré : une valeur ici, une dans le `check` de
+// `ledger_audit`, un test.
+const AUDIT_GESTES = Object.freeze(['contrepassation']);
+
+// LES BORNES DE LA RAISON ÉCRITE, et elles sont recopiées dans `api/schema.sql` — une garde
+// textuelle compare les deux, comme pour la grammaire des comptes. Le minimum n'est pas
+// cosmétique : `not null` laisse passer la chaîne vide, et « pourquoi » deviendrait une case cochée.
+// Trois caractères ne font pas une explication, mais ils font la différence entre « quelqu'un a
+// écrit quelque chose » et « le champ était obligatoire ».
+const AUDIT_RAISON_MIN = 3;
+const AUDIT_RAISON_MAX = 500;
+const AUDIT_OPERATEUR_MAX = 64;
+
+// LE PLAN D'UNE CORRECTION. Elle ne pose rien : elle rend ce qu'il faudrait poser, ou un REFUS
+// NOMMÉ. C'est ce qui permet à l'outil de MONTRER avant d'écrire, et au test de balayer tous les
+// refus sans base.
+//
+// Elle ne LANCE pas sur un refus, elle le rend : un opérateur qui lit une pile d'appels un dimanche
+// soir n'apprend rien, et les refus d'ici sont des cas normaux — un mouvement qui n'existe pas, une
+// raison oubliée, un billet encore ouvert.
+//
+// `transferts` est le mouvement RELU DANS LE LIVRE, en camelCase comme tout ce fichier ; c'est
+// `api/operateur.js` qui traduit les colonnes que le pilote rend.
+function planCorrection(transferts, options) {
+  const { par, raison, billet } = options || {};
+  const refus = (code, message) => Object.freeze({ ok: false, code, message });
+
+  // UN MOUVEMENT VIDE N'EST PAS UNE CORRECTION SANS EFFET, C'EST UNE ERREUR DE DÉSIGNATION : le
+  // couple `(motif, reference)` donné ne retrouve rien dans le livre. Le dire est plus utile que de
+  // poser zéro ligne en silence.
+  if (!Array.isArray(transferts) || transferts.length === 0) {
+    return refus('mouvement_vide',
+      'aucune écriture ne porte ce (motif, référence) : il n\'y a rien à contre-passer');
+  }
+  const nom = typeof par === 'string' ? par.trim() : '';
+  if (nom.length === 0) {
+    return refus('operateur_vide', 'une contre-passation se signe : --par « qui »');
+  }
+  if (nom.length > AUDIT_OPERATEUR_MAX) {
+    return refus('operateur_trop_long', `le nom de l'opérateur dépasse ${AUDIT_OPERATEUR_MAX} caractères`);
+  }
+  const pourquoi = typeof raison === 'string' ? raison.trim() : '';
+  if (pourquoi.length < AUDIT_RAISON_MIN) {
+    return refus('raison_vide',
+      'une contre-passation sans raison écrite est indistinguable d\'une erreur de manipulation : --raison « pourquoi »');
+  }
+  if (pourquoi.length > AUDIT_RAISON_MAX) {
+    return refus('raison_trop_longue', `la raison dépasse ${AUDIT_RAISON_MAX} caractères`);
+  }
+
+  const motif = transferts[0].motif, reference = transferts[0].reference;
+  for (const t of transferts) {
+    // Un mouvement est un ENSEMBLE de transferts partageant `(motif, reference)`. Contre-passer un
+    // paquet hétéroclite produirait un inverse qui ne correspond à rien de nommable.
+    if (t.motif !== motif || t.reference !== reference) {
+      return refus('mouvement_heterogene',
+        `les écritures données n'appartiennent pas au même mouvement : (${motif}, ${reference}) contre (${t.motif}, ${t.reference})`);
+    }
+  }
+
+  // CONTRE-PASSER UNE CONTRE-PASSATION EST REFUSÉ, ET C'EST UNE DETTE DU MODULE 1 QU'ON SOLDE ICI
+  // PLUTÔT QUE D'ÉLARGIR. La double correction produit la référence `contrepassation:gain:42`, que
+  // `referenceBillet` — et sa traduction SQL — ne ramènent à AUCUN billet : cette écriture-là ne
+  // compterait donc pas dans l'exposition, et le plafond serait faux sans que rien ne le dise. Les
+  // deux réponses possibles étaient écrites dans `docs/PHASE-04A.md` : élargir la règle des deux
+  // côtés (un préfixe `(?:contrepassation:)*`, plus un test), ou fermer le chemin. On ferme, parce
+  // que le geste n'a pas d'usage — une correction fautive se corrige en contre-passant le MOUVEMENT
+  // D'ORIGINE une seconde fois, ce que la clé d'idempotence refusera d'ailleurs, ou en posant le
+  // mouvement juste. Le jour où quelqu'un aura un vrai besoin, il lira ce refus et son prix.
+  if (motif === 'contrepassation') {
+    return refus('double_contrepassation',
+      'contre-passer une contre-passation produirait une référence que rien ne ramène à un billet : '
+      + 'l\'exposition cesserait de la voir. Corriger l\'erreur d\'une correction se fait sur le mouvement d\'origine.');
+  }
+
+  // LE SEUL REFUS QUI REGARDE AILLEURS QUE DANS LE LIVRE, et il est nommé pour cela. Un mouvement
+  // qui porte sur un billet encore `open` a son séquestre HABITÉ : le contre-passer le viderait, ou
+  // le remplirait, sans que `matches.status` ne bouge — et `ledgerReconcile` produirait un grief sur
+  // une ligne que personne n'a touchée. C'est le seul cas qui laisse un séquestre incohérent avec
+  // son statut.
+  const ref = referenceBillet(motif, reference);
+  if (ref !== null) {
+    if (billet === null || billet === undefined || billet.id === undefined || billet.id === null) {
+      return refus('billet_inconnu',
+        `l'écriture porte sur le billet ${ref}, et cette ligne n'a pas été relue : on ne peut pas savoir si son séquestre est encore habité`);
+    }
+    // L'identifiant de la ligne relue est passé au même crible que partout ailleurs — un zéro de
+    // tête ferait de « 007 » et « 7 » deux billets — mais ici on REND le refus au lieu de lancer :
+    // toute cette fonction rend ses refus, et une ligne illisible est un cas de plus, pas une panne.
+    let relu;
+    try { relu = identifiant(billet.id, 'matches.id'); }
+    catch (e) { return refus('billet_inconnu', (e && e.message) || String(e)); }
+    if (relu !== ref) {
+      return refus('billet_etranger', `le billet relu est ${relu}, l'écriture porte sur ${ref}`);
+    }
+    if (billet.status === 'open') {
+      return refus('billet_ouvert',
+        `le billet ${ref} est encore ouvert : son séquestre est habité, et une contre-passation le rendrait incohérent avec son statut. `
+        + 'Un billet ouvert coincé se clôt par le veilleur, pas par une correction du livre.');
+    }
+    if (!STATUTS_CLOS.includes(billet.status)) {
+      return refus('billet_statut_inconnu', `statut ${String(billet.status)} inconnu du grand livre`);
+    }
+  }
+
+  let contrepassation;
+  try {
+    contrepassation = mouvementContrepassation({ transferts });
+  } catch (e) {
+    // La fabrique refuse déjà un montant, un compte ou un motif hors règle. On rend son message
+    // plutôt que de le doubler : deux écritures de la même validation finiraient par différer.
+    return refus('mouvement_invalide', (e && e.message) || String(e));
+  }
+
+  return Object.freeze({
+    ok: true,
+    geste: 'contrepassation',
+    par: nom,
+    raison: pourquoi,
+    motifOrigine: motif,
+    referenceOrigine: reference,
+    referencePosee: contrepassation[0].reference,
+    jambes: contrepassation.length,
+    // Le montant TOTAL du mouvement, jambes additionnées. Ce n'est pas un solde et cela ne prétend
+    // pas en être un : c'est ce que l'opérateur a sous les yeux au moment de confirmer, et c'est ce
+    // qu'on lui redonnera six mois plus tard.
+    montantCents: transferts.reduce((s, t) => s + t.montantCents, 0),
+    billet: ref,
+    contrepassation: Object.freeze(contrepassation),
+  });
+}
+
 // ---------- La réconciliation ----------
 //
 // Le zéro global ne dit RIEN sur l'appariement : il est vrai même si un montant juste est posé sur
@@ -711,4 +853,5 @@ module.exports = {
   FUSIBLE_RAFRAICHI_S,
   COMPTES_EXPOSITION, MOTIFS_EXPOSITION,
   expositionBilletMaxCents, referenceBillet, REFERENCE_BILLET_SQL, expositionDe, plafondVerdict,
+  AUDIT_GESTES, AUDIT_RAISON_MIN, AUDIT_RAISON_MAX, AUDIT_OPERATEUR_MAX, planCorrection,
 };

@@ -432,3 +432,75 @@ drop index if exists ledger_entries_debit_idx;
 drop index if exists ledger_entries_credit_idx;
 create index if not exists ledger_entries_debit_fenetre_idx  on ledger_entries (compte_debit, cree_le);
 create index if not exists ledger_entries_credit_fenetre_idx on ledger_entries (compte_credit, cree_le);
+
+-- ---------------------------------------------------------------------------------------------
+-- Phase 04a — QUI A LE DROIT DE CONTRE-PASSER, ET POURQUOI IL L'A FAIT.
+--
+-- Le grand livre n'a qu'un chemin de correction, la contre-passation, et jusqu'ici personne n'avait
+-- écrit qui pouvait l'emprunter : ni journal, ni rôle. `docs/HISTORIQUE.md` le disait sans détour —
+-- « le premier incident réel se réglera à la main dans `psql`, un dimanche soir, et c'est ce jour-là
+-- que la règle "aucun `update`" tombe ». Cette table est la moitié qui manquait ; l'autre est
+-- `api/operateur.js`, un outil en LIGNE DE COMMANDE et jamais une route.
+--
+-- CETTE TABLE EST EN INSERTION SEULE, comme `ledger_entries` et pour la même raison, en plus dure :
+-- une trace qu'on peut réécrire ne trace rien. Aucun `update`, aucun `delete`, nulle part.
+--
+-- ELLE PARTAGE LA TRANSACTION DE L'ÉCRITURE D'ARGENT. C'est tout son intérêt, et ce n'est pas un
+-- détail d'implémentation : une raison consignée APRÈS COUP peut ne jamais l'être — le shell se
+-- ferme, la connexion tombe, l'opérateur est appelé ailleurs — et une contre-passation sans raison
+-- est indistinguable d'une erreur de manipulation. L'argent et sa justification vivent ou meurent
+-- ensemble. Un fichier de journal ou une sortie de terminal ne partagent aucune transaction : ils
+-- ont été écartés pour cela.
+--
+-- POURQUOI UN `geste` ET PAS UNE TABLE `contrepassations`. Le module 6 y écrira l'ANONYMISATION d'un
+-- compte, qui ne touche pas un centime : c'est le même registre — un geste manuel, rare, fait par
+-- quelqu'un qui détient les identifiants de la base, et qui doit dire pourquoi. Deux tables
+-- jumelles auraient produit deux écrivains, deux gardes et deux relectures.
+--
+-- LA LISTE DES GESTES EST FERMÉE, ET ELLE N'A QU'UN MEMBRE AUJOURD'HUI. Pas deux : le dossier a déjà
+-- tranché ce cas exact sur le motif de libération de quarantaine — « un membre de liste fermée que
+-- personne n'écrit est une case en attente d'être créée de travers ». Ce que coûtera l'ajout de
+-- `anonymisation` au module 6 est chiffré : une valeur dans ce `check`, une dans `AUDIT_GESTES`
+-- d'`api/ledger.js`, et un test. La liste est recopiée de `AUDIT_GESTES` et une garde textuelle
+-- compare les deux, exactement comme pour les motifs du grand livre.
+create table if not exists ledger_audit (
+  id                bigserial    primary key,
+  geste             text         not null check (geste in ('contrepassation')),
+  -- PAR QUI. Le nom que l'opérateur se donne, et rien de plus : il n'existe pas de rôle dans
+  -- `users`, et il ne doit pas en exister — une route d'administration serait une surface d'attaque
+  -- permanente pour un geste qui arrive deux fois par an. Ce nom n'est donc PAS une authentification,
+  -- c'est une signature : celui qui écrit ici détient déjà les identifiants de la base, il n'a rien
+  -- à usurper. Ce qu'on veut savoir six mois plus tard, c'est qui appeler.
+  operateur         text         not null check (char_length(operateur) between 1 and 64),
+  -- POURQUOI, EN TOUTES LETTRES, ET LA COLONNE REFUSE LE VIDE. `not null` ne suffit pas : une chaîne
+  -- vide passerait, et « pourquoi » deviendrait une case cochée. Les bornes sont recopiées de
+  -- `AUDIT_RAISON_MIN` et `AUDIT_RAISON_MAX` d'`api/ledger.js`, comparées par une garde textuelle.
+  raison            text         not null check (char_length(raison) between 3 and 500),
+  -- LE MOUVEMENT D'ORIGINE, EN DEUX COLONNES ET PAS UNE : c'est le couple `(motif, reference)` qui
+  -- NOMME un mouvement dans le grand livre, et les recoller en une seule chaîne obligerait à les
+  -- redécouper pour retrouver les jambes. NULL pour un geste qui ne porte sur aucun mouvement — le
+  -- module 6 en apporte un.
+  motif_origine     text         check (motif_origine in ('dotation', 'recharge', 'mise', 'gain',
+                                                          'remboursement', 'contrepassation')),
+  reference_origine text         check (char_length(reference_origine) between 1 and 128),
+  -- LA RÉFÉRENCE DE CE QUI A ÉTÉ POSÉ, c'est-à-dire `<motif>:<référence d'origine>`. Elle est écrite
+  -- plutôt que recalculée à la lecture : le jour où `mouvementContrepassation` changerait de règle
+  -- de nommage, les lignes déjà posées continueraient de dire la vérité.
+  reference_posee   text         check (char_length(reference_posee) between 1 and 128),
+  -- COMBIEN DE JAMBES, ET POUR QUEL MONTANT TOTAL. Ce sont des faits du moment, pas un agrégat à
+  -- relire : ils permettent de constater, six mois plus tard, que la contre-passation retrouvée dans
+  -- le livre est bien celle que l'opérateur avait vue avant de confirmer.
+  jambes            integer      check (jambes > 0),
+  montant_cents     integer      check (montant_cents > 0),
+  cree_le           timestamptz  not null default now(),
+
+  -- UNE CONTRE-PASSATION PORTE SES CINQ COLONNES, OU ELLE N'EST PAS UNE CONTRE-PASSATION. Sans cette
+  -- contrainte, une ligne d'audit amputée se lirait comme un geste tracé alors qu'elle ne dit plus
+  -- sur quoi il portait. Elle est écrite `geste <> 'contrepassation' or …` pour que le module 6
+  -- n'ait rien à y défaire : un geste d'un autre nom n'est pas regardé ici.
+  constraint ledger_audit_contrepassation_complete check (
+    geste <> 'contrepassation'
+    or (motif_origine is not null and reference_origine is not null and reference_posee is not null
+        and jambes is not null and montant_cents is not null)
+  )
+);

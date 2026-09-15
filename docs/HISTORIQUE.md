@@ -618,6 +618,93 @@ Postgres, `42702` compris — et un **`explain (format json)` qui refuse tout `S
 vert connu reste celui du 2026-09-15 (run 34894629071), antérieur à `paid_seats` comme à ces deux
 index. À ce stade, **412 tests sur le jeu et 227 sur l'API** sans rien installer, 236 avec `jose`.
 
+### La contre-passation reçoit son unique appelant, et il n'est pas une route — phase 04a, module 5
+
+`mouvementContrepassation` existait depuis la phase 03 et n'avait **aucun appelant**. Cette entrée
+ferme le point ouvert qui portait son nom : « personne n'a écrit qui peut l'emprunter : ni journal
+d'audit, ni rôle d'administration. Le premier incident réel se réglera à la main dans `psql`, un
+dimanche soir, et c'est ce jour-là que la règle "aucun `update`" tombe. »
+
+**La correction est un OUTIL, `api/operateur.js`, en ligne de commande.** Une route d'administration
+est une surface d'attaque **permanente** pour un geste qui arrive deux fois par an, et elle
+demanderait une authentification de second ordre — un rôle dans `users`, un second facteur — que rien
+d'autre du dossier ne justifie. L'opérateur détient déjà les identifiants de la base : on ne lui
+accorde rien qu'il n'ait pas. C'est le même patron que « il n'existe aucune route
+`POST /api/credits` », et la même garde textuelle le tient : `api/app.js` ne charge jamais l'outil, ne
+nomme ni `contrepass`, ni `ledger_audit`, ni `/api/admin`, et sa table de routes vaut toujours
+exactement `/api/match` et `/api/me`. Écarté : `POST /api/admin/contrepassation` avec un rôle en
+base ; et le statu quo, c'est-à-dire le `psql` du dimanche soir.
+
+**L'outil sait LIRE avant de savoir écrire, et `montrer` arrive en premier.** Ce n'est pas un ordre de
+présentation, c'est la raison d'être du module : le premier geste d'un incident réel n'est pas de
+corriger, c'est de regarder. Trois lectures — les jambes d'un mouvement par `(motif, reference)`, un
+billet avec ses écritures et son séquestre, l'exposition d'un joueur sur la fenêtre — et elles
+n'écrivent **rien**, pas même une trace. Un outil qui n'aurait que des verbes d'écriture renverrait
+l'opérateur dans `psql` exactement le soir qu'on cherche à éviter. `montrer billet` répond en
+particulier à « pourquoi ce billet a-t-il été refusé en `plafond` », et il y répond avec **la requête
+qui refuse** : un outil qui montrerait un autre chiffre que celui qui décide ne servirait à rien.
+
+**L'argent et sa justification vivent ou meurent ensemble.** `ledger_audit` — quand, par qui,
+pourquoi, le `(motif, reference)` d'origine, la référence posée, les jambes, le montant — est en
+insertion seule et partage la **transaction** de l'écriture. Une raison consignée après coup peut ne
+jamais l'être : le shell se ferme, la connexion tombe, l'opérateur est appelé ailleurs — et une
+contre-passation sans raison est indistinguable d'une erreur de manipulation. Un fichier de journal
+ou une sortie de terminal ne partagent aucune transaction : écartés pour cela. La table porte un
+**`geste`** plutôt que d'être une table `contrepassations`, parce que le module 6 y écrira
+l'anonymisation d'un compte — même registre, geste manuel et rare fait par qui détient les
+identifiants. Mais sa liste de gestes est **fermée à un membre aujourd'hui** : l'y ajouter d'avance
+serait une case en attente d'être créée de travers, ce que le dossier refuse depuis le motif de
+libération de quarantaine. Coût chiffré de l'ajout au module 6 : une valeur dans le `check`, une dans
+`AUDIT_GESTES`, un test.
+
+**La partie qui décide est PURE, et elle ne vit pas dans le pilote.**
+`planCorrection(transferts, { par, raison, billet })` est dans `api/ledger.js`, donc entièrement
+testable sans base. Elle **rend** un refus nommé plutôt que de lancer : un opérateur qui lit une pile
+d'appels un dimanche soir n'apprend rien, et ces refus sont des cas normaux — un couple qui ne
+désigne rien, une option oubliée. Les blancs ne comptent pas dans la raison : sinon « pourquoi »
+deviendrait une case à cocher, et une espace suffirait à la cocher.
+
+**Un mouvement portant sur un billet encore `open` n'est pas contre-passable**, et le refus s'appelle
+`billet_ouvert`. C'est le seul cas qui laisserait un séquestre incohérent avec son statut : sur une
+ligne `open`, `solde(enjeu:<id>)` doit valoir la mise, et contre-passer la mise le viderait quand
+contre-passer un gain le remplirait. `ledgerReconcile` produirait alors un grief sur une ligne que
+personne n'a touchée. **Le cas où l'incident EST un billet ouvert coincé se traite par la clôture
+normale — le veilleur — et c'est écrit dans l'aide de l'outil** pour que personne ne le cherche du
+côté de la correction du livre. Ne pas relire la ligne n'est pas une façon de contourner le
+contrôle : sans elle, on refuse (`billet_inconnu`), on ne suppose pas.
+
+**Une dette du module 1 est soldée en FERMANT le chemin, pas en élargissant la règle.** Contre-passer
+une contre-passation produit la référence `contrepassation:gain:42`, que `referenceBillet` et sa
+traduction SQL ne ramènent à **aucun** billet : l'écriture cesserait de compter dans l'exposition, et
+le plafond serait faux sans que rien ne le dise. `docs/PHASE-04A.md` chiffrait les deux réponses — un
+préfixe `(?:contrepassation:)*` des deux côtés plus un test, ou la fermeture. On ferme, parce que le
+geste n'a aucun usage : une correction fautive se corrige sur le **mouvement d'origine**. Le refus
+s'appelle `double_contrepassation`, et un test vérifie que la règle SQL n'a pas été élargie d'un seul
+côté.
+
+**Rejouer l'outil ne pose rien, et il le DIT.** La clé `(motif, reference, compte_debit,
+compte_credit)` refuse la seconde pose ; ce `23505` devient « DÉJÀ POSÉE ». Sortir en erreur sur un
+geste idempotent est très exactement ce qui fait rouvrir `psql` pour « vérifier ».
+
+**Un grief LÉGITIME reste après une contre-passation de gain, et il est nommé plutôt que tu.**
+Contre-passer le gain d'une ligne réglée **réhabite** son séquestre : `ledgerReconcile` dit alors « le
+séquestre n'est pas vidé », et il a raison. L'outil corrige le livre, il ne décide pas de la suite —
+c'est à l'opérateur de poser le mouvement juste, ou de faire clore la ligne. Le test l'asserte au lieu
+de le taire. Ce qui retombe en revanche **exactement** : les quatre comptes touchés, au centime, le
+zéro global du livre, et l'exposition — un gain contre-passé ne compte plus.
+
+**Ce qui n'a de preuve qu'en intégration continue, et c'est le cœur du module.** « L'audit qui échoue
+ne laisse aucune contre-passation » est vrai dans `api/test.js` parce qu'un mono-fil JavaScript décide
+de l'ordre de ses `await` et défait ce qu'il vient de poser — c'est très exactement le genre de
+propriété qu'une doublure flatte, et la phase 03 a payé cette leçon une fois. `api/db-check.js`
+reçoit donc deux cas : l'audit qu'on fait échouer sur une **vraie** contrainte, avec Postgres pour
+seul arbitre du `rollback`, et la clé unique qui refuse **réellement** la seconde pose ; plus cinq
+refus de `ledger_audit` nommés par leur contrainte. **Ce module touche des clauses SQL, donc le job
+`db` le concerne, et il n'a pas pu être lancé sur la machine de travail** : ni Postgres, ni docker, ni
+`psql`, ni `gh`, vérifié une fois de plus. Le dernier passage vert connu reste celui du 2026-09-15
+(run 34894629071), antérieur à `paid_seats`, aux deux index de fenêtre et à `ledger_audit`. À ce
+stade, **412 tests sur le jeu et 237 sur l'API** sans rien installer, 246 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -988,6 +1075,10 @@ passe contre la doublure prouve la doublure.
   écoulé — chacune éprouvée en la retirant seule. Ce qui reste ouvert derrière, et qui n'est pas la
   même chose : **qui a le droit de relire une trace.** Il n'existe ni rôle d'administration, ni
   journal d'audit ; à nommer avant la phase 04, avec « qui a le droit de contre-passer ».
+  *Partiellement fermé par le module 5 de la phase 04a :* le journal d'audit existe (`ledger_audit`)
+  et l'outil d'opération aussi, mais ni l'un ni l'autre ne parle de `match_traces` — relire une trace
+  reste un `select` à la main, non tracé. Ce que le module a tranché et qui vaut ici : ce sera un
+  verbe de `api/operateur.js`, jamais une route, et il écrira son `geste` dans `ledger_audit`.
 - **Un déploiement se draine, il n'écrase pas les billets ouverts.** Décision d'exploitation, à
   ranger à côté de « la maison est la contrepartie de chaque pot ». Ce qui arrive quand on ne la
   prend pas est désormais visible : le rejeu refuse en `sim_version` et la partie n'est jamais
@@ -1031,11 +1122,14 @@ passe contre la doublure prouve la doublure.
   test ne peut départager les quatre, et le seul juge est un humain qui joue une partie entière, sur
   téléphone comme sur ordinateur. **C'est la dette la plus ancienne du dossier et elle est encore
   là.**
-- **Qui a le droit de contre-passer.** Une contre-passation est le seul chemin de correction du
-  grand livre, et personne n'a écrit qui peut l'emprunter : ni journal d'audit, ni rôle
-  d'administration. Le premier incident réel se réglera à la main dans `psql`, un dimanche soir, et
-  c'est ce jour-là que la règle « aucun `update` » tombe. À nommer avant la phase 04, avec la
-  suppression de compte et le changement de pseudo tracés.
+- ~~**Qui a le droit de contre-passer.**~~ **Refermé par le module 5 de la phase 04a** — voir « La
+  contre-passation reçoit son unique appelant, et il n'est pas une route ». `api/operateur.js` est
+  cet appelant, en ligne de commande et jamais en HTTP ; `ledger_audit` est le journal, en insertion
+  seule, et il partage la **transaction** de l'écriture d'argent ; `planCorrection` est la partie
+  pure qui décide, et elle refuse un mouvement portant sur un billet encore `open`. Ce qui reste
+  ouvert derrière, et qui n'est pas la même chose : **la suppression de compte et le changement de
+  pseudo tracés**, renvoyés au module 6 de la même phase — c'est lui qui passe les cascades en
+  `restrict` et qui écrit le verbe `anonymiser`, avec son `geste` dans la même table.
 - **Le sort de la quarantaine**, et le seuil sur `ecart_cents` : renvoyés à la phase 06, sur des
   données réelles. La phase 03 produit ce qui manquait pour trancher — un rendement de quarantaine
   **en centimes** et non plus en nombre de lignes — et n'ajoute délibérément aucun motif de

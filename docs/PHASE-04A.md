@@ -153,6 +153,15 @@ d'élargir `REFERENCE_BILLET_SQL` du même coup, donc de re-décider des deux c�
 le jour où quelqu'un ouvrira ce chemin : un préfixe `(?:contrepassation:)*` dans une expression, des
 deux côtés, et un test. Écrit ici plutôt que laissé à découvrir sur un plafond qu'on croirait tenir.
 
+**Tranché à la livraison du module 5 : on FERME le chemin plutôt que d'élargir la règle.**
+`planCorrection` refuse un mouvement de motif `contrepassation`, sous le code nommé
+`double_contrepassation`, et un test vérifie que `REFERENCE_BILLET_SQL` n'a pas été élargie d'un seul
+côté. La raison du choix : le double geste n'a **aucun usage** — une correction fautive se corrige sur
+le mouvement d'origine, et la clé d'idempotence refuserait de toute façon la seconde pose du même
+mouvement inverse. Élargir aurait ajouté une règle vivante des deux côtés d'un réseau pour un chemin
+que personne n'emprunte. Le chiffrage ci-dessus reste valable le jour où quelqu'un aura un vrai
+besoin : il lira le refus et son prix.
+
 ### 5. Le plafond se décide à l'OUVERTURE du billet, et rien n'est réservé
 
 Sur l'exposition réalisée d'une fenêtre glissante **plus** le pire cas du billet qu'on ouvre. Rien
@@ -385,6 +394,28 @@ une contre-passation ; c'est écrit dans l'aide de l'outil pour que personne ne 
 
 La partie qui décide est pure : `planCorrection(transferts, { par, raison })`, donc entièrement
 testable sans base.
+
+**Trois précisions apportées à la livraison du module 5, écrites ici plutôt que découvertes.**
+
+La première corrige la signature ci-dessus : c'est `planCorrection(transferts, { par, raison,
+billet })`. Le refus « un billet encore `open` n'est pas contre-passable » a besoin de la ligne
+`matches`, et une fonction pure ne va pas la chercher. Conséquence directe et voulue : **ne pas
+relire le billet n'est pas une façon de contourner le contrôle** — sans la ligne, on refuse
+(`billet_inconnu`), on ne suppose pas. Une écriture qui ne désigne aucun billet, dotation ou recharge,
+n'en demande aucun : `referenceBillet` rend `null` et la question ne se pose pas.
+
+La deuxième est un **grief légitime** que la contre-passation d'un gain laisse derrière elle, et qui
+n'était écrit nulle part : contre-passer le gain d'une ligne réglée **réhabite** son séquestre, donc
+`ledgerReconcile` dit « le séquestre n'est pas vidé ». Il a raison. L'outil corrige le livre, il ne
+décide pas de la suite — c'est à l'opérateur de poser le mouvement juste, ou de faire clore la ligne.
+Le test l'asserte au lieu de le taire. Ce qui retombe en revanche **exactement** : les quatre comptes
+touchés au centime, le zéro global, et l'exposition.
+
+La troisième est la **liste des gestes de `ledger_audit`, fermée à UN membre**. La table porte bien un
+`geste` plutôt que d'être une table `contrepassations`, comme la décision 14 le demande — mais
+`anonymisation` n'y entre **pas** d'avance : ce serait la case en attente d'être créée de travers que
+le dossier refuse depuis le motif de libération de quarantaine. Chiffré pour le module 6 : une valeur
+dans le `check`, une dans `AUDIT_GESTES`, un test.
 
 ### 14. Un compte ne s'efface pas, il s'anonymise
 
