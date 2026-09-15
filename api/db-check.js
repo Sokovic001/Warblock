@@ -866,19 +866,20 @@ async function main() {
         `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
                               seed_public, seed_secret, sim_version, client_key, status, opened_at,
                               expires_at, settled_at, issue, gross_cents, fee_cents, net_cents)
-         select $1,'resurgence',1000,50,1,1,'bolt',12345,$2,1,'foule-'||g,'settled',$3,$4,$3,
-                'encaissement',$5,$6,$7
+         select $1::bigint,'resurgence',1000,50,1,1,'bolt',12345,$2,1,'foule-'||g,'settled',
+                $3::timestamptz,$4::timestamptz,$3::timestamptz,
+                'encaissement',$5::integer,$6::integer,$7::integer
            from generate_series(1, 5000) g`,
         [foule, SECRETE, MAINTENANT, DANS_UNE_HEURE, p.grossCents, p.feeCents, p.netCents]);
       await client.query(
         `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents, cree_le)
-         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2,
+         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2::integer,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1
+           from matches m where m.user_id = $1::bigint
          union all
-         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3,
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3::integer,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1`,
+           from matches m where m.user_id = $1::bigint`,
         [foule, p.grossCents - 1000, p.feeCents]);
       await client.query('analyze ledger_entries');
       await client.query('analyze matches');
