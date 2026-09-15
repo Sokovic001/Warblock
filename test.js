@@ -506,7 +506,19 @@ test('a message is trimmed, collapsed and capped so it cannot break the layout',
 test('anything that is not usable text comes back empty', () => {
   for (const v of [null, undefined, 42, {}, [], '', '   ', '\n\t ']) assert.strictEqual(C.sanitizeChat(v), '');
 });
-test('control characters are stripped, so no message can inject markup breaks', () => {
+test('sanitizeChat is NOT an HTML sanitizer, and the renderer must not assume it is', () => {
+  // This test pins a contract rather than a behaviour, so read it before changing the renderer.
+  // sanitizeChat exists for layout: it trims, collapses and caps. Markup goes straight through,
+  // on purpose — a player who types <3 sees <3. That is only safe because addBubble puts the
+  // text in a text node. The old renderer interpolated this value into innerHTML, which made
+  // <img src=x onerror=...> run, and renderChatHistory replayed it on every chat open.
+  // Escaping here instead would double-render against textContent: <3 would show as &lt;3.
+  // If a chat message ever reaches innerHTML again, escape it AT THAT SINK, not here.
+  const payload = '<img src=x onerror="alert(1)">';
+  assert.strictEqual(C.sanitizeChat(payload), payload, 'markup passes through unchanged');
+  assert.strictEqual(C.sanitizeChat('<3 gg'), '<3 gg', 'and that is what lets <3 survive');
+});
+test('control characters are stripped', () => {
   const out = C.sanitizeChat('ok\u0000\u001f\u007fdone');
   assert.ok(!/[\u0000-\u001f\u007f]/.test(out), out);
 });
@@ -1081,5 +1093,50 @@ test('boxes give cubes more often than hearts', () => {
   assert.ok(C.BOX_DROP.cube > C.BOX_DROP.heart);
 });
 test('bots hesitate before their first shot and fire slower than a human', () => { assert.ok(C.BOT.reaction>=0.4); assert.ok(C.BOT.fireMult>1); });
+
+// Everything above reads the CORE slice only. The other 2600 lines — rendering, input, bots,
+// audio, HUD — are never evaluated here, so a stray brace in them used to leave this file
+// printing "191 passed" while the page was blank in a browser. That check lived in CLAUDE.md
+// as a note for whoever remembered to run it; it belongs here, where it runs every time.
+console.log('\nThe simulation draws from the seed');
+test('no simulation function reaches for Math.random()', () => {
+  // The map was reproducible from its seed; the match was not. Every decision taken during a
+  // round drew on the global Math.random(), so two rounds on the same seed with the same inputs
+  // diverged — which rules out replays, reproducible debugging and any server-authoritative sim.
+  // Those draws now go through srnd(), backed by G.srng. This test is the thing that keeps them
+  // there: it reads the Game block, which nothing else here can reach, and fails the moment a
+  // simulation function grows a bare Math.random() again.
+  // Audio, sparks, ticker names and avatar ids keep Math.random() on purpose — they never touch
+  // game state, so seeding them would buy nothing and cost a stream.
+  const SIM_FUNCTIONS = ['makeEntity', 'fireSpec', 'spawnPickup', 'respawn', 'pickGoal', 'botUpdate', 'zoneUpdate'];
+  const offenders = [];
+  for (const name of SIM_FUNCTIONS) {
+    const start = html.indexOf(`function ${name}(`);
+    assert.notStrictEqual(start, -1, `${name}() has been renamed or removed — update SIM_FUNCTIONS`);
+    // Functions in this file start at column 0 and end at the next line that is a lone "}".
+    const end = html.indexOf('\n}', start);
+    assert.notStrictEqual(end, -1, `could not find the end of ${name}()`);
+    const body = html.slice(start, end);
+    if (body.includes('Math.random()')) offenders.push(name);
+  }
+  assert.deepStrictEqual(offenders, [],
+    `these simulation functions draw outside the seeded stream: ${offenders.join(', ')}. Use srnd().`);
+});
+test('srnd() exists and falls back when no match is running', () => {
+  // The lobby builds entities for its brawler previews, and no G exists then.
+  assert.ok(/function srnd\(\)\s*\{[^}]*G\.srng[^}]*Math\.random\(\)/.test(html),
+    'srnd() must read G.srng when a match is running and fall back to Math.random() otherwise');
+});
+
+console.log('\nThe file loads at all');
+test('every inline <script> block compiles', () => {
+  const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)];
+  assert.ok(blocks.length >= 2, `expected the CORE and Game blocks, found ${blocks.length}`);
+  blocks.forEach(([, body], i) => {
+    // new Function parses without running: a syntax error throws, a missing `document` does not.
+    try { new Function(body); }
+    catch (e) { assert.fail(`inline <script> #${i + 1} does not compile: ${e.message}`); }
+  });
+});
 
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
