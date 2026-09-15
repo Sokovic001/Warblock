@@ -38,8 +38,10 @@ Cinq blocages, et rien d'autre.
 
 Le levier qui rend tout cela petit est un invariant déjà acquis : l'index partiel
 `matches_un_seul_ouvert` garantit qu'**un joueur n'a qu'un billet ouvert à la fois**. La somme
-« exposition réalisée + un seul pire cas » est donc exacte, et il n'y a rien à réserver ni à
-libérer.
+« exposition réalisée + un seul pire cas » est donc exacte **pour la portée `joueur`**, et il n'y a
+rien à réserver ni à libérer. L'index est PARTIEL et porte sur `user_id` : il ne dit rien du nombre
+de billets ouverts tous joueurs confondus, donc la même phrase est **fausse pour la maison**, dont le
+fusible est approché — voir la décision 6.
 
 Rien de cette phase ne demande une base qui tourne pour être livré vert sur la machine de travail —
 mais trois de ses propriétés n'ont de **preuve** qu'en intégration continue, et c'est écrit plus bas
@@ -168,8 +170,9 @@ Sur l'exposition réalisée d'une fenêtre glissante **plus** le pire cas du bil
 n'est réservé, rien n'est libéré.
 
 L'index partiel `matches_un_seul_ouvert` garantit qu'un joueur n'a jamais plus d'un pire cas en vol.
-La somme « réalisé + un pire cas » est donc exacte, et elle tient en deux lectures dans la
-transaction qui existe déjà.
+La somme « réalisé + un pire cas » est donc exacte **par joueur**, et elle tient en deux lectures dans
+la transaction qui existe déjà. Cet index porte sur `user_id` et il est partiel : la même somme ne
+majore **rien** pour la maison, dont le fusible est approché et l'assume — décision 6.
 
 Écarté : un système de réservation — un compte d'engagement crédité à l'ouverture, libéré au
 règlement — qui doublerait le nombre d'écritures et ajouterait une jambe à solder sur chacune des
@@ -213,6 +216,21 @@ update` existe pour tenir. Il est donc lu **dans la transaction d'ouverture, apr
 agrégat est borné par les billets d'un seul joueur sur vingt-quatre heures : quelques dizaines de
 lignes, sur un index qui les porte.
 
+**Et cette borne-là a failli n'être qu'une phrase.** La requête ne restreignait au joueur qu'**après**
+la jointure : ses trois clauses — fenêtre, motifs, comptes de maison — ne mentionnaient pas le joueur,
+et le `join` porte sur une **expression** `case` qu'aucun index ne couvrait, donc le planificateur ne
+pouvait rien descendre et matérialisait toutes les écritures de maison de la fenêtre, tous joueurs
+confondus, pour en jeter 99,8 % — c'est-à-dire O(trafic du site) pendant que la transaction tient le
+verrou de ligne. Deux choses la tiennent maintenant : la sous-requête porte elle-même
+`REFERENCE_BILLET_SQL in (select id::text from matches where user_id = $1)` — la MÊME expression que
+la jointure, jamais `reference` brute, sans quoi une contre-passation `gain:42` sortirait du filtre —
+et `schema.sql` porte `ledger_entries_billet_fenetre_idx`, un index d'expression sur cette référence
+et `cree_le`, qui ouvre la boucle imbriquée depuis `matches`. La preuve n'est pas dans `npm test` :
+`api/db-check.js` mesure désormais les lignes **réellement lues** par `explain (analyze)`, avec un
+lest de jambes de maison appartenant à d'autres joueurs — la seule dimension qui grossit en
+production, et celle qui manquait au banc. « Aucun `Seq Scan` » ne distinguait pas un parcours
+d'index borné d'un parcours d'index complet.
+
 **Le fusible global**, lui, est un interrupteur, pas un invariant. Le lire sous le verrou ferait de
 chaque ouverture de billet un agrégat non borné sur la table qui grossit le plus vite du dépôt. Le
 dépôt a déjà payé ce genre de chose une fois : `GET /api/me` retenait un client du bassin assez
@@ -223,9 +241,26 @@ lectures.
 
 Être exact sur un seuil de deux millions de centimes, au billet près, ne veut rien dire ; payer un
 agrégat non borné sur chaque ouverture pour l'obtenir est la mauvaise moitié du marché. La
-péremption est donc écrite avec son chiffre : **le fusible peut être en retard de soixante secondes,
-et ce retard vaut au plus ce qu'une minute d'ouvertures peut engager.** L'horloge est injectée
-(`now`), donc la cadence de rafraîchissement est testable sans attendre.
+péremption est donc écrite avec son chiffre : **le fusible peut être en retard de soixante secondes
+sur ce que le LIVRE porte.** L'horloge est injectée (`now`), donc la cadence de rafraîchissement est
+testable sans attendre — et elle se lit dans les **deux sens** : `now` vaut `Date.now`, donc une
+horloge murale qui recule figerait sinon le cache pour toute la durée du recul, et un âge négatif est
+traité comme une péremption.
+
+**Et ce retard n'est ni la seule erreur du fusible, ni la plus grande.** Il était écrit ici que ce
+retard « vaut au plus ce qu'une minute d'ouvertures peut engager » : c'est faux d'un ordre de
+grandeur, et c'est cette phrase-là qu'on relirait le jour où le fusible aurait laissé passer la
+casse. Le fusible ne voit que des écritures **réglées** — les jambes de maison naissent du motif
+`gain`, posé au règlement — donc un billet **ouvert** y pèse zéro pendant toute sa vie,
+`LOBBY.wait + zoneTotalS + MATCH_MARGE_S`. Le verdict n'ajoute qu'un seul pire cas, celui du billet
+qu'on ouvre, et l'index `matches_un_seul_ouvert` est partiel sur `user_id` : rien ne borne le nombre
+de billets ouverts **tous joueurs confondus**. L'erreur réelle vaut donc le pire cas cumulé de tous
+les billets en vol. Cent comptes qui ouvrent une Resurgence à 10 $ dans la même minute passent tous —
+aucun de leurs gains n'est encore au livre — et posent 3 900 000 centimes quatre minutes plus tard,
+près du double du fusible, sans qu'un refus ait été prononcé. Limite connue, constatée par un test.
+La borner ne demanderait pas de revenir sur la décision : le nombre de billets **ouverts** est borné
+par la CONCURRENCE et non par l'historique, donc l'argument de coût qui justifie l'amortissement ne
+s'y applique pas, et cet agrégat-là pourrait entrer dans la même lecture amortie.
 
 Cette mémoire de processus rejoint la limitation de débit dans les **limites connues** : deux états
 en mémoire, perdus au redémarrage, non partagés entre plusieurs instances. Écrit ici plutôt que
@@ -265,12 +300,27 @@ mode qui change fait tomber le test, et quelqu'un doit re-décider. C'est la seu
 un nombre qui survit à la table qui l'a justifié.
 
 **Ce que ces nombres coûtent, écrit sans enjoliver.** Un compte vaut au plus 156 000 centimes de
-contrepartie par jour, soit 1 560 $. Le fusible global vaut 2 000 000, soit 20 000 $, c'est-à-dire
-**environ treize comptes saturés dans la même journée**. `findOrCreate` crée un compte par `auth_id`
-Crossmint, donc par adresse email, et le serveur dote 5 000 centimes à la connexion plus 1 000 par
-jour : treize adresses email jetables suffisent donc à faire sauter le fusible. Le vrai plafond de
-la maison **est le fusible global** ; le plafond par joueur ne sert qu'à empêcher un seul compte de
-l'épuiser à lui seul.
+contrepartie par jour, soit 1 560 $. Le fusible global vaut 2 000 000, soit 20 000 $ — mais c'est un
+budget d'exposition **NETTE** sur la fenêtre, tous joueurs confondus, et cela change ce que le chiffre
+veut dire. `findOrCreate` crée un compte par `auth_id` Crossmint, donc par adresse email, et le
+serveur dote 5 000 centimes à la connexion plus 1 000 par jour. Le vrai plafond de la maison **est le
+fusible global** ; le plafond par joueur ne sert qu'à empêcher un seul compte de l'épuiser à lui seul.
+
+**« Environ treize comptes saturés » n'est vrai que sur un livre dont l'exposition nette par ailleurs
+est nulle**, et il faut l'écrire ici parce que la phrase a d'abord été posée comme une propriété.
+L'espérance par billet est négative pour le joueur — sur une table solo à $0,50, `mouvementGain`
+expose +750 c sur le gagnant et −50 c sur chacun des dix-neuf perdants, soit −10 c en moyenne — donc
+la marge quotidienne de la maison **relève** le seuil réel. Le seuil qu'une flotte doit franchir est
+`PLAFOND_MAISON_CENTS + marge nette de la fenêtre`, et il croît avec le trafic : de l'ordre de 13,
+14, 19, 26 et 39 comptes saturés à 0, 20 000, 100 000, 200 000 et 400 000 billets réglés par jour.
+Corollaire, et il est désagréable : **ce fusible protège la caisse de la maison, il ne compte pas les
+comptes**, et il est de moins en moins un rempart contre une flotte à mesure que le site grossit —
+ce qui **avance** l'échéance de la vérification d'identité de la 04b au lieu de la reculer. Lire une
+somme d'expositions **positives** n'est pas l'échappatoire : à 200 000 billets par jour, les seuls
+gagnants légitimes pèsent quelque 7 500 000 c et le fusible sauterait tous les jours. La lecture
+nette est la seule qui passe à l'échelle ; c'est la phrase qui était fausse, pas le code. Un test
+constate la limite : la même flotte, avec une population perdante semée sur la fenêtre, ne fait pas
+sauter le fusible.
 
 Le remède à la flotte de comptes est une **vérification d'identité**, pas une règle de jeu. Elle
 n'est pas dans cette phase, elle est dans la 04b avec le KYC. En attendant, le fusible est la seule
@@ -293,6 +343,37 @@ donc `portee: 'joueur' | 'maison'`, et `WBCore.refusMessage` la lit :
 - portée absente ou illisible : **on rend le message de la maison**, délibérément. Promettre une
   table moins chère quand aucune ne marchera est pire que dire « plus tard » à quelqu'un qu'une
   table moins chère aurait dépanné.
+
+**Il y a une TROISIÈME situation, et c'est celle que le plafond est calibré pour produire.** Écrite
+après coup, parce que la décision ci-dessus était juste et son application fausse d'une bande. Le pire
+cas d'un billet est **strictement positif** sur les vingt combinaisons mode × palier — de 750 centimes
+pour solo à $0,50 jusqu'à 39 000 pour la Resurgence à 10 $ — donc dès que l'exposition réalisée d'un
+joueur arrive à moins d'un **pire cas minimal** du plafond, `plafondVerdict` rend `franchi: true` pour
+**toute** table, portée `joueur`. Cet état n'est pas un cas limite : quatre Resurgence à 10 $ gagnées
+au maximum passent toutes — la quatrième tombant sur `156 000 > 156 000`, qui est faux, et la
+comparaison est stricte pour cette raison exacte — et laissent la réalisée à `PLAFOND_JOUEUR_CENTS`
+tout rond, c'est-à-dire exactement ce que `PLAFOND_TABLES_PAR_JOUR = 4` promet de laisser gagner. Le
+joueur lisait alors « pick a smaller buy-in » sur les vingt tables, prenait vingt fois le même refus,
+épuisait son seau de débit et finissait sur un **429** — qui n'est pas dans `REFUS_SAS` et le renvoie
+jouer hors ligne. C'est très exactement le tort que cette décision invoque pour séparer les deux
+portées, reproduit sur l'autre portée.
+
+La réponse porte donc, **en plus** de la portée, un booléen `aucuneTableMoinsChere`, et
+`WBCore.refusMessage` rend alors une phrase « plus tard » qui reste distincte de celle de la maison —
+la cause doit rester lisible.
+
+Deux choses ont été refusées ici, et pour la même raison. **Basculer `portee` à `'maison'`** ferait
+mentir la réponse sur *quel* plafond a refusé, alors qu'elle porte `plafondCents` à côté et que les
+tests du fusible assertent que la portée dit lequel : cela aurait déplacé le défaut au lieu de le
+fermer. **Descendre le calcul dans `WBCore`** aurait fait voyager le pire cas minimal du lobby dans
+les 465 Ko que chaque joueur télécharge : le grand livre n'est pas une règle du jeu. Le serveur
+décide, le jeu **lit** — et un serveur ancien qui parle à un client neuf, ou l'inverse, retombe sur le
+repli existant, qui est celui de la maison.
+
+**Le seuil est `plafond − pire cas minimal du lobby`, jamais `plafond`.** « Réalisée ≥ plafond » se
+déclencherait trop tard d'un pire cas minimal, c'est-à-dire précisément sur la bande où le lobby est
+déjà fermé. Le nombre se dérive de `MODES × TIERS` dans `api/app.js` — 750 centimes aujourd'hui — et
+jamais d'un littéral : même discipline que `PLAFOND_JOUEUR_CENTS`, qu'un test recalcule.
 
 La réponse porte aussi `expositionCents`, `plafondCents` et `fenetreHeures`, en 409 comme tous les
 refus nommés de cette API — jamais en 500, et sans enfermer personne.
@@ -372,10 +453,22 @@ justifie. L'opérateur est déjà celui qui détient les identifiants de la base
 un `psql` à la main un dimanche soir, qui est le jour où la règle « aucun `update` » tombe.
 
 **L'outil sait LIRE avant de savoir écrire.** Le premier geste d'un incident réel n'est pas de
-corriger, c'est de regarder : l'exposition d'un joueur sur la fenêtre, les jambes d'un mouvement,
-pourquoi ce billet a été refusé en `plafond`. Un outil qui n'aurait que des verbes d'écriture
+corriger, c'est de regarder : l'exposition d'un joueur sur la fenêtre, les jambes d'un mouvement, la
+marge de plafond qu'un billet avait à son ouverture. Un outil qui n'aurait que des verbes d'écriture
 enverrait l'opérateur dans `psql` un dimanche soir — précisément le geste et le jour que ce module
 existe pour empêcher. Le verbe `montrer` arrive donc en premier, et il n'écrit rien.
+
+**Corrigé après coup, et la correction vaut d'être lue.** « Pourquoi ce billet a-t-il été refusé en
+`plafond` » était assigné à `montrer billet`, ce qu'aucun verbe ne peut rendre : un refus `plafond` ne
+laisse **aucune** ligne dans `matches` — c'est la règle « ni ligne, ni écriture, ni séquestre » de la
+décision 5 — et le corps du 409 ne porte pas d'identifiant. La question appartient à
+`montrer exposition <userId>`, qui part du joueur. Et `montrer billet` lui-même mentait sur son propre
+chiffre : la requête était bien celle qui refuse, mais ce ne sont pas la même *requête* mais les mêmes
+**paramètres** qui font un nombre — elle était ancrée sur l'horloge courante quand `createMatch`
+décide sur `opened_at`. `EXPOSITION_FENETRE_SQL` porte donc une borne haute, `cree_le <= $5`, que le
+point de décision pose sur `opened_at` (où elle ne retranche rien : rien de postérieur n'existe à cet
+instant pour un joueur que le verrou de ligne sérialise) et que l'outil repose sur `opened_at` de la
+ligne qu'il relit, des mois après.
 
 ### 13. La contre-passation et sa raison partagent la transaction
 
@@ -617,8 +710,11 @@ C'est le second ancrage, et il est aussi important que le plancher.
 
 **Un plafond par joueur ne borne pas une flotte de comptes.** Crossmint donne une identité par
 adresse email, et rien n'empêche cinquante adresses. Le fusible global est la seule réponse de cette
-phase, il vaut environ treize comptes saturés, et quand il saute il refuse tout le monde. Ce n'est
-pas un invariant, c'est un aveu daté : le remède est une vérification d'identité, en 04b.
+phase, il vaut environ treize comptes saturés **sur un livre par ailleurs à l'équilibre**, et quand
+il saute il refuse tout le monde. Ce n'est pas un invariant, c'est un aveu daté : le remède est une
+vérification d'identité, en 04b. Et l'aveu est pire qu'écrit au départ — le fusible lit une
+exposition NETTE, donc la marge du jour relève son seuil et le nombre de comptes nécessaires croît
+avec le trafic. Voir la décision 7.
 
 **Le fusible global est un point de panne unique.** Mal réglé, il transforme un pic de gains
 légitimes en panne totale du lobby pour tous les joueurs connectés. Il doit être assez haut pour ne
@@ -662,7 +758,22 @@ resteraient du code mort que personne n'aurait vu tourner.
 - **04b — le dépôt.** Compte fournisseur, webhook, idempotence sur l'événement de paiement, KYC,
   cadre légal. Le motif `depot` du grand livre s'ouvre là et pas avant. La doctrine en quatre phrases
   est consignée dans `docs/HISTORIQUE.md`.
-- **04b — la vérification d'identité**, seul remède réel à la flotte de comptes.
+- **04b — la vérification d'identité**, seul remède réel à la flotte de comptes. Et l'échéance est
+  plus proche qu'elle n'en avait l'air : le fusible global lit une exposition **nette**, donc son
+  seuil réel est `PLAFOND_MAISON_CENTS + marge nette de la fenêtre` et croît avec le trafic — il
+  protège la caisse, il ne compte pas les comptes.
+- **04b ou 06 — borner une FLOTTE, si on le veut vraiment.** C'est la seule vraie question ouverte
+  laissée par la décision 7, et elle ne se referme pas par un correctif de module 4 : un stock net
+  n'indexe pas ce qu'on cherche à borner. Il faudrait autre chose — la somme des expositions
+  **positives** par joueur sur la fenêtre, ou un **taux** plutôt qu'un stock — avec une constante
+  recalibrée sur du trafic réel. C'est un calibrage sur données, à ranger à côté du relevé
+  d'exploitation et de l'alerte que cette phase ne livre pas.
+- **06 — faire entrer les billets EN VOL dans le fusible, si l'on veut la borne et pas seulement
+  l'aveu.** Aujourd'hui le fusible ne voit que des écritures réglées, donc son erreur vaut le pire cas
+  cumulé de tous les billets ouverts et non « une minute d'ouvertures ». L'agrégat des lignes `open`
+  est borné par la CONCURRENCE et non par l'historique : il peut entrer dans la même lecture amortie,
+  sans toucher au chemin sous verrou. Chiffré : une colonne `matches.net_max_cents` (le nombre est
+  déjà calculé par `api/app.js` et passé à `createMatch`), une somme, un test.
 - **Avant la première écriture de production** : la devise en premier segment du nom de compte, et
   le séquestre portant le pot notionnel entier. Gratuites aujourd'hui, une reprise de données après.
 - **05 — le retrait**, et la question du solde jouable contre le solde retirable.

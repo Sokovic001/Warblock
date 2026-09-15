@@ -388,11 +388,27 @@ const PLAFOND_TABLES_PAR_JOUR = 4;
 // jamais sur un nombre rond « raisonnable ».
 const PLAFOND_JOUEUR_CENTS = 156000;
 
-// LE FUSIBLE GLOBAL, et ce qu'il vaut vraiment : environ treize comptes saturés dans la même
-// journée. Ce n'est pas un réglage, c'est une alerte — son déclenchement refuse TOUT LE MONDE. Il
-// existe parce qu'un plafond par joueur ne borne pas une flotte de comptes : une identité vaut une
-// adresse email, et le seul remède réel à la flotte est une vérification d'identité, renvoyée à la
-// phase 04b avec le reste du bord de l'argent réel.
+// LE FUSIBLE GLOBAL : UN BUDGET D'EXPOSITION NETTE SUR VINGT-QUATRE HEURES, TOUS JOUEURS CONFONDUS.
+// Ce n'est pas un réglage, c'est une alerte — son déclenchement refuse TOUT LE MONDE.
+//
+// CE QU'IL BORNE, ET CE QU'IL NE BORNE PAS. Il est lu sur une exposition NETTE : les billets perdus
+// s'imputent sur les gagnés, et c'est la seule lecture qui passe à l'échelle — une somme des
+// expositions POSITIVES le ferait sauter tous les jours dès quelques dizaines de milliers de billets
+// par jour. Mais le net a un prix, et il doit être écrit ici : l'espérance par billet est NÉGATIVE
+// pour le joueur — sur une table solo à $0,50, `mouvementGain` expose +750 c sur le gagnant et −50 c
+// sur chacun des dix-neuf perdants, soit −10 c en moyenne — donc la marge quotidienne de la maison
+// RELÈVE le seuil réel. Le seuil qu'une flotte doit franchir n'est pas `PLAFOND_MAISON_CENTS`, c'est
+// `PLAFOND_MAISON_CENTS + marge nette de la fenêtre`, et il croît avec le trafic.
+//
+// « ENVIRON TREIZE COMPTES SATURÉS » N'EST DONC VRAI QUE SUR UN LIVRE DONT L'EXPOSITION NETTE PAR
+// AILLEURS EST NULLE. À 0, 20 000, 100 000, 200 000 et 400 000 billets réglés par jour, il en faut
+// de l'ordre de 13, 14, 19, 26 et 39. Le corollaire est à lire en entier : ce fusible protège la
+// CAISSE de la maison, il ne compte pas les comptes, et il est de MOINS EN MOINS un rempart contre
+// une flotte à mesure que le site grossit. Cela AVANCE l'échéance de la vérification d'identité de
+// la 04b au lieu de la reculer. Un plafond par joueur ne borne pas une flotte — une identité vaut
+// une adresse email — et borner une flotte demanderait d'indexer sur autre chose qu'un stock net :
+// la somme des expositions positives par joueur, ou un taux plutôt qu'un stock, avec une constante
+// recalibrée sur du trafic réel. C'est une décision de calibrage sur données, renvoyée à la 04b.
 const PLAFOND_MAISON_CENTS = 2000000;
 
 // À QUELLE CADENCE LE FUSIBLE SE RELIT, et pourquoi il a le droit d'être en retard. Le plafond par
@@ -403,7 +419,16 @@ const PLAFOND_MAISON_CENTS = 2000000;
 // un client du bassin assez longtemps pour mettre en file le renoncement d'un AUTRE joueur au-delà
 // de sa fenêtre de dix secondes. Être exact au billet près sur un seuil de deux millions de centimes
 // ne veut rien dire ; payer un agrégat non borné à chaque ouverture pour l'obtenir est la mauvaise
-// moitié du marché. Le retard vaut donc au plus ce qu'une minute d'ouvertures peut engager.
+// moitié du marché.
+//
+// CE QUE CETTE CADENCE BORNE, ÉCRIT SANS ENJOLIVER : le retard sur ce que le LIVRE porte, et rien de
+// plus. Ce n'est PAS « ce qu'une minute d'ouvertures peut engager », comme il était écrit ici — le
+// fusible ne voit que des écritures RÉGLÉES, puisque les jambes de maison naissent du motif `gain`,
+// posé au règlement. Un billet OUVERT y pèse zéro pendant toute sa vie, et rien ne borne le nombre
+// de billets ouverts tous joueurs confondus : `matches_un_seul_ouvert` est un index PARTIEL sur
+// `user_id`, il tient pour le plafond par joueur et ne dit rien de la maison. L'erreur du fusible
+// vaut donc le pire cas cumulé de tous les billets en vol, pas une minute d'ouvertures. Limite
+// connue, chiffrée dans `api/app.js` à côté du cache, et constatée par un test.
 const FUSIBLE_RAFRAICHI_S = 60;
 
 // LE PIRE CAS D'UN BILLET : ce que la maison risque au maximum sur la table qu'on s'apprête à
@@ -526,11 +551,16 @@ function expositionDe(transferts, references) {
 }
 
 // LE VERDICT. `expositionRealiseeCents` vient du livre, `expositionBilletCents` du billet qu'on
-// s'apprête à ouvrir. L'index partiel `matches_un_seul_ouvert` garantit qu'un joueur n'a jamais plus
-// d'un pire cas en vol : la somme « réalisé + un seul pire cas » est donc EXACTE, et il n'y a rien à
-// réserver ni à libérer. C'est ce qui rend inutile un compte d'engagement crédité à l'ouverture et
+// s'apprête à ouvrir.
+//
+// « RÉALISÉ + UN SEUL PIRE CAS EST EXACTE » EST VRAI POUR LA PORTÉE `joueur`, ET POUR ELLE SEULE.
+// La propriété repose entièrement sur `matches_un_seul_ouvert`, qui est un index PARTIEL sur
+// `user_id` : il garantit qu'UN JOUEUR n'a jamais plus d'un pire cas en vol, et il n'y a donc rien à
+// réserver ni à libérer — c'est ce qui rend inutile un compte d'engagement crédité à l'ouverture et
 // soldé au règlement, qui aurait doublé le nombre d'écritures et ajouté une jambe à chacune des six
-// issues d'un billet.
+// issues d'un billet. Pour la MAISON, la même fonction ne majore rien : rien ne borne le nombre de
+// billets ouverts tous joueurs confondus, et le livre ne porte que les règlements. Le fusible est
+// APPROCHÉ, c'est écrit partout, et cette phrase-ci est la seule qui le contredisait.
 //
 // LE CLAMP À ZÉRO AVANT COMPARAISON est une décision, pas une commodité. L'exposition est nette — les
 // billets perdus s'imputent sur les gagnés — mais une exposition négative reportée serait un compte

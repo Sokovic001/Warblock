@@ -650,8 +650,23 @@ async function main() {
       } finally {
         await base.close().catch(() => {});
         // On nettoie à la main : la transaction partagée a été validée, il n'y a plus de `rollback`
-        // qui rende la main. `cascade` emporte les traces et les billets.
-        await client.query('delete from ledger_entries where reference in (select id::text from matches where user_id = $1)', [u]);
+        // qui rende la main. LES DEUX CLÉS ÉTRANGÈRES SONT EN `restrict` DEPUIS LE MODULE 6 : rien
+        // n'est emporté, on descend donc l'arbre nous-mêmes, des traces vers le compte. Écrit en
+        // clair parce que le commentaire d'avant disait « `cascade` emporte les traces et les
+        // billets » et que c'était devenu faux sans qu'une ligne de ce bloc ne bouge : le
+        // `delete from users` sortait en `23503`, le cas partait rouge, et le `commit` du montage
+        // rendait la pollution PERMANENTE — au lancement suivant, `creerJoueur` butait sur
+        // l'index unique d'`auth_id` et le cas ne pouvait plus jamais repasser.
+        //
+        // La dotation du montage porte `reference = <userId>` et non un identifiant de billet :
+        // sans le second membre du `in`, elle resterait derrière nous.
+        await client.query(
+          `delete from ledger_entries
+             where reference in (select id::text from matches where user_id = $1)
+                or reference = $1::text`, [u]);
+        await client.query(
+          'delete from match_traces where match_id in (select id from matches where user_id = $1)', [u]);
+        await client.query('delete from matches where user_id = $1', [u]);
         await client.query('delete from users where id = $1', [u]);
       }
     });
@@ -769,7 +784,7 @@ async function main() {
     });
 
     // ---------------------------------------------------------------------------------------
-    await cas('LA REQUÊTE DE FENÊTRE NE BALAIE PAS LE GRAND LIVRE : aucun `Seq Scan` sur ledger_entries', async () => {
+    await cas('LA REQUÊTE DE FENÊTRE EST BORNÉE PAR LE JOUEUR : le lest de la MAISON ne la traverse pas', async () => {
       // LA SEULE FAÇON DE PROUVER QUE LES DEUX INDEX SERVENT, et personne ne peut la donner sur la
       // machine de travail. Les index de lecture du livre portaient `(compte_debit)` et
       // `(compte_credit)` seuls ; le plafond lit une FENÊTRE, donc sa clause porte un compte ET une
@@ -782,9 +797,24 @@ async function main() {
       // touchent AUCUN compte de maison, pour que le filtre soit sélectif, et quelques centaines qui
       // en touchent. Ces lignes-là ne sont pas une comptabilité, c'est un banc : la base est jetable,
       // et tout est annulé à la fin.
+      //
+      // ET UN SECOND LEST, QUI EST CELUI QUI MANQUAIT — LA DIMENSION QUI GROSSIT EN PRODUCTION.
+      // Les 40 000 lignes ci-dessous ne touchaient que des comptes JOUEUR, donc le prédicat de la
+      // requête les écartait avant même de les compter : « aucun Seq Scan » restait vrai quoi qu'il
+      // arrive. Ce qui grossit vraiment, ce sont les jambes de MAISON des billets des AUTRES joueurs
+      // — deux par règlement, sur toute la fenêtre de vingt-quatre heures — et la requête n'était
+      // bornée par le joueur qu'APRÈS la jointure, donc elle les matérialisait toutes. Le contrôle
+      // ne pouvait pas le voir, et l'invariant écrit dans cinq documents restait faux.
+      //
+      // L'ASSERTION A CHANGÉ DE NATURE AVEC LE LEST. « Aucun Seq Scan » ne distingue pas un parcours
+      // d'index BORNÉ d'un parcours d'index COMPLET : un bitmap sur cent mille lignes n'est pas un
+      // balayage séquentiel et passait. Ce qui se vérifie maintenant est le TRAVAIL réellement fait,
+      // par `explain (analyze)` et un plafond sur les lignes rendues par les nœuds qui touchent
+      // `ledger_entries` — de l'ordre des billets du joueur, jamais de l'ordre du trafic du site.
       await client.query('begin');
       const u = await creerJoueur(client, 'Explain');
       const autre = await creerJoueur(client, 'Lest');
+      const foule = await creerJoueur(client, 'Foule');
       const p = C.cashoutCents(C.purseBound(1000, 50).maxCents);
       // Quatre cents billets réglés, et les quatre jambes de chacun : mise, contrepartie, commission,
       // joueur. Deux de ces jambes touchent un compte de maison, et ce sont elles que l'index doit
@@ -822,12 +852,35 @@ async function main() {
          select 'mise', (1000000 + g)::text, 'joueur:'||$1||':disponible', 'enjeu:'||(1000000 + g), 50,
                 now() - ((g % 200) || ' minutes')::interval
            from generate_series(1, 40000) g`, [autre]);
+      // LE LEST DE LA MAISON, POUR D'AUTRES JOUEURS. Cinq mille billets réglés dans la fenêtre, avec
+      // leurs deux jambes de maison chacun : dix mille lignes que le prédicat de comptes RETIENT et
+      // que seule la borne par joueur écarte. C'est la seule dimension du problème qui croisse avec
+      // la population, et c'est celle qui manquait au banc.
+      await client.query(
+        `insert into matches (user_id, mode, stake_cents, seats, team_size, paid_seats, brawler,
+                              seed_public, seed_secret, sim_version, client_key, status, opened_at,
+                              expires_at, settled_at, issue, gross_cents, fee_cents, net_cents)
+         select $1,'resurgence',1000,50,1,1,'bolt',12345,$2,1,'foule-'||g,'settled',$3,$4,$3,
+                'encaissement',$5,$6,$7
+           from generate_series(1, 5000) g`,
+        [foule, SECRETE, MAINTENANT, DANS_UNE_HEURE, p.grossCents, p.feeCents, p.netCents]);
+      await client.query(
+        `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents, cree_le)
+         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1
+         union all
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3,
+                now() - ((m.id % 20) || ' hours')::interval
+           from matches m where m.user_id = $1`,
+        [foule, p.grossCents - 1000, p.feeCents]);
       await client.query('analyze ledger_entries');
       await client.query('analyze matches');
 
       const plan = await client.query(
-        { text: 'explain (format json) ' + EXPOSITION_FENETRE_SQL,
-          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION] });
+        { text: 'explain (analyze, format json) ' + EXPOSITION_FENETRE_SQL,
+          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION,
+                   new Date()] });
       const racine = plan.rows[0]['QUERY PLAN'];
       const noeuds = [];
       (function parcourir(n) {
@@ -842,20 +895,49 @@ async function main() {
         throw new Error('la requête de fenêtre BALAIE ledger_entries : '
           + JSON.stringify(racine).slice(0, 600));
       }
-      // Et elle passe bien par les index NOMMÉS : un plan sans `Seq Scan` mais qui n'aurait pas
+      // Et elle passe bien par un index NOMMÉ : un plan sans `Seq Scan` mais qui n'aurait pas
       // regardé cette table ne prouverait rien.
       const index = noeuds.filter(n => /Index|Bitmap/.test(n['Node Type'] || ''))
                           .map(n => n['Index Name']).filter(Boolean);
-      if (!index.some(i => /ledger_entries_(debit|credit)_fenetre_idx/.test(i))) {
-        throw new Error('aucun des deux index de fenêtre ne sert : ' + index.join(', '));
+      if (!index.some(i => /ledger_entries_\w+_fenetre_idx/.test(i))) {
+        throw new Error('aucun index de fenêtre ne sert : ' + index.join(', '));
       }
-      // Enfin, la requête RÉPOND, et elle répond juste : quatre cents victoires maximales.
+      // ET VOICI CE QUI DISTINGUE UN PARCOURS D'INDEX BORNÉ D'UN PARCOURS D'INDEX COMPLET, et que
+      // « aucun Seq Scan » ne disait pas : LE TRAVAIL RÉELLEMENT FAIT. Le banc porte maintenant
+      // 10 000 jambes de maison appartenant à d'AUTRES joueurs — la dimension qui grossit en
+      // production — et 800 qui appartiennent au joueur mesuré. Un plan borné par le joueur en lit
+      // de l'ordre de 800 ; un plan qui matérialise la fenêtre entière avant de réduire en lit
+      // 10 800. Le plafond est posé entre les deux, avec de la marge des deux côtés : il ne dépend
+      // ni d'une stratégie de plan précise, ni d'un chiffre de version de Postgres.
+      const lues = noeuds.filter(n => n['Relation Name'] === 'ledger_entries')
+                         .reduce((s, n) => s + (Number(n['Actual Rows']) || 0)
+                                             * (Number(n['Actual Loops']) || 1), 0);
+      const jambesDuJoueur = 400 * 2;
+      if (lues > 4 * jambesDuJoueur) {
+        throw new Error(`la requête de fenêtre lit ${lues} lignes de ledger_entries pour les `
+          + `${jambesDuJoueur} jambes du joueur : son agrégat n'est PAS borné par le joueur. `
+          + JSON.stringify(racine).slice(0, 900));
+      }
+      // Enfin, la requête RÉPOND, et elle répond juste : quatre cents victoires maximales, et PAS
+      // les cinq mille du lest de la foule. La borne par joueur ne doit rien retrancher de ce qui
+      // lui revient et rien ajouter de ce qui ne lui revient pas.
       const total = await client.query(
         { text: EXPOSITION_FENETRE_SQL,
-          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION] });
+          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION,
+                   new Date()] });
       const attendu = 400 * L.expositionBilletMaxCents(p.netCents, 1000);
       if (Number(total.rows[0].total) !== attendu) {
         throw new Error(`l'exposition vaut ${total.rows[0].total} au lieu de ${attendu}`);
+      }
+      // ET LA BORNE HAUTE EST BIEN UNE BORNE : avec une ancre antérieure aux écritures semées, le
+      // même joueur pèse zéro. C'est ce qui rend le chiffre REJOUABLE par `api/operateur.js`, des
+      // mois après le refus, sans que les jambes écrites depuis ne viennent le fausser.
+      const avant = await client.query(
+        { text: EXPOSITION_FENETRE_SQL,
+          values: [u, fenetreDepuis(new Date()), L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION,
+                   new Date(Date.now() - 21 * 3600 * 1000)] });
+      if (Number(avant.rows[0].total) >= attendu) {
+        throw new Error(`la borne haute ne borne rien : ${avant.rows[0].total} au lieu de moins de ${attendu}`);
       }
       await client.query('rollback');
     });

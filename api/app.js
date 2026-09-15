@@ -77,6 +77,32 @@ const MATCH_MARGE_S = 600;
 // la décision en entier.
 const SIEGES_PAYES = 1;
 
+// LE PLUS PETIT PIRE CAS DU LOBBY, ET IL EXISTE POUR QUE LE SAS CESSE DE MENTIR. Le message de la
+// portée `joueur` promet qu'« une table moins chère marchera » ; c'est vrai tant qu'il reste une
+// table dont le pire cas tient sous la marge du joueur, et c'est FAUX dès que l'exposition réalisée
+// arrive à moins d'un pire cas minimal du plafond — état atteignable, et atteint exactement après
+// les `PLAFOND_TABLES_PAR_JOUR` victoires maximales que le plafond est calibré pour laisser passer.
+// Le joueur relançait alors les vingt tables du lobby, prenait vingt fois le même refus, épuisait son
+// seau de débit et finissait en 429, qui n'est pas dans `REFUS_SAS` : un lobby qui a l'air cassé.
+//
+// LE CHIFFRE SE DÉRIVE DU JEU, JAMAIS ÉCRIT À LA MAIN. C'est la discipline déjà tenue par
+// `PLAFOND_JOUEUR_CENTS`, qu'un test recalcule depuis `WBCore` : un palier ou un mode qui change le
+// fait bouger tout seul. Il vaut 750 centimes aujourd'hui — solo à $0,50, vingt sièges — et il est
+// calculé UNE fois au chargement, comme `netMaxCents` l'est une fois par demande : ni `api/ledger.js`
+// ni `db-pg.js` n'ont le droit de faire cette arithmétique.
+const PIRE_CAS_MIN_CENTS = (() => {
+  let min = Infinity;
+  for (const id of Object.keys(C.MODES)) {
+    const sieges = C.seatsOf(C.MODES[id]);
+    for (const palier of C.TIERS) {
+      const miseCents = C.toCents(palier.stake);
+      const netMax = C.cashoutCents(C.purseBound(miseCents, sieges).maxCents).netCents;
+      min = Math.min(min, L.expositionBilletMaxCents(netMax, miseCents));
+    }
+  }
+  return min;
+})();
+
 // LE BUDGET DE CALCUL D'UN REJEU. Il tourne dans le fil de la requête, et une trace adversariale
 // peut chercher à en maximiser le coût : c'est la surface d'attaque que la phase 02b ajoute, et
 // elle se borne ici. Une partie solo complète — neuf mille pas, vingt brawlers — coûte environ
@@ -459,7 +485,23 @@ function createApp({
   // Être exact au billet près sur un seuil de deux millions de centimes ne veut rien dire ; payer un
   // agrégat non borné à chaque ouverture pour l'obtenir est la mauvaise moitié du marché. La
   // péremption est donc chiffrée : LE FUSIBLE A LE DROIT D'ÊTRE EN RETARD DE `FUSIBLE_RAFRAICHI_S`
-  // SECONDES, et ce retard vaut au plus ce qu'une minute d'ouvertures peut engager.
+  // SECONDES sur ce que le LIVRE porte.
+  //
+  // ET CE RETARD-LÀ N'EST PAS LA SEULE ERREUR, NI LA PLUS GRANDE — ce qui était écrit ici, « ce
+  // retard vaut au plus ce qu'une minute d'ouvertures peut engager », était faux d'un ordre de
+  // grandeur, et c'est cette phrase-là qu'on relirait le jour où le fusible aurait laissé passer la
+  // casse. Le fusible ne voit que des écritures RÉGLÉES : les seules jambes de maison viennent du
+  // motif `gain`, écrit au RÈGLEMENT, donc un billet OUVERT pèse exactement ZÉRO ici. Le verdict
+  // n'ajoute qu'un seul pire cas, celui du billet qu'on ouvre — et l'argument « un joueur n'a qu'un
+  // billet ouvert à la fois » vient de l'index PARTIEL `matches_un_seul_ouvert`, qui porte sur
+  // `user_id` : il tient pour le plafond PAR JOUEUR et ne dit RIEN du nombre de billets ouverts tous
+  // joueurs confondus, que rien ne borne. L'erreur du fusible vaut donc le pire cas cumulé de TOUS
+  // les billets en vol, et un billet vit `LOBBY.wait + zoneTotalS + MATCH_MARGE_S` — plusieurs
+  // minutes. Cent comptes qui ouvrent une Resurgence à 10 $ dans la même minute passent tous, et
+  // règlent quatre minutes plus tard 3 900 000 centimes d'un coup, sans qu'un refus ait été prononcé.
+  // C'est une LIMITE CONNUE, chiffrée ici plutôt que découverte, et un test la constate : la borner
+  // demanderait de faire entrer les billets ouverts dans la lecture amortie — leur nombre est borné
+  // par la CONCURRENCE et non par l'historique, donc l'argument de coût ne s'y oppose pas.
   //
   // L'horloge est celle qui est injectée dans `createApp`, donc la cadence se teste sans attendre.
   // Et cet état-là vit EN MÉMOIRE DU PROCESSUS, comme la limitation de débit : perdu au redémarrage,
@@ -468,7 +510,17 @@ function createApp({
   let fusible = null;
   async function expositionMaisonCents() {
     const t = now();
-    if (fusible && t - fusible.luA < L.FUSIBLE_RAFRAICHI_S * 1000) return fusible.cents;
+    // LA BORNE SE LIT DANS LES DEUX SENS, ET C'EST LE `age >= 0` QUI LE DIT. `now` vaut `Date.now`
+    // par défaut : c'est une horloge MURALE, pas un chronomètre, et un pas NTP peut la faire
+    // reculer. Avec la seule borne haute, un recul d'une heure rendait `t - luA` négatif — donc
+    // toujours inférieur à la cadence — et le cache se figeait pour toute la durée du recul :
+    // `db.expositionMaison` n'était plus jamais rappelée et la maison ouvrait des tables au-delà de
+    // `PLAFOND_MAISON_CENTS` pendant une heure, alors que le retard promis ici, dans
+    // `api/README.md` et dans `docs/PHASE-04A.md` est de soixante secondes. Un âge non positif est
+    // donc traité comme une péremption, et l'on relit : c'est le même patron que `WBCore.simSteps`,
+    // qui refuse déjà un delta négatif plutôt que d'en tirer un nombre de pas.
+    const age = fusible ? t - fusible.luA : Infinity;
+    if (fusible && age >= 0 && age < L.FUSIBLE_RAFRAICHI_S * 1000) return fusible.cents;
     const depuis = new Date(t - L.PLAFOND_FENETRE_H * 3600 * 1000);
     const cents = nombre(await db.expositionMaison({ depuis }));
     fusible = { luA: t, cents };
@@ -611,9 +663,23 @@ function createApp({
     // LE PLAFOND PAR JOUEUR, DÉCIDÉ DANS LA TRANSACTION ET SOUS LE VERROU. Il n'a laissé ni ligne,
     // ni écriture, ni séquestre : l'annulation a rendu à l'inexistence la ligne qu'on venait
     // d'insérer, exactement comme sur `fonds`. La portée est `joueur`, et c'est elle qui fait dire au
-    // sas qu'une table moins chère marchera — ce qui est vrai, et vérifié par un test qui en ouvre
-    // une dans la foulée.
-    if (ouverture.refus === 'plafond')
+    // sas qu'une table moins chère marchera — VRAI TANT QUE L'EXPOSITION RÉALISÉE RESTE SOUS
+    // `PLAFOND_JOUEUR_CENTS − PIRE_CAS_MIN_CENTS`, et c'est le drapeau ci-dessous qui tranche
+    // au-delà. La bande haute n'est pas un cas limite : elle est exactement l'état que
+    // `PLAFOND_TABLES_PAR_JOUR = 4` est calibré pour produire — quatre Resurgence à 10 $ gagnées au
+    // maximum laissent l'exposition réalisée à 156 000, c'est-à-dire le plafond tout entier, et
+    // AUCUNE des vingt tables du lobby ne passe plus. Promettre une table moins chère là-dedans
+    // renvoie le joueur cliquer en boucle sur un lobby qui a l'air cassé jusqu'à ce que son seau de
+    // débit rende un 429, qui n'est pas dans `REFUS_SAS` et le renvoie jouer hors ligne.
+    //
+    // ON GARDE LA PORTÉE, ON AJOUTE UN FAIT. Basculer `portee` à `'maison'` ferait mentir la réponse
+    // sur QUEL plafond a refusé — elle porte `plafondCents` à côté, et les tests du fusible
+    // l'assertent. Le serveur décide, le jeu lit : le calcul tient ici, où `WBCore` est chargé, et
+    // `WBCore.refusMessage` ne fait que consulter le booléen. Le grand livre n'est pas une règle du
+    // jeu, et le pire cas minimal du lobby n'a rien à faire dans les 465 Ko que chaque joueur
+    // télécharge.
+    if (ouverture.refus === 'plafond') {
+      const realiseeCents = nombre(ouverture.expositionRealiseeCents);
       return envoyer(res, 409, {
         erreur: REFUS_PLAFOND,
         code: 'plafond',
@@ -621,7 +687,15 @@ function createApp({
         expositionCents: nombre(ouverture.expositionCents),
         plafondCents: nombre(ouverture.plafondCents),
         fenetreHeures: L.PLAFOND_FENETRE_H,
+        // LE SEUIL JUSTE N'EST PAS « réalisée >= plafond » MAIS « aucune table n'aide » : le pire cas
+        // est strictement positif sur les vingt combinaisons mode × palier, donc le lobby se ferme un
+        // pire cas minimal AVANT que la réalisée n'atteigne le plafond. Le clamp est celui de
+        // `plafondVerdict`, et pour la même raison — une exposition négative reportée serait un compte
+        // d'épargne à moissonner.
+        aucuneTableMoinsChere:
+          Math.max(0, realiseeCents) + PIRE_CAS_MIN_CENTS > L.PLAFOND_JOUEUR_CENTS,
       }, origin);
+    }
     // LE SOLDE INSUFFISANT EST UN REFUS NOMMÉ, EN 409, ET IL N'A LAISSÉ NI BILLET NI ÉCRITURE.
     // Pas un `402` : la doctrine du dossier est « des refus nommés, tous en 400 ou 409, aucun en
     // 500 », et un `402` ouvrirait une famille de plus — il parle par ailleurs de payer l'API, pas

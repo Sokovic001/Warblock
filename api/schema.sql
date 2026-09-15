@@ -449,6 +449,36 @@ drop index if exists ledger_entries_credit_idx;
 create index if not exists ledger_entries_debit_fenetre_idx  on ledger_entries (compte_debit, cree_le);
 create index if not exists ledger_entries_credit_fenetre_idx on ledger_entries (compte_credit, cree_le);
 
+-- L'INDEX PAR BILLET, ET C'EST LUI QUI REND VRAIE LA PHRASE « borné par les billets d'UN joueur ».
+--
+-- CE QUI NE MARCHAIT PAS. La requête de fenêtre du plafond par joueur joint `ledger_entries` à
+-- `matches` par l'expression ci-dessous, et ne restreint au joueur qu'APRÈS la jointure. Aucun index
+-- ne couvrait cette expression, donc Postgres n'avait aucun moyen de partir des quelques dizaines de
+-- billets du joueur : il remontait TOUTES les écritures de maison de la fenêtre — deux jambes par
+-- règlement, tous joueurs confondus — pour en jeter 99,8 %. C'est-à-dire O(trafic du SITE) sur le
+-- chemin de chaque ouverture de billet, et PENDANT que la transaction tient le verrou de ligne du
+-- joueur : très exactement l'incident `GET /api/me` que la décision 6 cite pour justifier de sortir
+-- le FUSIBLE de la transaction, reproduit à l'endroit qu'elle prétend protéger. Cinq documents
+-- affirmaient l'inverse, et le contrôle censé le prouver ne refusait qu'un `Seq Scan` — un bitmap
+-- sur cent mille lignes n'en est pas un, et passait.
+--
+-- CE QUE CET INDEX OUVRE : la boucle imbriquée depuis `matches`. On part des billets du joueur et on
+-- descend dans le livre par la référence, au lieu de remonter tout le trafic du site. `cree_le` est
+-- la seconde colonne, pour la même raison que sur les deux index ci-dessus : la clause porte une
+-- FENÊTRE, et un index qui ne connaît que la référence ferait relire toutes les époques.
+--
+-- IL EST CONSTRUCTIBLE : les trois briques de l'expression — `case`, `substring(text from text)` et
+-- l'opérateur `~` — sont IMMUABLES, ce qu'un index d'expression exige.
+--
+-- L'EXPRESSION EST CELLE QU'EXPORTE `api/ledger.js` SOUS LE NOM `REFERENCE_BILLET_SQL`, recopiée
+-- CARACTÈRE POUR CARACTÈRE, et une garde textuelle d'`api/test.js` compare les deux. C'est le même
+-- patron que `COMPTE_RE_SQL` ci-dessus, et pour la même raison : il ne doit jamais exister deux
+-- écritures de la règle qui ramène une écriture à un billet — une contre-passation porte `gain:42`
+-- et non `42`, et la seconde écriture, celle qui dériverait, vivrait dans ce fichier que personne ne
+-- relit.
+create index if not exists ledger_entries_billet_fenetre_idx on ledger_entries
+  ((case when motif in ('mise', 'gain', 'remboursement') and reference ~ '^[1-9][0-9]*$' then reference when motif = 'contrepassation' then substring(reference from '^(?:mise|gain|remboursement):([1-9][0-9]*)$') else null end), cree_le);
+
 -- ---------------------------------------------------------------------------------------------
 -- Phase 04a — QUI A LE DROIT DE CONTRE-PASSER, ET POURQUOI IL L'A FAIT.
 --

@@ -3453,7 +3453,9 @@ test('UN SEUL CODE, DEUX PORTÉES : le message du plafond LIT la portée, et l\'
                                              plafondCents: 2000000, fenetreHeures: 24 });
   assert.notStrictEqual(joueur, maison, 'les deux portées doivent dire deux choses différentes');
   // La portée `joueur` promet ce qui est VRAI et vérifié côté serveur : une table moins chère
-  // s'ouvre dans la foulée.
+  // s'ouvre dans la foulée. Les chiffres de ce cas sont ceux de la BANDE OÙ UNE TELLE TABLE EXISTE
+  // — le serveur n'y pose pas `aucuneTableMoinsChere` — et la bande d'au-dessus, celle du lobby
+  // saturé, a son propre test juste en dessous.
   assert.match(joueur, /smaller buy-in/);
   // La portée `maison` ne promet AUCUNE table : aucune table moins chère n'aiderait, le fusible
   // global refuse tout le monde. Elle dit ce qu'il y a à faire — attendre — et ce qui n'a pas eu
@@ -3474,6 +3476,42 @@ test('UN SEUL CODE, DEUX PORTÉES : le message du plafond LIT la portée, et l\'
   for (const m of [joueur, maison])
     for (const chiffre of ['156000', '2000000', '160000', '2100000'])
       assert.ok(!m.includes(chiffre), m);
+});
+test('LOBBY SATURÉ : portée `joueur`, mais on ne promet plus une table qui n\'existe pas', () => {
+  // LA TROISIÈME SITUATION, et c'est celle que le plafond est CALIBRÉ pour produire. Le pire cas
+  // d'un billet est strictement positif sur les vingt combinaisons mode × palier, donc dès que
+  // l'exposition réalisée d'un joueur arrive à moins d'un pire cas minimal du plafond, plus aucune
+  // table ne passe. Quatre Resurgence à 10 $ gagnées au maximum y suffisent — c'est exactement le
+  // nombre de tables que `PLAFOND_TABLES_PAR_JOUR` laisse gagner.
+  //
+  // Le serveur décide et le jeu LIT : `aucuneTableMoinsChere` arrive avec le 409, `refusMessage` ne
+  // fait aucun calcul. Le plafond d'exposition n'est pas une règle du jeu, et le pire cas minimal du
+  // lobby n'a rien à faire dans les 465 Ko que chaque joueur télécharge.
+  const corps = { portee: 'joueur', aucuneTableMoinsChere: true, expositionCents: 156750,
+                  plafondCents: 156000, fenetreHeures: 24 };
+  const sature = C.refusMessage('plafond', corps);
+  assert.ok(!/smaller buy-in/.test(sature), sature);
+  assert.match(sature, /try again later/i);
+  assert.match(sature, /[Nn]othing was charged/);
+  // ET IL RESTE DISTINCT DE CELUI DE LA MAISON : la cause doit rester lisible. Un joueur qui a
+  // beaucoup gagné et une maison qui ferme boutique ne sont pas la même nouvelle.
+  const maison = C.refusMessage('plafond', { portee: 'maison', expositionCents: 2100000,
+                                             plafondCents: 2000000, fenetreHeures: 24 });
+  assert.notStrictEqual(sature, maison);
+  // Le drapeau ABSENT ou FAUX ne change rien : la phrase de toujours, pour la bande où une table
+  // moins chère existe vraiment.
+  const promesse = C.refusMessage('plafond', { portee: 'joueur' });
+  for (const sans of [{ portee: 'joueur' }, { portee: 'joueur', aucuneTableMoinsChere: false }])
+    assert.strictEqual(C.refusMessage('plafond', sans), promesse, JSON.stringify(sans));
+  assert.match(promesse, /smaller buy-in/);
+  // ET LE DRAPEAU NE DÉTOURNE PAS LA PORTÉE `maison` : elle dit déjà « plus tard », et le fusible
+  // n'a pas d'autre phrase à rendre. Un serveur ancien qui parle à un client neuf, ou l'inverse,
+  // retombe sur le repli existant, qui est celui de la maison.
+  assert.strictEqual(C.refusMessage('plafond', { portee: 'maison', aucuneTableMoinsChere: true }),
+                     maison);
+  // Aucun chiffre ne fuit à l'écran, comme pour les deux autres phrases.
+  for (const chiffre of ['156000', '156750', '750', '24'])
+    assert.ok(!sature.includes(chiffre), sature);
 });
 test('matchFlow : renoncer rend le billet, et n\'est pas un coup d\'envoi', () => {
   // Deux transitions nouvelles, et elles ne doublent pas `coup-denvoi` : quitter le sas ne lance

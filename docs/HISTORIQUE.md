@@ -540,7 +540,12 @@ le chemin d'un **refus**, donc leur disparition doit casser au démarrage du ser
 plus disputée du système.** Le **plafond par joueur** est EXACT : il se lit dans la transaction
 d'ouverture, **après** le verrou `select id from users where id = $1 for update`, parce que c'est ce
 verrou qui sérialise deux onglets du même joueur, et parce que son agrégat est borné par les billets
-d'un seul joueur sur vingt-quatre heures. Le **fusible global** est APPROCHÉ : c'est un
+d'un seul joueur sur vingt-quatre heures — ce que la requête a mis un module de plus à devenir
+vraiment : elle ne restreignait au joueur qu'APRÈS la jointure, sur une expression qu'aucun index ne
+couvrait, donc elle balayait les écritures de maison de TOUS les joueurs de la fenêtre. Il a fallu
+poser le prédicat dans la sous-requête et un index d'expression, `ledger_entries_billet_fenetre_idx`,
+et faire mesurer à `api/db-check.js` les lignes réellement lues au lieu de refuser un `Seq Scan` —
+un bitmap sur cent mille lignes n'en est pas un, et passait. Le **fusible global** est APPROCHÉ : c'est un
 interrupteur, pas un invariant, et le lire sous ce verrou ferait de chaque ouverture de billet un
 agrégat **non borné** sur la table qui grossit le plus vite du dépôt. Le dépôt a déjà payé ce genre
 de chose une fois — `GET /api/me` retenait un client du bassin assez longtemps pour mettre en file le
@@ -640,9 +645,18 @@ présentation, c'est la raison d'être du module : le premier geste d'un inciden
 corriger, c'est de regarder. Trois lectures — les jambes d'un mouvement par `(motif, reference)`, un
 billet avec ses écritures et son séquestre, l'exposition d'un joueur sur la fenêtre — et elles
 n'écrivent **rien**, pas même une trace. Un outil qui n'aurait que des verbes d'écriture renverrait
-l'opérateur dans `psql` exactement le soir qu'on cherche à éviter. `montrer billet` répond en
-particulier à « pourquoi ce billet a-t-il été refusé en `plafond` », et il y répond avec **la requête
-qui refuse** : un outil qui montrerait un autre chiffre que celui qui décide ne servirait à rien.
+l'opérateur dans `psql` exactement le soir qu'on cherche à éviter.
+
+C'est `montrer exposition` qui répond à « pourquoi ce joueur a-t-il été refusé en `plafond` », et
+**pas** `montrer billet` : un refus `plafond` ne laisse aucune ligne dans `matches` et le corps du 409
+ne porte aucun identifiant, donc il n'y a pas de billet à relire. Le diagnostic part du joueur. Cette
+phrase-là a d'abord été écrite à l'envers, dans trois fichiers à la fois, et `montrer billet <id>`
+répondait « aucun billet <id> » sur le seul cas qu'on lui avait assigné. `montrer billet` dit la
+**marge que le joueur avait à l'ouverture de ce billet** — et il la disait fausse pour une raison qui
+mérite d'être retenue : la requête était bien celle qui refuse, mais ce ne sont pas la même *requête*
+mais les mêmes **paramètres** qui font un chiffre. Elle était ancrée sur l'horloge courante quand
+`createMatch` décide sur `opened_at`, donc un gain posé avant l'ouverture pesait dans la fenêtre du
+refus et zéro dans celle de l'outil dès le lendemain.
 
 **L'argent et sa justification vivent ou meurent ensemble.** `ledger_audit` — quand, par qui,
 pourquoi, le `(motif, reference)` d'origine, la référence posée, les jambes, le montant — est en
@@ -1214,7 +1228,7 @@ passe contre la doublure prouve la doublure.
 - **Un compte ne s'efface plus, il s'anonymise.** Les deux cascades de la phase 01 sont en
   `restrict` ; `users.id` survit toujours, sans quoi `joueur:<id>` et `enjeu:<match_id>`
   désigneraient des lignes mortes.
-- **412 tests sur le jeu, 248 sur l'API** sans rien installer, 257 avec `jose`. Aucune base, aucun
+- **413 tests sur le jeu, 255 sur l'API** sans rien installer, 264 avec `jose`. Aucune base, aucun
   réseau, aucun navigateur : tout est injecté.
 - **QUATRE PROPRIÉTÉS DE CETTE PHASE N'ONT DE PREUVE QU'EN INTÉGRATION CONTINUE**, et le job `db` n'a
   pas pu être lancé une seule fois pendant les six modules : deux ouvertures simultanées qui ne
@@ -1225,6 +1239,54 @@ passe contre la doublure prouve la doublure.
 - **Toujours aucun euro.** La phase borne le **bord** de l'argent réel ; elle n'ouvre aucun dépôt, et
   elle ne rend pas la partie honnête — le vol de précision reste entier, et c'est lui qui dimensionne
   le plafond.
+
+### La recette de la 04a, et les six choses qu'elle a trouvées
+
+Une relecture adversariale des six modules, faite après leur livraison. Ce qu'elle a trouvé n'est pas
+une liste de bogues : c'est **cinq phrases fausses et un nettoyage**, et leur point commun mérite
+d'être retenu — **chacune naissait verte.** Un test qui relit un texte trouve le texte qu'il cherche ;
+un banc dont l'horloge est figée ne peut pas voir un défaut d'horloge ; un `explain` qui refuse un
+`Seq Scan` ne distingue pas un parcours d'index borné d'un parcours complet.
+
+1. **Le nettoyage de `api/db-check.js` n'avait pas suivi le passage des cascades en `restrict`.** Le
+   cas de la purge validait sa transaction de montage puis faisait `delete from users` en laissant
+   cinq billets et quatre traces derrière lui : `23503`, cas rouge, et — parce que le `commit` avait
+   eu lieu — **pollution permanente**, si bien qu'au lancement suivant `creerJoueur` butait sur
+   l'index unique d'`auth_id` et que le cas ne pouvait plus jamais repasser sans `psql`. Le
+   commentaire disait encore « `cascade` emporte les traces et les billets ». Le test censé couvrir le
+   module se contentait de chercher la chaîne `delete from users` dans le fichier : il prenait la
+   ligne cassée pour la preuve que rien n'était cassé. La garde qui le remplace regarde chaque cas qui
+   ouvre un billet et exige qu'il descende l'arbre, dans l'ordre des clés étrangères.
+2. **Le message de la portée `joueur` promettait une table moins chère dans l'état exact que le
+   plafond est calibré pour produire.** Quatre victoires maximales laissent l'exposition réalisée à
+   `PLAFOND_JOUEUR_CENTS` tout rond, et plus aucune des vingt tables ne passe. Le seuil juste est
+   `plafond − pire cas minimal du lobby`, jamais `plafond` ; le serveur pose `aucuneTableMoinsChere`,
+   le jeu le lit. Voir décision 8.
+3. **Le cache du fusible se figeait indéfiniment sur une horloge qui recule.** `now` vaut `Date.now`,
+   donc une horloge murale : un pas NTP d'une heure rendait `t − luA` négatif, donc toujours inférieur
+   à la cadence. Aucun test n'avait jamais injecté une horloge qui recule. La borne se lit maintenant
+   dans les deux sens, comme `WBCore.simSteps` refuse déjà un delta négatif.
+4. **La requête « par joueur » balayait la fenêtre de TOUS les joueurs.** Elle ne restreignait au
+   joueur qu'après la jointure, sur une expression qu'aucun index ne couvrait — donc O(trafic du site)
+   sous le verrou de ligne, exactement l'incident `GET /api/me` que la décision 6 cite pour justifier
+   de sortir le fusible de la transaction. Corrigé des deux côtés : le prédicat descend dans la
+   sous-requête, sur le billet CALCULÉ et jamais sur `reference` brute, et `schema.sql` reçoit
+   `ledger_entries_billet_fenetre_idx`.
+5. **Deux phrases sur le fusible étaient fausses, et elles servaient à accepter des approximations.**
+   « Le retard vaut au plus ce qu'une minute d'ouvertures peut engager » : faux d'un ordre de
+   grandeur, le fusible ne voit que des écritures réglées et rien ne borne le nombre de billets en
+   vol tous joueurs confondus. « Environ treize comptes saturés » : vrai seulement sur un livre à
+   l'équilibre, puisque la lecture est nette et que la marge du jour relève le seuil. Les deux sont
+   désormais écrites telles qu'elles sont, et **deux tests les constatent** plutôt que de les taire —
+   c'est la doctrine des limites connues du dépôt, pas une rustine.
+6. **`montrer billet` ne montrait pas le chiffre qui avait décidé**, parce que sa fenêtre était ancrée
+   sur l'horloge courante et non sur `opened_at`. Le banc figeait les deux à la même valeur : la
+   coïncidence rendait le défaut invisible. Et l'aide assignait à ce verbe une question qu'aucun verbe
+   ne peut rendre — un refus `plafond` ne laisse aucune ligne dans `matches`.
+
+La leçon commune, pour la recette suivante : **ce n'est pas la même requête qui fonde une propriété,
+ce sont les mêmes paramètres** ; et un contrôle doit mesurer le travail réellement fait, pas
+l'absence d'un symptôme.
 
 ## Ce qui reste ouvert
 

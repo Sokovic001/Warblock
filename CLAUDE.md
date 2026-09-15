@@ -50,9 +50,9 @@ porte : le reste a besoin d'un navigateur pour tourner.
 - **Toute logique de règle va dans `WBCore`**, avec un test dans `test.js`. Le reste du fichier
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
-- **Lancer `npm test` après chaque modification.** 412 tests sur le jeu (`node test.js`) et
-  248 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 257 en tout — de bout en bout avec de la vraie
+- **Lancer `npm test` après chaque modification.** 413 tests sur le jeu (`node test.js`) et
+  255 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 264 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -139,11 +139,19 @@ porte : le reste a besoin d'un navigateur pour tourner.
   `renonce_recent` et `plafond` — liste fermée dans `WBCore.REFUS_SAS`, confrontée par `api/test.js`
   aux codes que l'API émet vraiment — ferment le sas, affichent un message et ne lancent aucune
   partie, sans laisser le lobby mort. Tout le reste, y compris un 500 et un 429, retombe dans le
-  repli hors ligne. **`plafond` porte UN code et DEUX portées, et c'est `refusMessage` qui la lit** :
-  portée `joueur`, une table moins chère marchera ; portée `maison`, le fusible global a sauté et
-  aucune table moins chère n'aidera ; portée **absente ou illisible**, on rend celle de la maison —
-  promettre une table moins chère quand aucune ne marchera est pire que dire « plus tard » à
-  quelqu'un qu'une table moins chère aurait dépanné.
+  repli hors ligne. **`plafond` porte UN code, DEUX portées et UN drapeau, et c'est `refusMessage` qui
+  les lit** : portée `joueur`, une table moins chère marchera ; portée `maison`, le fusible global a
+  sauté et aucune table moins chère n'aidera ; portée **absente ou illisible**, on rend celle de la
+  maison — promettre une table moins chère quand aucune ne marchera est pire que dire « plus tard » à
+  quelqu'un qu'une table moins chère aurait dépanné. **Le drapeau `aucuneTableMoinsChere` existe parce
+  que la portée `joueur` mentait dans la bande haute** : le pire cas d'un billet est strictement
+  positif sur les vingt combinaisons mode × palier, donc dès que l'exposition réalisée d'un joueur
+  arrive à moins d'un pire cas MINIMAL du plafond, plus AUCUNE table ne passe — état atteint
+  exactement après les quatre tables maximales que `PLAFOND_TABLES_PAR_JOUR` existe pour laisser
+  gagner, et le joueur essayait les vingt tables jusqu'à un 429 qui n'est pas dans `REFUS_SAS`. Le
+  seuil est `plafond − pire cas minimal du lobby`, jamais `plafond` ; il se calcule dans `api/app.js`,
+  où `WBCore` est chargé, et se dérive de `MODES × TIERS` comme `PLAFOND_JOUEUR_CENTS` — le jeu ne
+  fait que LIRE le booléen, le grand livre n'est pas une règle du jeu.
 - **Le bouton QUITTER du sas dit ce que partir coûte**, en appelant `WBCore.renonciationOuverte` avec
   une **horloge monotone** posée au clic — `performance.now() − W.clic` — et jamais avec `W.t`, qui
   compte des tics de `setInterval` et retarde dès qu'un onglet passe en arrière-plan, c'est-à-dire
@@ -319,9 +327,22 @@ porte : le reste a besoin d'un navigateur pour tourner.
   verrou de ligne — c'est ce verrou qui sérialise deux onglets — et son agrégat est borné par les
   billets d'un joueur sur vingt-quatre heures. Le **fusible global** est APPROCHÉ : c'est un
   interrupteur, pas un invariant, il est lu **hors transaction**, au plus une fois toutes les
-  `FUSIBLE_RAFRAICHI_S` secondes, valeur gardée en mémoire du processus, sur l'horloge **injectée**.
+  `FUSIBLE_RAFRAICHI_S` secondes, valeur gardée en mémoire du processus, sur l'horloge **injectée** —
+  et la cadence se lit dans les **deux sens** : `now` vaut `Date.now`, donc une horloge murale qui
+  recule figerait sinon le cache pour toute la durée du recul, et un âge négatif vaut péremption.
   Le lire sous le verrou ferait de chaque ouverture un agrégat non borné sur la table qui grossit le
-  plus vite du dépôt, et le dépôt a déjà payé cela une fois. Le pire cas d'un billet est calculé par
+  plus vite du dépôt, et le dépôt a déjà payé cela une fois. **Ce que cette cadence borne est le
+  retard sur le LIVRE, et rien de plus** : le fusible ne voit que des écritures réglées — les jambes
+  de maison naissent du motif `gain` — donc un billet ouvert y pèse zéro pendant toute sa vie, et
+  `matches_un_seul_ouvert` est PARTIEL sur `user_id` : il borne « un pire cas en vol » par JOUEUR et
+  ne dit rien du nombre de billets ouverts tous joueurs confondus. L'erreur du fusible vaut donc le
+  pire cas cumulé de tous les billets en vol, pas « une minute d'ouvertures ». Limite connue,
+  chiffrée dans `api/app.js` et constatée par un test.
+  La requête de fenêtre par joueur, elle, est bornée par le joueur **dans sa sous-requête** et sur le
+  billet CALCULÉ — jamais sur `reference` brute, qui laisserait sortir une contre-passation — et
+  `schema.sql` porte l'index d'expression `ledger_entries_billet_fenetre_idx` qui ouvre la boucle
+  imbriquée depuis `matches`. Sans les deux, l'agrégat « par joueur » balayait la fenêtre entière de
+  tous les joueurs, sous le verrou. Le pire cas d'un billet est calculé par
   le **jeu** — `cashoutCents(purseBound(mise, sièges).maxCents)` — et **passé en paramètre** : il
   n'est recalculé nulle part. La requête de fenêtre **interpole** `REFERENCE_BILLET_SQL` et compare à
   `matches.id::text`, sans aucun `cast` ; les comptes et les motifs lui arrivent en paramètres,
@@ -338,8 +359,13 @@ porte : le reste a besoin d'un navigateur pour tourner.
   geste qui arrive deux fois par an, et l'opérateur détient déjà les identifiants de la base. Même
   garde que « il n'existe aucune route `POST /api/credits` » — `app.js` ne charge jamais l'outil et
   ne nomme aucune route d'administration. **L'outil sait LIRE avant d'écrire, et `montrer` arrive en
-  premier** : trois lectures qui n'écrivent rien, dont celle qui répond à « pourquoi ce billet a-t-il
-  été refusé en `plafond` », avec **la requête qui refuse** et pas une requête réécrite. `contrepasser`
+  premier** : trois lectures qui n'écrivent rien, dont `montrer exposition <userId>`, qui répond à
+  « pourquoi ce joueur a-t-il été refusé en `plafond` » — **pas** `montrer billet`, puisqu'un refus
+  `plafond` ne laisse aucune ligne dans `matches` et que le 409 ne porte aucun identifiant : il n'y a
+  pas de billet à relire, le diagnostic part du joueur. `montrer billet` dit la **marge à l'ouverture
+  de ce billet**, avec **la requête qui refuse** et, ce qui manquait, avec ses **paramètres** : la
+  même requête ancrée sur l'horloge courante au lieu d'`opened_at` rendait un autre chiffre que celui
+  qui a décidé dès le lendemain du refus. `contrepasser`
   montre, exige une raison écrite, un nom et `--confirme`, puis pose l'écriture **et sa raison dans la
   même transaction** : une raison consignée après coup peut ne jamais l'être, et une contre-passation
   sans raison est indistinguable d'une erreur de manipulation. `ledger_audit` est en insertion seule
@@ -575,7 +601,13 @@ raisons dans `docs/HISTORIQUE.md`, « La maison est la contrepartie de chaque po
 l'est depuis le module 4 de la 04a : le plafond REFUSE**, en 409, à l'ouverture du billet — exact par
 joueur sous le verrou, approché pour la maison et hors transaction. Ce qu'il ne borne pas est écrit
 avec lui : un plafond par joueur ne borne pas une **flotte de comptes**, le fusible global vaut
-environ treize comptes saturés, et le seul remède réel est une vérification d'identité, en 04b.
+environ treize comptes saturés **sur un livre par ailleurs à l'équilibre**, et le seul remède réel est
+une vérification d'identité, en 04b. Ce chiffre-là n'est pas une propriété : le fusible lit une
+exposition **nette**, donc la marge du jour relève son seuil réel — `PLAFOND_MAISON_CENTS + marge
+nette de la fenêtre` — et le nombre de comptes nécessaires croît avec le trafic (13, 14, 19, 26, 39 à
+0, 20 000, 100 000, 200 000, 400 000 billets réglés par jour). Il protège la **caisse**, il ne compte
+pas les comptes, et il est de moins en moins un rempart contre une flotte à mesure que le site
+grossit : cela **avance** l'échéance du KYC au lieu de la reculer.
 
 Règles qui tiennent dès maintenant : aucune colonne « solde » en base tant que le grand livre
 n'existe pas ; le client ne peut écrire que son pseudo, son avatar et son pays ; aucun secret dans

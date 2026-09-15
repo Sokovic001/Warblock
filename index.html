@@ -2537,10 +2537,23 @@ const WBCore = (function(){
     // moins chère quand aucune ne marchera est pire que dire « plus tard » à quelqu'un qu'une table
     // moins chère aurait dépanné : le premier renvoie le joueur cliquer en boucle sur un lobby qui
     // a l'air cassé, le second lui fait attendre quelques minutes de trop.
+    //
+    // ET UNE TROISIÈME SITUATION, QUI EST CELLE QUE LE PLAFOND EST CALIBRÉ POUR PRODUIRE : portée
+    // `joueur`, mais lobby SATURÉ. Le pire cas d'un billet est strictement positif sur les vingt
+    // combinaisons mode × palier, donc dès que l'exposition réalisée du joueur arrive à moins d'un
+    // pire cas MINIMAL du plafond, plus AUCUNE table ne passe — état atteint exactement après les
+    // quatre tables maximales que le plafond existe pour laisser gagner. Promettre alors une table
+    // moins chère envoie le joueur essayer les vingt, prendre vingt fois le même refus, épuiser son
+    // seau de débit et finir sur un 429, qui n'est pas dans `REFUS_SAS` et le renvoie jouer hors
+    // ligne. Le serveur, lui, a les deux nombres : c'est lui qui pose `aucuneTableMoinsChere`, et ce
+    // bloc ne fait que le LIRE — le plafond d'exposition n'est pas une règle du jeu et ne descend
+    // pas ici.
     if (code === 'plafond') {
-      return d.portee === 'joueur'
-        ? 'You have won a lot here lately, so this room is off limits for now. Nothing was charged — pick a smaller buy-in.'
-        : 'No new rooms are opening right now. Nothing was charged — try again in a few minutes.';
+      if (d.portee === 'joueur' && !d.aucuneTableMoinsChere)
+        return 'You have won a lot here lately, so this room is off limits for now. Nothing was charged — pick a smaller buy-in.';
+      if (d.portee === 'joueur')
+        return 'You have won a lot here in the last day, so no room is open for you right now. Nothing was charged — try again later.';
+      return 'No new rooms are opening right now. Nothing was charged — try again in a few minutes.';
     }
     return 'The server turned this entry down. Try again in a moment.';
   }

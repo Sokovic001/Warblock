@@ -65,12 +65,16 @@ LIRE (n'écrit rien, n'exige aucune confirmation) :
       Exemple : montrer mouvement gain 42
 
   montrer billet <id>
-      La ligne de matches, ses écritures, son séquestre, et le verdict de plafond du joueur.
-      C'est ce qui répond à « pourquoi ce billet a-t-il été refusé en plafond ».
+      La ligne de matches, ses écritures, son séquestre, et la marge de plafond que le
+      joueur avait à l'ouverture de CE billet.
 
   montrer exposition <userId>
       L'exposition réalisée du joueur sur la fenêtre glissante, ce qu'il lui reste,
       et les gestes d'opération déjà consignés sur son compte.
+      C'est ce qui répond à « pourquoi ce joueur a-t-il été refusé en plafond ».
+      Un refus plafond ne laisse AUCUNE ligne dans matches — ni identifiant, ni billet
+      à relire, c'est la règle « ni ligne, ni écriture, ni séquestre ». Le diagnostic
+      part donc du joueur, jamais du billet.
 
 CORRIGER (écrit, et exige une raison, un nom et --confirme) :
 
@@ -239,17 +243,29 @@ async function montrer(a, { db, dit, maintenant }) {
     // toute ligne close ; tout le reste est un incident.
     const sequestre = await db.ledgerSolde(L.compteEnjeu(ligne.id));
     dit(`  séquestre ${L.compteEnjeu(ligne.id)} : ${sequestre} centimes`);
-    // ET POURQUOI LE PLAFOND A REFUSÉ. On rejoue le verdict sur l'exposition RÉALISÉE du joueur :
-    // c'est la même requête que celle qui refuse, donc le chiffre qu'on montre est celui qui a
-    // décidé — un outil qui en montrerait un autre ne servirait à rien.
-    const realisee = await db.expositionJoueurCents({ userId: ligne.user_id, maintenant: maintenant() });
+    // QUELLE MARGE DE PLAFOND LE JOUEUR AVAIT À L'OUVERTURE DE CE BILLET-LÀ. Ce n'est pas « la même
+    // requête » qui fonde la propriété, ce sont les mêmes PARAMÈTRES : l'ANCRE, la BORNE HAUTE et le
+    // PIRE CAS du billet. La requête était déjà celle qui refuse, et elle mentait quand même — elle
+    // était ancrée sur l'horloge COURANTE quand `createMatch` décide sur `opened_at`. Une jambe de
+    // gain posée deux heures avant l'ouverture pesait donc dans la fenêtre du refus et zéro dans
+    // celle de l'outil, dès que l'opérateur regardait plus de vingt-quatre heures plus tard,
+    // c'est-à-dire toujours.
+    //
+    // Les trois paramètres viennent donc de la LIGNE, et le pire cas se dérive de la table par
+    // `WBCore` — jamais d'une constante écrite à la main, même discipline qu'`api/app.js`.
+    const ancre = new Date(ligne.opened_at);
+    const realisee = await db.expositionJoueurCents({ userId: ligne.user_id, maintenant: ancre,
+                                                      jusqua: ancre });
+    const netMax = C.cashoutCents(C.purseBound(ligne.stake_cents, ligne.seats).maxCents).netCents;
     const verdict = L.plafondVerdict({
       expositionRealiseeCents: realisee,
-      expositionBilletCents: 0,
+      expositionBilletCents: L.expositionBilletMaxCents(netMax, ligne.stake_cents),
       plafondCents: L.PLAFOND_JOUEUR_CENTS,
     });
-    dit(`  exposition réalisée du joueur sur ${L.PLAFOND_FENETRE_H} h : ${realisee} centimes`
-        + ` (plafond ${verdict.plafondCents}, retenue ${verdict.expositionCents})`);
+    dit(`  exposition réalisée du joueur à l'ouverture de ce billet, sur ${L.PLAFOND_FENETRE_H} h :`
+        + ` ${realisee} centimes`);
+    dit(`    pire cas de cette table ${verdict.expositionCents - Math.max(0, realisee)},`
+        + ` plafond ${verdict.plafondCents}, retenue ${verdict.expositionCents}`);
     return 0;
   }
 

@@ -271,10 +271,13 @@ function fakeDb(seed = [], horloge = null) {
   const fenetreDepuis = maintenant =>
     new Date((maintenant instanceof Date ? maintenant.getTime() : Number(maintenant))
              - L.PLAFOND_FENETRE_H * 3600 * 1000);
-  // Les billets d'UN joueur, sur la fenêtre : le miroir de la jointure `m.user_id = $1` et du
-  // `cree_le >= $2` de la requête réelle.
-  const expositionFenetre = (userId, depuis) => L.expositionDe(
-    transfertsDuLivre(l => new Date(l.cree_le) >= depuis),
+  // Les billets d'UN joueur, sur la fenêtre : le miroir de la jointure `m.user_id = $1` et des DEUX
+  // bornes de la requête réelle, `cree_le >= $2` et `cree_le <= $5`. La borne haute est l'ancre du
+  // chiffre : au point qui décide elle vaut l'heure d'ouverture du billet, et l'outil d'opération
+  // s'en sert pour rejouer un verdict des mois après sans que les jambes écrites depuis ne le
+  // faussent.
+  const expositionFenetre = (userId, depuis, jusqua) => L.expositionDe(
+    transfertsDuLivre(l => new Date(l.cree_le) >= depuis && new Date(l.cree_le) <= jusqua),
     matches.filter(x => x.user_id === userId).map(x => String(x.id)));
   // LE FUSIBLE GLOBAL : le cumul de TOUS les joueurs, et SANS jointure — comme la requête réelle, et
   // pour la même raison. C'est un interrupteur, pas un invariant : les quatre motifs suffisent à
@@ -341,8 +344,14 @@ function fakeDb(seed = [], horloge = null) {
       // bien, et c'est `api/db-check.js` qui éprouve deux ouvertures simultanées.
       //
       // Le PIRE CAS est REÇU, jamais calculé ici : `netMaxCents` vient de `WBCore` par `app.js`.
+      //
+      // L'ANCRE EST L'HEURE D'OUVERTURE, DES DEUX CÔTÉS DE LA FENÊTRE — `fenetreDepuis(openedAt)` en
+      // bas, `openedAt` en haut — comme la requête réelle. Rien de postérieur n'existe à cet instant,
+      // donc la borne haute ne retire rien ici ; elle rend le chiffre REJOUABLE par l'outil
+      // d'opération, des mois après.
+      const realiseeCents = expositionFenetre(m.userId, fenetreDepuis(m.openedAt), m.openedAt);
       const plafond = L.plafondVerdict({
-        expositionRealiseeCents: expositionFenetre(m.userId, fenetreDepuis(m.openedAt)),
+        expositionRealiseeCents: realiseeCents,
         expositionBilletCents: L.expositionBilletMaxCents(m.netMaxCents, m.stakeCents),
         plafondCents: L.PLAFOND_JOUEUR_CENTS,
       });
@@ -367,7 +376,12 @@ function fakeDb(seed = [], horloge = null) {
       // de ce billet-là, et cela ne dépend pas de ce que le joueur a en poche.
       if (plafond.franchi)
         return { match: null, refus: 'plafond', portee: 'joueur',
-                 expositionCents: plafond.expositionCents, plafondCents: plafond.plafondCents };
+                 expositionCents: plafond.expositionCents,
+                 // LA RÉALISÉE REMONTE À PART, comme dans db-pg.js : `plafondVerdict` ne rend que la
+                 // somme, et `app.js` en a besoin seule pour savoir s'il reste au joueur la place
+                 // d'une table moins chère.
+                 expositionRealiseeCents: realiseeCents,
+                 plafondCents: plafond.plafondCents };
 
       const solde = soldeDe(dispo);
       if (solde < m.stakeCents)
@@ -646,8 +660,9 @@ function fakeDb(seed = [], horloge = null) {
     async lireUtilisateur({ userId }) {
       return users.find(x => memeId(x.id, userId)) || null;
     },
-    async expositionJoueurCents({ userId, maintenant }) {
-      return expositionFenetre(userId, fenetreDepuis(maintenant));
+    async expositionJoueurCents({ userId, maintenant, jusqua }) {
+      return expositionFenetre(userId, fenetreDepuis(maintenant),
+                               jusqua === undefined ? maintenant : jusqua);
     },
     // LA CONTRE-PASSATION ET SA RAISON, DANS LA MÊME TRANSACTION — imitée, et il faut dire comment.
     // La doublure n'a pas de transaction : elle pose le livre d'abord, comme le vrai pilote, puis
@@ -5543,6 +5558,67 @@ await test('LE PLAFOND LAISSE PASSER LE QUATRIÈME BILLET MAXIMAL, et refuse le 
   reconcilier(db, 'quatre tables maximales');
 });
 
+await test('LE LOBBY SATURÉ NE PROMET PAS UNE TABLE MOINS CHÈRE : il n\'en existe plus aucune', async () => {
+  // L'ÉTAT QUE LE PLAFOND EST CALIBRÉ POUR PRODUIRE, pas un cas limite. `PLAFOND_TABLES_PAR_JOUR`
+  // vaut quatre, donc quatre Resurgence à 10 $ gagnées au maximum passent toutes — la quatrième
+  // tombant sur `156 000 > 156 000`, qui est faux, et la comparaison est stricte pour cette raison —
+  // et laissent l'exposition réalisée à `PLAFOND_JOUEUR_CENTS` tout rond. Le pire cas est alors
+  // strictement positif sur les vingt combinaisons mode × palier : plus AUCUNE table ne passe.
+  //
+  // Le message de la portée `joueur` promettait quand même « pick a smaller buy-in ». Le joueur
+  // essayait les vingt tables, prenait vingt fois le même refus, épuisait son seau de débit et
+  // finissait sur un 429 — qui n'est pas dans `REFUS_SAS` et le renvoie jouer hors ligne. C'est
+  // exactement le tort que la décision 8 invoque pour séparer les deux portées, reproduit sur
+  // l'autre portée.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+  const uid = db.users[0].id;
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR; i++)
+    await semerVictoireMaximale(db, uid, CHERE.miseCents, CHERE.seats, horloge.t);
+
+  // LA TABLE LA MOINS CHÈRE DU LOBBY, et son pire cas est le PLUS PETIT du domaine : si elle refuse,
+  // aucune n'ouvre. Le chiffre est recalculé depuis `WBCore`, jamais écrit à la main.
+  const pireCasMin = Math.min(...MODES_LEDGER.flatMap(
+    ({ seats }) => MISES_LEDGER.map(mise => pireCasDe(mise, seats))));
+  assert.strictEqual(pireCasMin, pireCasPetite(),
+    'la plus petite table du lobby n\'est plus celle que ce test demande');
+
+  const petite = await demander(app, { ...PETITE.corps, clientKey: 'saturee' });
+  assert.strictEqual(petite.code, 409, JSON.stringify(petite.corps));
+  assert.strictEqual(petite.corps.code, 'plafond');
+  // LA PORTÉE NE MENT PAS : c'est bien le plafond PAR JOUEUR qui a refusé, et la réponse porte son
+  // chiffre. La faire basculer à `maison` aurait déplacé le défaut au lieu de le fermer.
+  assert.strictEqual(petite.corps.portee, 'joueur');
+  assert.strictEqual(petite.corps.plafondCents, L.PLAFOND_JOUEUR_CENTS);
+  assert.strictEqual(petite.corps.aucuneTableMoinsChere, true);
+  // ET LE MESSAGE CESSE DE PROMETTRE CE QUI N'EXISTE PAS. C'est le pendant exact de l'assertion déjà
+  // écrite pour le fusible global.
+  assert.ok(!/smaller buy-in/.test(C.refusMessage('plafond', petite.corps)),
+    'le sas promet une table moins chère alors que les vingt refusent');
+  assert.match(C.refusMessage('plafond', petite.corps), /try again later/i);
+
+  // LA BANDE D'EN DESSOUS TIENT TOUJOURS, sans quoi le drapeau serait allumé partout et la portée
+  // `joueur` n'aurait plus de message à elle. Trois victoires maximales laissent 117 000 : la
+  // Resurgence à 10 $ pèse 39 000 de plus et refuse, mais la petite table passe — donc le drapeau
+  // est FAUX, et le message promet une table moins chère parce qu'il en existe une.
+  const b = bancDeBillet({ limiter: () => true });
+  await appel(b.app, { token: 'ok:u1:Loic' });
+  const autre = b.db.users[0].id;
+  for (let i = 0; i < L.PLAFOND_TABLES_PAR_JOUR - 1; i++)
+    await semerVictoireMaximale(b.db, autre, CHERE.miseCents, CHERE.seats, b.horloge.t);
+  await semerVictoireMaximale(b.db, autre, PETITE.miseCents, PETITE.seats, b.horloge.t);
+  const chere = await demander(b.app, { ...CHERE.corps, clientKey: 'bande-basse' });
+  assert.strictEqual(chere.corps.code, 'plafond', JSON.stringify(chere.corps));
+  assert.strictEqual(chere.corps.aucuneTableMoinsChere, false);
+  assert.match(C.refusMessage('plafond', chere.corps), /smaller buy-in/);
+  const ouvre = await demander(b.app, { ...PETITE.corps, clientKey: 'bande-basse-petite' });
+  assert.strictEqual(ouvre.code, 200,
+    'le drapeau dit faux mais aucune table n\'ouvre : le seuil est mal posé');
+
+  zeroGlobal(db, 'après un lobby saturé');
+  reconcilier(db, 'le lobby saturé');
+});
+
 await test('LA FENÊTRE GLISSE : un billet sorti des vingt-quatre heures ne compte plus, éprouvé sans attendre', async () => {
   // La fenêtre est GLISSANTE et pas une journée calendaire : une journée calendaire se réinitialise
   // à une heure connue de tous, et attendre minuit deviendrait une stratégie. Ce que ce test tient,
@@ -5615,8 +5691,10 @@ await test('UN GAIN CONTRE-PASSÉ NE COMPTE PLUS DANS L\'EXPOSITION, et c\'est l
 await test('LE FUSIBLE GLOBAL refuse sur le cumul de TOUS LES JOUEURS, avec la portée maison', async () => {
   // Un plafond par joueur ne borne pas une FLOTTE DE COMPTES : `findOrCreate` crée un compte par
   // adresse email, et rien n'empêche cinquante adresses. Le fusible est la seule réponse de cette
-  // phase, il vaut environ treize comptes saturés, et son déclenchement refuse TOUT LE MONDE — y
-  // compris un joueur dont l'exposition personnelle est NULLE, ce que ce test constate.
+  // phase, il vaut environ treize comptes saturés SUR UN LIVRE PAR AILLEURS À L'ÉQUILIBRE, et son
+  // déclenchement refuse TOUT LE MONDE — y compris un joueur dont l'exposition personnelle est
+  // NULLE, ce que ce test constate. Le « par ailleurs à l'équilibre » n'est pas une précaution de
+  // style : le test suivant sème une population perdante et montre que le fusible ne saute plus.
   const { db, app, horloge } = bancDeBillet({ limiter: () => true });
   await appel(app, { token: 'ok:u1:Loic' });
   const uid = db.users[0].id;
@@ -5658,6 +5736,145 @@ await test('LE FUSIBLE GLOBAL refuse sur le cumul de TOUS LES JOUEURS, avec la p
   assert.ok(!/smaller buy-in/.test(C.refusMessage('plafond', petite.corps)));
 });
 
+// SEMER UNE DÉFAITE : la mise part au séquestre puis chez la maison, et l'exposition de la maison
+// DESCEND d'autant. C'est le pendant de `semerVictoireMaximale`, et il existe pour une seule raison :
+// le fusible lit une exposition NETTE, donc une population perdante lui fait de la place.
+async function semerDefaite(db, userId, miseCents, at) {
+  const id = 900001 + (semees++);
+  const quand = new Date(at);
+  db.matches.push({
+    id, user_id: userId, mode: 'solo', stake_cents: miseCents, seats: C.seatsOf(C.MODES.solo),
+    team_size: 1, paid_seats: 1, brawler: BRAWLER, seed_public: 1, seed_secret: SECRETS[0],
+    sim_version: SIM.SIM_VERSION, client_key: `perdue-${id}`, status: 'settled',
+    first_result_at: quand, opened_at: quand, expires_at: quand, settled_at: quand,
+    issue: 'defaite', controle: null, motif: null,
+    gross_cents: 0, fee_cents: 0, net_cents: 0,
+    purse_cents: 0, declared_net_cents: null, ecart_cents: null,
+    seconds: 1, kills: 0, deaths: 1, rank: 20, cubes: 0, damage: 0, cashed_out: false,
+    trace_steps: 1, replay_digest: null, digest_match: true, divergence_step: null, replay_ms: 0,
+  });
+  await db.ledgerWrite(L.mouvementDotation({ userId, montantCents: miseCents }));
+  await db.ledgerWrite(L.mouvementMise({ userId, matchId: id, miseCents }));
+  await db.ledgerWrite(L.mouvementGain({ userId, matchId: id, miseCents, grossCents: 0,
+                                         feeCents: 0, netCents: 0, convergee: true }));
+  return id;
+}
+
+await test('LIMITE CONNUE : le fusible borne une CAISSE, pas un nombre de comptes — la marge du jour relève son seuil', async () => {
+  // LE CHIFFRE QUI ÉTAIT ÉCRIT COMME UNE PROPRIÉTÉ, et qui n'en est pas une. « Le fusible vaut
+  // environ treize comptes saturés » n'est vrai que sur un livre dont l'exposition nette par
+  // ailleurs est NULLE — c'est-à-dire sur la doublure d'un test qui n'a jamais eu de population
+  // perdante en face de l'attaquant. `db.expositionMaison` somme débits moins crédits, et l'espérance
+  // par billet est négative pour le joueur : chaque perdant RAMÈNE de l'argent à la maison et lui
+  // achète donc de la marge sous le fusible. Le seuil réel est
+  // `PLAFOND_MAISON_CENTS + marge nette de la fenêtre`, et il croît avec le trafic.
+  //
+  // CE TEST EST UN CONSTAT, pas une exigence : on ne corrige ni le clamp ni la lecture nette. Le
+  // clamp est protecteur et monotone dans le bon sens ; une lecture BRUTE ferait sauter le fusible
+  // tous les jours dès quelques dizaines de milliers de billets, puisque les seuls gagnants légitimes
+  // pèsent des millions. C'est la PHRASE qui était fausse, et elle est corrigée dans les cinq
+  // documents qui la portaient. Ce qui reste ouvert — indexer une flotte sur autre chose qu'un stock
+  // net — est renvoyé à la 04b, et ce test est là pour que le chiffre cesse d'être écrit comme un
+  // fait.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  await appel(app, { token: 'ok:u1:Loic' });
+
+  // LA MÊME FLOTTE QUE LE TEST PRÉCÉDENT, au billet près.
+  let cumul = 0;
+  let voisin = 1000;
+  while (cumul + pireCasPetite() <= L.PLAFOND_MAISON_CENTS) {
+    voisin += 1;
+    await db.ledgerWrite(L.mouvementDotation({ userId: voisin, montantCents: CHERE.miseCents }));
+    cumul += (await semerVictoireMaximale(db, voisin, CHERE.miseCents, CHERE.seats, horloge.t)).pireCas;
+  }
+  assert.ok(cumul > L.PLAFOND_MAISON_CENTS - pireCasPetite(),
+    'la flotte ne suffit plus à approcher le fusible : le test ne prouve plus rien');
+
+  // ET UNE POPULATION PERDANTE, semée sur la même fenêtre. Une défaite à $0,50 rend 50 centimes à la
+  // maison : il en faut donc beaucoup, et c'est exactement le point — un site qui tourne en produit
+  // des centaines de milliers par jour sans y penser.
+  const marge = cumul + pireCasChere() - L.PLAFOND_MAISON_CENTS;
+  assert.ok(marge > 0, 'le fusible ne saute même pas sans population perdante');
+  const perdants = Math.ceil(marge / 50) + 20;
+  for (let i = 0; i < perdants; i++) await semerDefaite(db, 5000 + i, 50, horloge.t);
+
+  // LE FUSIBLE NE SAUTE PLUS, pour exactement la même flotte. Le seuil n'est pas une propriété du
+  // système, c'est « deux millions PLUS le profit du jour ».
+  const r = await demander(app, { ...CHERE.corps, clientKey: 'flotte-amortie' });
+  assert.strictEqual(r.code, 200, JSON.stringify(r.corps));
+  // Et on le dit en chiffres plutôt qu'en mots : l'exposition NETTE du livre est retombée sous le
+  // fusible, alors que les gains de la flotte, eux, n'ont pas bougé d'un centime.
+  const nette = L.expositionDe(livreDe(db), db.matches.map(m => String(m.id)));
+  assert.ok(nette + pireCasChere() <= L.PLAFOND_MAISON_CENTS,
+    `l'exposition nette vaut ${nette} : le test ne montre plus ce qu'il annonce`);
+  assert.ok(nette < cumul, 'la population perdante n\'a pas amorti l\'exposition de la flotte');
+  zeroGlobal(db, 'après une flotte amortie par une population perdante');
+});
+
+await test('LIMITE CONNUE : le fusible ne voit QUE des écritures réglées — les billets en vol lui sont invisibles', async () => {
+  // CE QUE LA CADENCE BORNE, ET CE QU'ELLE NE BORNE PAS. Il était écrit en quatre endroits que le
+  // retard du fusible « vaut au plus ce qu'une minute d'ouvertures peut engager ». C'est faux d'un
+  // ordre de grandeur, et c'est cette phrase-là qu'on relirait le jour où le fusible aurait laissé
+  // passer la casse : les seules jambes de maison viennent du motif `gain`, écrit au RÈGLEMENT, donc
+  // un billet OUVERT pèse exactement ZÉRO dans le fusible pendant toute sa vie —
+  // `LOBBY.wait + zoneTotalS + MATCH_MARGE_S`, plusieurs minutes. Le verdict n'ajoute qu'UN pire cas,
+  // celui du billet qu'on ouvre, et `matches_un_seul_ouvert` est un index PARTIEL sur `user_id` : il
+  // borne le nombre de billets ouverts PAR JOUEUR, jamais tous joueurs confondus.
+  //
+  // Le cache n'y est pour rien, et c'est important : on le désarme en donnant à chaque ouverture sa
+  // propre lecture du livre, et la flotte passe quand même. L'erreur ne vient pas de l'amortissement,
+  // elle vient de ce que le livre ne porte pas encore ces billets-là.
+  // LE NOMBRE DE BILLETS EN VOL EST CALCULÉ, jamais écrit : il vaut ce qu'il faut pour que le livre
+  // dépasse le fusible une fois tout réglé, et il se re-décide si un palier, un mode ou une constante
+  // change. Les deux sources de hasard sont élargies pour l'occasion — celles du banc sont des listes
+  // finies, taillées pour des scénarios à quelques billets.
+  const FLOTTE = Math.floor(L.PLAFOND_MAISON_CENTS / pireCasChere()) + 1;
+  let graine = 0;
+  const { db, app, horloge } = bancDeBillet({
+    limiter: () => true,
+    randomSeed: () => ((++graine) * 7919) >>> 0,
+    randomSecret: () => String(graine).padStart(4, '0') + 'c'.repeat(28),
+  });
+  let lectures = 0;
+  const brute = db.expositionMaison;
+  db.expositionMaison = async a => { lectures++; return brute(a); };
+
+  const ouverts = [];
+  for (let i = 0; i < FLOTTE; i++) {
+    const jeton = `ok:u${i + 1}:Flotte${i}`;
+    await appel(app, { token: jeton });
+    // L'horloge avance d'une cadence entière entre deux ouvertures : le cache est donc relu à chaque
+    // fois, et il rend ZÉRO à chaque fois, parce qu'aucun de ces billets n'a encore été réglé.
+    horloge.t += L.FUSIBLE_RAFRAICHI_S * 1000;
+    const r = await demander(app, { ...CHERE.corps, clientKey: `vol-${i}` }, { token: jeton });
+    assert.strictEqual(r.code, 200, `billet ${i} refusé : ${JSON.stringify(r.corps)}`);
+    ouverts.push({ id: r.corps.id, userId: db.users[i].id });
+  }
+  assert.strictEqual(lectures, FLOTTE, 'le cache n\'a pas été relu à chaque ouverture : le test mesure autre chose');
+  // LE FUSIBLE EST À ZÉRO alors que trente pires cas sont en vol. C'est la limite, en une ligne.
+  assert.strictEqual(await db.expositionMaison({ depuis: new Date(horloge.t - L.PLAFOND_FENETRE_H * 3600 * 1000) }), 0,
+    'un billet ouvert pèse dans le fusible : la limite est fermée, ce test doit être réécrit');
+
+  // ET ILS RÈGLENT TOUS, EN VICTOIRE MAXIMALE. Le livre porte alors d'un coup ce que le fusible
+  // n'avait jamais vu venir, et il dépasse `PLAFOND_MAISON_CENTS` sans qu'un seul refus ait été
+  // prononcé.
+  const p = C.cashoutCents(C.purseBound(CHERE.miseCents, CHERE.seats).maxCents);
+  for (const { id, userId } of ouverts) {
+    db.matches.find(m => String(m.id) === String(id)).status = 'settled';
+    await db.ledgerWrite(L.mouvementGain({ userId, matchId: id, miseCents: CHERE.miseCents,
+      grossCents: p.grossCents, feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+  }
+  const apres = await db.expositionMaison({ depuis: new Date(horloge.t - L.PLAFOND_FENETRE_H * 3600 * 1000) });
+  assert.strictEqual(apres, FLOTTE * pireCasChere());
+  assert.ok(apres > L.PLAFOND_MAISON_CENTS,
+    `le livre porte ${apres}, sous le fusible : la flotte du test est trop petite pour montrer la limite`);
+  // LA BORNE VRAIE EST DONC « le pire cas cumulé de TOUS les billets en vol », et un billet vit
+  // plusieurs minutes — pas « une minute d'ouvertures ». Ce test est un constat : la refermer
+  // demanderait de faire entrer les lignes `open` dans la lecture amortie, ce que la spécification
+  // renvoie aux phases suivantes avec son chiffrage.
+  zeroGlobal(db, 'après une flotte réglée d\'un coup');
+});
+
 await test('LE FUSIBLE NE SE RELIT QU\'À SA CADENCE, et il ne tourne PAS sous le verrou', async () => {
   // Le plafond par joueur est exact ; le fusible est APPROCHÉ, et c'est le bon marché. Le lire sous
   // le verrou ferait de chaque ouverture de billet un agrégat non borné sur la table qui grossit le
@@ -5691,6 +5908,45 @@ await test('LE FUSIBLE NE SE RELIT QU\'À SA CADENCE, et il ne tourne PAS sous l
   autre.db.expositionMaison = async a => { autresLectures++; return brute2(a); };
   await demander(autre.app, { ...PETITE.corps, clientKey: 'v1' });
   assert.strictEqual(autresLectures, 1);
+});
+
+await test('UNE HORLOGE QUI RECULE NE FIGE PAS LE FUSIBLE : la cadence se lit dans les DEUX sens', async () => {
+  // `now` vaut `Date.now` par défaut : une horloge MURALE, pas un chronomètre. Le dépôt a déjà fait
+  // ce raisonnement une fois — `RENONCE_MARGE_ECRAN_MS` lit `performance.now()` exprès, parce qu'un
+  // `setInterval` retarde dans le sens qui fait promettre un remboursement refusé. Ici c'est un pas
+  // NTP qui joue contre nous : avec la seule borne haute, `t - luA` devenait négatif, donc toujours
+  // inférieur à la cadence, et le cache se figeait pour toute la durée du recul. La maison ouvrait
+  // des tables au-delà de son fusible pendant une heure, alors que le retard promis est de soixante
+  // secondes. Le test de cadence voisin n'avançait que l'horloge : il serait resté vert pour
+  // toujours.
+  const { db, app, horloge } = bancDeBillet({ limiter: () => true });
+  let lectures = 0;
+  const brute = db.expositionMaison;
+  db.expositionMaison = async a => { lectures++; return brute(a); };
+
+  // Première ouverture : le fusible est lu, l'exposition de la maison est nulle, la table s'ouvre.
+  assert.strictEqual((await demander(app, { ...PETITE.corps, clientKey: 'avant' })).code, 200);
+  assert.strictEqual(lectures, 1, 'la première ouverture doit lire le fusible');
+
+  // On sème l'exposition de la maison AU-DELÀ du fusible, sur d'autres comptes que le demandeur :
+  // c'est bien l'interrupteur global qu'on éprouve, pas le plafond par joueur.
+  let cumul = 0;
+  let voisin = 2000;
+  while (cumul + pireCasPetite() <= L.PLAFOND_MAISON_CENTS) {
+    voisin += 1;
+    await db.ledgerWrite(L.mouvementDotation({ userId: voisin, montantCents: CHERE.miseCents }));
+    cumul += (await semerVictoireMaximale(db, voisin, CHERE.miseCents, CHERE.seats, horloge.t)).pireCas;
+  }
+
+  // ET L'HORLOGE RECULE D'UNE HEURE. Sans la borne basse, `age` vaut environ −3 600 000, ce qui est
+  // bien inférieur à la cadence : le cache serait rendu tel quel, `expositionMaison` ne serait pas
+  // relue, et la table s'ouvrirait en 200 alors que le fusible a sauté.
+  horloge.t -= 3600 * 1000;
+  const r = await demander(app, { ...PETITE.corps, clientKey: 'apres-recul' });
+  assert.strictEqual(r.code, 409, JSON.stringify(r.corps));
+  assert.strictEqual(r.corps.code, 'plafond');
+  assert.strictEqual(r.corps.portee, 'maison');
+  assert.strictEqual(lectures, 2, 'le fusible est resté figé sur une horloge qui recule');
 });
 
 await test('UN BILLET DÉJÀ OUVERT N\'EST JAMAIS CASSÉ RÉTROACTIVEMENT : le plafond franchi pendant qu\'il vit ne change rien', async () => {
@@ -5980,6 +6236,20 @@ test('la clé du grand livre, et les deux index qui remplacent la case', () => {
     assert.match(bloc, new RegExp(`drop index if exists ${vieux}`), `${vieux} n'est pas déposé`);
     assert.ok(!new RegExp(`create index[^\\n]*${vieux}\\b`).test(bloc), `${vieux} est recréé`);
   }
+  // ET UN TROISIÈME INDEX, CELUI PAR BILLET, qui est le seul à rendre VRAIE la phrase « l'agrégat du
+  // plafond par joueur est borné par les billets d'un seul joueur ». Sans lui, la requête de fenêtre
+  // ne peut partir que du livre — toutes les écritures de maison de la fenêtre, tous joueurs
+  // confondus — parce que sa jointure porte sur une EXPRESSION qu'aucun index ne couvre. Avec lui,
+  // le planificateur peut partir des quelques dizaines de billets du joueur et descendre.
+  //
+  // L'EXPRESSION EST COMPARÉE CARACTÈRE POUR CARACTÈRE À `REFERENCE_BILLET_SQL`, exactement comme
+  // celle des comptes l'est à `COMPTE_RE_SQL`. Il ne doit jamais exister deux écritures de la règle
+  // qui ramène une écriture à un billet : la seconde vivrait dans un `.sql` que personne ne relit,
+  // et elle laisserait un gain contre-passé peser dans l'exposition — le piège nommé de la phase.
+  const idx = bloc.match(/create index if not exists ledger_entries_billet_fenetre_idx on ledger_entries\s*\n?\s*\(\((.*)\), cree_le\);/);
+  assert.ok(idx, 'l\'index par billet a disparu, ou sa forme a changé');
+  assert.strictEqual(idx[1], L.REFERENCE_BILLET_SQL,
+    'le schéma et api/ledger.js ne portent pas la MÊME expression de référence de billet');
   // Et ce que la clé NE prouve pas doit rester écrit à côté d'elle : deux décompositions
   // différentes sur la même référence passeraient, et c'est ailleurs que ce trou est refermé.
   const commente = lireApi('schema.sql');
@@ -6308,11 +6578,15 @@ async function bancIncident({ statut = 'settled', miseCents = 1000 } = {}) {
 }
 // Un collecteur de sortie : l'outil n'imprime que par `sortie`, donc un test peut lire ce que
 // l'opérateur aurait lu.
-function bancOutil(db) {
+// L'HORLOGE EST RÉGLABLE, et ce n'est pas du confort. Avec `maintenant: () => T0` figé, l'heure
+// d'ouverture des billets du banc et l'heure de l'outil COÏNCIDAIENT : la fenêtre ancrée sur
+// l'horloge courante et celle ancrée sur `opened_at` rendaient le même chiffre, et le défaut était
+// invisible par construction. L'opérateur, lui, regarde des heures ou des jours après le refus.
+function bancOutil(db, horloge = { t: T0 }) {
   const lignes = [];
-  return { lignes, texte: () => lignes.join('\n'),
+  return { lignes, horloge, texte: () => lignes.join('\n'),
            lancer: argv => OP.executer(argv, { db, sortie: l => lignes.push(l),
-                                               maintenant: () => T0 }) };
+                                               maintenant: () => horloge.t }) };
 }
 const OP_SIGNE = ['--par', 'Loïc', '--raison', 'double règlement du 14, ticket 118'];
 
@@ -6550,7 +6824,7 @@ await test('le verbe `montrer` n\'écrit RIEN : aucune ligne dans ledger_entries
   assert.strictEqual(await outil.lancer(['montrer', 'billet', String(matchId)]), 0);
   assert.match(outil.texte(), /statut settled/);
   assert.match(outil.texte(), new RegExp(`séquestre ${L.compteEnjeu(matchId)} : 0 centimes`));
-  assert.match(outil.texte(), /exposition réalisée du joueur sur 24 h/);
+  assert.match(outil.texte(), /exposition réalisée du joueur à l'ouverture de ce billet, sur 24 h/);
 
   assert.strictEqual(await outil.lancer(['montrer', 'exposition', String(userId)]), 0);
   assert.match(outil.texte(), new RegExp(`plafond\\s+: ${L.PLAFOND_JOUEUR_CENTS} centimes`));
@@ -6580,6 +6854,92 @@ await test('le verbe `montrer` n\'écrit RIEN : aucune ligne dans ledger_entries
   assert.strictEqual(ouvert.db.ledger.filter(l => l.motif === 'contrepassation').length, 0);
   assert.strictEqual(ouvert.db.ledgerAudit.length, 0);
   reconcilier(ouvert.db, 'un billet ouvert qu\'on a refusé de contre-passer');
+});
+
+await test('`montrer billet` dit le chiffre QUI A DÉCIDÉ, et pas celui de l\'heure où on le consulte', async () => {
+  // LE DÉFAUT QUE LA COÏNCIDENCE DU BANC CACHAIT. `createMatch` décide sur la fenêtre
+  // `[opened_at − 24 h, opened_at]` ; l'outil lisait `[maintenant − 24 h, maintenant]`. Tant que le
+  // banc figeait les deux à `T0`, les deux fenêtres étaient la même et rien ne pouvait se voir. Un
+  // opérateur, lui, arrive des heures ou des jours après le refus : une jambe de gain posée deux
+  // heures avant l'ouverture sort de sa fenêtre à lui et pas de celle qui a refusé, et le
+  // commentaire « c'est le chiffre qui a décidé » devient faux sans qu'une ligne de code bouge.
+  //
+  // Ce cas casse la coïncidence exprès : le gain est posé DEUX heures avant l'ouverture, et l'outil
+  // est lancé VINGT-TROIS heures après.
+  // L'horloge du livre est celle de la doublure : c'est elle qui date `cree_le`, donc elle qui
+  // décide de quel côté des deux fenêtres tombe chaque jambe.
+  const livreT = { t: T0 - 2 * 3600 * 1000 };
+  const db = fakeDb([], () => livreT.t);
+  const userId = 1, matchId = 4242;
+  const miseCents = 1000, sieges = C.seatsOf(C.MODES.resurgence);
+  const p = C.cashoutCents(C.purseBound(miseCents, sieges).maxCents);
+  const ouvert = new Date(T0);
+  const avantOuverture = new Date(T0 - 2 * 3600 * 1000);
+  db.users.push({ id: userId, auth_id: 'op', email: 'op@x.test', name: 'Op', name_key: 'op' });
+  // UN PREMIER BILLET, RÉGLÉ AVANT L'OUVERTURE DU SECOND, et son gain maximal : c'est lui qui pèse
+  // dans la fenêtre du refus.
+  db.matches.push({ id: 4241, user_id: userId, mode: 'resurgence', stake_cents: miseCents,
+    seats: sieges, team_size: 1, paid_seats: 1, brawler: BRAWLER, seed_public: 1,
+    seed_secret: SECRETS[0], sim_version: SIM.SIM_VERSION, client_key: 'vieux', status: 'settled',
+    first_result_at: avantOuverture, opened_at: avantOuverture, expires_at: avantOuverture,
+    settled_at: avantOuverture, issue: 'encaissement', controle: null, motif: null,
+    gross_cents: p.grossCents, fee_cents: p.feeCents, net_cents: p.netCents, purse_cents: 0,
+    declared_net_cents: null, ecart_cents: null, seconds: 1, kills: 0, deaths: 0, rank: 1,
+    cubes: 0, damage: 0, cashed_out: true, trace_steps: 1, replay_digest: null,
+    digest_match: true, divergence_step: null, replay_ms: 0 });
+  db.matches.push({ id: matchId, user_id: userId, mode: 'resurgence', stake_cents: miseCents,
+    seats: sieges, team_size: 1, paid_seats: 1, brawler: BRAWLER, seed_public: 1,
+    seed_secret: SECRETS[0], sim_version: SIM.SIM_VERSION, client_key: 'apres', status: 'settled',
+    first_result_at: ouvert, opened_at: ouvert, expires_at: ouvert, settled_at: ouvert,
+    issue: 'defaite', controle: null, motif: null, gross_cents: 0, fee_cents: 0, net_cents: 0,
+    purse_cents: 0, declared_net_cents: null, ecart_cents: null, seconds: 1, kills: 0, deaths: 0,
+    rank: 20, cubes: 0, damage: 0, cashed_out: false, trace_steps: 1, replay_digest: null,
+    digest_match: true, divergence_step: null, replay_ms: 0 });
+  await db.ledgerWrite(L.mouvementDotation({ userId, montantCents: 500000 }));
+  await db.ledgerWrite(L.mouvementMise({ userId, matchId: 4241, miseCents }));
+  await db.ledgerWrite(L.mouvementGain({ userId, matchId: 4241, miseCents, grossCents: p.grossCents,
+    feeCents: p.feeCents, netCents: p.netCents, convergee: true }));
+
+  const attendu = L.expositionBilletMaxCents(p.netCents, miseCents);
+  assert.strictEqual(attendu, 39000, 'le pire cas du domaine a bougé : ce cas doit être re-décidé');
+
+  // L'OPÉRATEUR ARRIVE VINGT-TROIS HEURES PLUS TARD. La jambe de gain est alors sortie de SA fenêtre
+  // à lui, et elle est toujours dans celle qui a décidé.
+  const outil = bancOutil(db, { t: T0 + 23 * 3600 * 1000 });
+  assert.strictEqual(await outil.lancer(['montrer', 'billet', String(matchId)]), 0);
+  assert.match(outil.texte(), new RegExp(`à l'ouverture de ce billet, sur 24 h : ${attendu} centimes`));
+  // ET LE PIRE CAS DE LA TABLE EST CELUI DE LA TABLE, dérivé de `WBCore` et jamais écrit à la main :
+  // sans lui, la « retenue » affichée valait l'exposition seule et ne disait pas ce que ce billet-ci
+  // pesait.
+  assert.match(outil.texte(), new RegExp(`pire cas de cette table ${attendu},`));
+  assert.match(outil.texte(), new RegExp(`retenue ${2 * attendu}`));
+
+  // ET `montrer exposition`, LUI, PARLE BIEN D'AUJOURD'HUI : c'est le verbe qui répond à « pourquoi
+  // ce joueur est-il refusé », et sa question est au présent. Les deux verbes ne disent pas la même
+  // chose, et c'est voulu — vingt-trois heures après, la fenêtre du jour ne porte plus ce gain.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['montrer', 'exposition', String(userId)]), 0);
+  assert.match(outil.texte(), /exposition réalisée : 0 centimes/);
+});
+
+test('L\'AIDE N\'ASSIGNE PLUS À `montrer billet` UNE QUESTION QU\'AUCUN VERBE NE PEUT RENDRE', () => {
+  // Un refus `plafond` ne laisse AUCUNE ligne dans `matches` — « ni ligne, ni écriture, ni
+  // séquestre » — et le corps du 409 ne porte pas d'identifiant. `montrer billet <id>` rendait donc
+  // « aucun billet <id> » sur le cas exact que l'aide lui assignait. La question appartient à
+  // `montrer exposition`, qui part du joueur.
+  const aide = lireApi('operateur.js');
+  const bloc = section => {
+    const i = aide.indexOf(section);
+    assert.ok(i > 0, `${section} a disparu de l'aide`);
+    return aide.slice(i, aide.indexOf('\n\n', i));
+  };
+  const billet = bloc('  montrer billet <id>');
+  assert.ok(!/refusé en plafond/.test(billet),
+    '`montrer billet` promet encore d\'expliquer un refus qui ne laisse aucun billet');
+  assert.match(billet, /marge de plafond/);
+  const exposition = bloc('  montrer exposition <userId>');
+  assert.match(exposition, /refusé en plafond/);
+  assert.match(exposition, /AUCUNE ligne dans matches/);
 });
 
 test('l\'analyseur d\'arguments de l\'outil est pur, et une option sans valeur n\'avale pas la suivante', () => {
@@ -7146,6 +7506,50 @@ test('LA SURFACE DE RÉGRESSION DE CE MODULE EST VIDE, et c\'est un TEST qui le 
   const check = lireApi('db-check.js');
   assert.match(check, /delete from users/, 'la seule preuve du refus n\'est plus dans db-check.js');
   assert.match(check, /matches_user_id_fkey/, 'le refus n\'est pas attribué à une contrainte nommée');
+});
+
+test('UN NETTOYAGE DE db-check.js QUI EFFACE UN COMPTE DESCEND L\'ARBRE ENTIER : `restrict` ne pardonne pas', () => {
+  // LA GARDE QUI MANQUAIT, ET QUI A LAISSÉ PASSER UN JOB ROUGE. Le test ci-dessus se contentait de
+  // chercher les chaînes `delete from users` et `matches_user_id_fkey` dans `db-check.js` : le
+  // `refuse(...)` volontaire du cas « UN delete from users EST REFUSÉ » suffit à les lui donner. Il
+  // prenait donc la ligne cassée pour la preuve que rien n'était cassé.
+  //
+  // CE QUE LE MODULE 6 A CHANGÉ SANS TOUCHER UN SEUL NETTOYAGE : les deux clés étrangères sont
+  // passées en `restrict`, donc aucun `delete from users` n'emporte plus ni les billets ni les
+  // traces. Un cas qui POSE un billet puis efface son joueur sort en `23503`, part rouge — et s'il
+  // avait validé sa transaction de montage, la pollution reste EN BASE : au lancement suivant,
+  // `creerJoueur` bute sur l'index unique d'`auth_id` et le cas ne peut plus jamais repasser sans
+  // qu'un humain ouvre `psql`. C'est le pire mode de défaillance d'une recette d'intégration.
+  //
+  // La garde ne regarde que les nettoyages RÉELS : les `refuse(...)` sont retirés d'abord, puisque
+  // leur `delete from users` est précisément l'effacement qu'on veut voir échouer, et le titre du
+  // cas aussi — l'un d'eux contient la chaîne en toutes lettres.
+  const source = lireApi('db-check.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  const blocs = source.replace(/await refuse\([\s\S]*?\);/g, ' ').split(/await cas\(/).slice(1);
+  let vus = 0;
+  for (const bloc of blocs) {
+    const titre = (bloc.match(/^\s*'((?:[^'\\]|\\.)*)'/) || [])[1] || '(sans titre)';
+    // Le titre porte le nom du cas, pas son code : il ne doit pas répondre à la place du nettoyage.
+    const corps = bloc.slice(bloc.indexOf("'", bloc.indexOf(titre) + titre.length));
+    if (!/delete\s+from\s+users/.test(corps)) continue;
+    // Un cas qui n'ouvre aucun billet n'a rien à descendre : la garde ne lui demande rien.
+    if (!/ouvrirBillet\(|insert into matches/.test(corps)) continue;
+    vus++;
+    assert.match(corps, /delete\s+from\s+matches/,
+      `« ${titre} » efface son joueur sans effacer ses billets : matches_user_id_fkey refusera`);
+    if (/insert into match_traces/.test(corps)) {
+      assert.match(corps, /delete\s+from\s+match_traces/,
+        `« ${titre} » efface ses billets sans effacer leurs traces : match_traces_match_id_fkey refusera`);
+    }
+    // ET L'ORDRE EST CELUI DES CLÉS ÉTRANGÈRES, des traces vers le compte. Effacer `matches` avant
+    // `match_traces` échoue tout autant, et l'erreur serait attribuée à l'autre contrainte.
+    const iTraces = corps.search(/delete\s+from\s+match_traces/);
+    const iMatches = corps.search(/delete\s+from\s+matches\b/);
+    const iUsers = corps.search(/delete\s+from\s+users/);
+    if (iTraces >= 0) assert.ok(iTraces < iMatches, `« ${titre} » efface matches avant match_traces`);
+    assert.ok(iMatches < iUsers, `« ${titre} » efface users avant matches`);
+  }
+  assert.ok(vus >= 4, `${vus} nettoyages de compte examinés : la garde ne regarde plus rien`);
 });
 
 test('LE TROU QUI RESTE EST ÉCRIT, NOMMÉ ET CHIFFRÉ : findOrCreate cherche par auth_id', () => {

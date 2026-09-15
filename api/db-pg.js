@@ -226,6 +226,34 @@ async function ledgerAuditWrite(client, plan) {
 //
 // L'exposition est `débits − crédits` sur les comptes de maison, c'est-à-dire l'OPPOSÉ de leur
 // solde : exactement ce que `expositionDe` calcule côté JavaScript, sur les mêmes lignes.
+//
+// LA SOUS-REQUÊTE EST BORNÉE PAR LE JOUEUR, ET C'EST TOUT L'INTÉRÊT DE CETTE REQUÊTE-LÀ. Sans le
+// dernier prédicat, ses trois clauses — la fenêtre, les motifs, les comptes de maison — ne
+// mentionnaient PAS le joueur : `m.user_id = $1` ne s'appliquait qu'APRÈS la jointure, et Postgres
+// ne pouvait pas le descendre, puisque le `join` porte sur une expression `case` qu'aucun index ne
+// couvre. L'agrégat valait donc O(trafic du SITE) et non O(billets du joueur), sur le chemin le plus
+// disputé du système et PENDANT que la transaction tient `select id from users where id = $1 for
+// update` — c'est-à-dire l'incident `GET /api/me` que la décision 6 cite pour justifier de sortir le
+// fusible de la transaction, reproduit à l'endroit exact qu'elle prétend protéger. La propriété
+// « son agrégat est borné par les billets d'un seul joueur » est écrite dans cinq documents : elle
+// est tenue ici, ou elle n'est tenue nulle part.
+//
+// LA RESTRICTION PORTE SUR LE BILLET CALCULÉ, JAMAIS SUR `reference` BRUTE. C'est le piège nommé de
+// la phase, et l'écrire sur `reference` le rouvrirait entièrement : une contre-passation porte
+// `gain:42` et non `42`, donc elle sortirait du filtre et un gain annulé recommencerait à peser dans
+// l'exposition. On réutilise donc `REFERENCE_BILLET_SQL`, la MÊME expression que celle qui sert au
+// `join` — il n'existe jamais deux écritures de la même règle.
+//
+// Le prédicat est logiquement REDONDANT avec la jointure : il ne change aucun résultat, il ne fait
+// que dire au planificateur ce que la jointure implique déjà. C'est ce qui le rend sûr à poser.
+//
+// LA BORNE HAUTE, `cree_le <= $5`, EXISTE POUR QUE LE CHIFFRE SOIT REJOUABLE. Au point qui DÉCIDE
+// elle vaut l'heure d'ouverture du billet, et n'en retire rien : à cet instant, aucune écriture
+// postérieure n'existe pour ce joueur, que le verrou de ligne sérialise. Elle sert à `api/operateur.js`,
+// qui doit pouvoir REJOUER le verdict tel qu'il s'est prononcé, des mois après, sans que les jambes
+// écrites depuis — à commencer par celles du billet lui-même — ne viennent fausser la réponse à
+// « pourquoi ce billet a-t-il été refusé ». Ce n'est pas la même requête qui fonde la propriété,
+// ce sont les mêmes PARAMÈTRES : l'ancre, la borne haute et le pire cas du billet.
 const EXPOSITION_FENETRE_SQL = `
     select coalesce(sum(e.montant_cents) filter (where e.compte_debit  = any($3::text[])), 0)
          - coalesce(sum(e.montant_cents) filter (where e.compte_credit = any($3::text[])), 0) as total
@@ -233,8 +261,10 @@ const EXPOSITION_FENETRE_SQL = `
                    ${L.REFERENCE_BILLET_SQL} as billet
               from ledger_entries
              where cree_le >= $2
+               and cree_le <= $5
                and motif = any($4::text[])
-               and (compte_debit = any($3::text[]) or compte_credit = any($3::text[]))) e
+               and (compte_debit = any($3::text[]) or compte_credit = any($3::text[]))
+               and ${L.REFERENCE_BILLET_SQL} in (select id::text from matches where user_id = $1)) e
       join matches m on m.id::text = e.billet
      where m.user_id = $1`;
 
@@ -264,9 +294,13 @@ function fenetreDepuis(maintenant) {
 // L'exposition d'UN joueur, dans la transaction de son billet et sous le verrou que l'appelant a
 // pris. `sum()` rend un `bigint`, donc une CHAÎNE : la conversion est ici pour la même raison que
 // dans `ledgerSolde`, et avec le même prix si on l'oublie — « 9 » y serait plus grand que « 10 ».
-async function expositionJoueur(client, userId, depuis) {
+// `jusqua` est OBLIGATOIRE et jamais implicite : c'est l'ancre du chiffre. Au point qui décide elle
+// vaut l'heure d'ouverture du billet, dans l'outil d'opération l'heure d'ouverture de la ligne qu'on
+// relit. Une valeur par défaut « maintenant » ferait dire à l'outil un autre nombre que celui qui a
+// refusé, et c'est précisément le défaut qu'elle existe pour fermer.
+async function expositionJoueur(client, userId, depuis, jusqua) {
   const r = await client.query(EXPOSITION_FENETRE_SQL,
-    [userId, depuis, L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION]);
+    [userId, depuis, L.COMPTES_EXPOSITION, L.MOTIFS_EXPOSITION, jusqua]);
   return Number((r.rows[0] || {}).total) || 0;
 }
 
@@ -542,8 +576,16 @@ function pgDb(connectionString) {
         // de `WBCore.cashoutCents(WBCore.purseBound(mise, sièges).maxCents)`, dans `api/app.js`, et
         // il traverse en paramètre. Même discipline que `mouvementGain`, qui reçoit brut, commission
         // et net sans les recalculer.
+        //
+        // LA RÉALISÉE EST GARDÉE À PART, et elle remonte avec le refus. `plafondVerdict` ne rend que
+        // la SOMME « réalisée clampée + ce billet-ci » : `api/app.js` ne pouvait donc pas savoir s'il
+        // reste au joueur la place d'une table moins chère, et le sas lui en promettait une même
+        // quand aucune des vingt ne passait. Le terme voyage plutôt que d'être redevine par une
+        // soustraction chez l'appelant — un nombre reconstruit est un nombre qui diverge.
+        const realiseeCents = await expositionJoueur(client, m.userId,
+                                                     fenetreDepuis(m.openedAt), m.openedAt);
         const plafond = L.plafondVerdict({
-          expositionRealiseeCents: await expositionJoueur(client, m.userId, fenetreDepuis(m.openedAt)),
+          expositionRealiseeCents: realiseeCents,
           expositionBilletCents: L.expositionBilletMaxCents(m.netMaxCents, m.stakeCents),
           plafondCents: L.PLAFOND_JOUEUR_CENTS,
         });
@@ -574,6 +616,7 @@ function pgDb(connectionString) {
               await client.query('rollback');
               return { match: null, refus: 'plafond', portee: 'joueur',
                        expositionCents: plafond.expositionCents,
+                       expositionRealiseeCents: realiseeCents,
                        plafondCents: plafond.plafondCents };
             }
             const solde = await ledgerSolde(client, dispo);
@@ -1178,10 +1221,16 @@ function pgDb(connectionString) {
     // L'exposition d'un joueur sur la fenêtre, hors de toute transaction : c'est une LECTURE, elle
     // ne décide de rien. La requête est celle de `createMatch`, et pas une requête réécrite pour
     // l'occasion — si l'outil montrait un autre chiffre que celui qui refuse, il ne servirait à rien.
-    async expositionJoueurCents({ userId, maintenant }) {
+    //
+    // MAIS LA MÊME REQUÊTE NE SUFFIT PAS : ce sont les mêmes PARAMÈTRES qui font le chiffre. `jusqua`
+    // est la borne haute, donc l'ancre ; l'appelant la pose sur `opened_at` quand il rejoue le
+    // verdict d'un billet, et elle retombe sur `maintenant` quand il demande simplement où en est un
+    // joueur aujourd'hui.
+    async expositionJoueurCents({ userId, maintenant, jusqua }) {
       const client = await pool.connect();
       try {
-        return await expositionJoueur(client, userId, fenetreDepuis(maintenant));
+        return await expositionJoueur(client, userId, fenetreDepuis(maintenant),
+                                      jusqua === undefined ? maintenant : jusqua);
       } finally {
         client.release();
       }
