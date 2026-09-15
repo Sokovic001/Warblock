@@ -931,7 +931,15 @@
   </div>
 </div></section>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- integrity : le navigateur refuse d'executer ce fichier si un seul octet a change. L'URL est
+     versionnee et immuable chez cdnjs, donc le hash ne bouge qu'en changeant de version de
+     Three.js — auquel cas il faut le recalculer :
+       curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+     crossorigin est obligatoire : sans lui le navigateur ne peut pas lire la reponse pour la
+     verifier, et bloque le script. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+        integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 <!-- CORE: pure rules, no DOM / THREE. Extracted and tested by test.js -->
 <script>
