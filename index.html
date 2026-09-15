@@ -932,10 +932,6 @@
 </div></section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<!-- GLTFLoader: same r128 as three.min.js above. Only needed when a brawler has a .glb model
-     in assets/brawlers/ — the game runs without it, on the procedural cubes. -->
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 
 <!-- CORE: pure rules, no DOM / THREE. Extracted and tested by test.js -->
 <script>
@@ -2203,108 +2199,6 @@ function buildWorld(seed){
 }
 
 // ---------- meshes ----------
-// --- optional GLB skins -------------------------------------------------------------------
-// A brawler listed here is drawn from a .glb instead of the procedural cubes. Everything is
-// opt-in and degrades: an entry with no file on disk, a failed fetch, or a missing GLTFLoader
-// all leave the cube brawler exactly as it was. Nothing here is a build step — the .glb files
-// are authored once (see docs/ASSETS.md) and committed, the game still opens from index.html.
-const BRAWLER_MODELS = {
-  bolt: 'assets/brawlers/bolt.glb',
-};
-const BRAWLER_MODEL_HEIGHT = 2.3;    // the procedural brawlers stand about this tall
-// A glTF character conventionally faces +Z. A Warblock brawler faces -Z: its face sits at
-// -(head depth / 2) and its gun at z -0.62. Half a turn reconciles the two.
-const BRAWLER_MODEL_FACING = Math.PI;
-const modelCache = new Map();
-function loadBrawlerModels(){
-  const ids = Object.keys(BRAWLER_MODELS);
-  if(!ids.length || typeof THREE.GLTFLoader !== 'function') return Promise.resolve();
-  const loader = new THREE.GLTFLoader();
-  return Promise.all(ids.map(id => new Promise(done => {
-    loader.load(BRAWLER_MODELS[id],
-      gltf => { modelCache.set(id, fitBrawlerModel(gltf.scene, gltf.animations)); done(); },
-      undefined,
-      err => { console.warn('brawler model failed, keeping the cubes:', id, err); done(); });
-  })));
-}
-// A SkinnedMesh is positioned by its skeleton, not by its parents: three.js cancels the parent
-// transform out of the skinning matrix, so scaling and centring the group left the character
-// lying at the wrong size, untouched — and the bounding box, which DOES rotate, then disagreed
-// with what was actually drawn. Tripo ships a rig with no clips and every bone at identity, so
-// the bind pose is exactly the authored geometry: a plain Mesh draws the same thing and obeys
-// its parents. With real animation this has to become a proper skinned path instead.
-function deskinModel(root,clips){
-  const skinned = [];
-  root.traverse(o => { if(o.isSkinnedMesh) skinned.push(o); });
-  if(!skinned.length) return;
-  if(clips && clips.length){ console.warn('brawler model has animation clips; keeping the skin, the fit will not apply'); return; }
-  for(const sk of skinned){
-    const plain = new THREE.Mesh(sk.geometry, sk.material);
-    plain.position.copy(sk.position); plain.quaternion.copy(sk.quaternion); plain.scale.copy(sk.scale);
-    sk.parent.add(plain); sk.parent.remove(sk);
-  }
-}
-// Tripo, Mixamo and Blender all disagree on scale, origin and facing. Rather than trust the
-// exporter, measure the thing: scale it to the height of a cube brawler, sit its feet on the
-// ground and centre it on the origin. Any source file then drops in without hand-tuning.
-function fitBrawlerModel(scene,clips){
-  deskinModel(scene,clips);
-  scene.rotation.y = BRAWLER_MODEL_FACING;
-  const box = new THREE.Box3().setFromObject(scene);
-  const size = box.getSize(new THREE.Vector3());
-  if(size.y > 0) scene.scale.setScalar(BRAWLER_MODEL_HEIGHT / size.y);
-  const fitted = new THREE.Box3().setFromObject(scene);
-  const mid = fitted.getCenter(new THREE.Vector3());
-  scene.position.set(-mid.x, -fitted.min.y, -mid.z);
-  scene.traverse(o => { if(o.isMesh){ o.castShadow = false; o.receiveShadow = false; flattenMaterial(o); } });
-  const holder = new THREE.Group(); holder.add(scene); return holder;
-}
-// Tripo, Mixamo and every other exporter write PBR (MeshStandardMaterial). The game lights
-// its world for MeshLambertMaterial: one hemisphere light and one weak directional, values
-// that leave a metalness/roughness surface almost black. Rather than relight the world for
-// one model, the model joins the world — same flat shading as the cubes, base colour and
-// texture kept. This is also what holds the Brawl Stars look once a real character lands.
-function flattenMaterial(mesh){
-  const src = mesh.material;
-  if(!src || src.isMeshLambertMaterial) return;
-  const flat = m => {
-    const out = new THREE.MeshLambertMaterial({ color: m.color ? m.color.clone() : 0xffffff, map: m.map || null });
-    out.transparent = m.transparent; out.opacity = m.opacity; out.side = m.side;
-    out.skinning = !!m.skinning;
-    return out;
-  };
-  mesh.material = Array.isArray(src) ? src.map(flat) : flat(src);
-}
-// Spawn protection and the ghost fade walk e.mesh.children and set material.opacity on each.
-// A GLB skin is a Group with no material of its own, so the fade has to descend into it — the
-// missing descent is what threw "Cannot set properties of undefined (setting 'transparent')"
-// the first time a model wore spawn protection. Object3D.clone() shares materials between every
-// brawler wearing the same model, so the first fade clones them: without that, one player's
-// spawn protection makes every other copy of that model translucent too.
-function fadeSubtree(root,op){
-  root.traverse(o=>{
-    if(!o.isMesh||!o.material) return;
-    if(!o.userData.fadeMat){ o.material=o.material.clone(); o.userData.fadeMat=true; }
-    o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true;
-  });
-}
-// A skinned mesh loses its skeleton binding through Object3D.clone(); SkeletonUtils rebuilds it.
-function cloneBrawlerModel(src){
-  const utils = THREE.SkeletonUtils;
-  return utils && utils.clone ? utils.clone(src) : src.clone(true);
-}
-// The procedural parts are hidden, never removed: children[0], [3] and [4] are indexed by the
-// hit-flash and leg-walk code, and children[2] by nothing at all. Hiding keeps those indices
-// valid, so the animation code needs no knowledge that a model is in play.
-function applyBrawlerModel(g,id){
-  const src = modelCache.get(id);
-  if(!src) return false;
-  g.children.forEach(o => { if(o.name !== 'shadow' && o.name !== 'ring') o.visible = false; });
-  const model = cloneBrawlerModel(src);
-  model.name = 'model';
-  g.add(model);
-  return true;
-}
 function makeBrawlerMesh(color,isPlayer,id){
   // Child order is fixed for the animation code: 0 body, 1 head, 2 face, 3 leg L, 4 leg R, 5 weapon.
   // Everything after index 5 is silhouette decoration (outlines, packs, capes, hats) and is never indexed.
@@ -2417,7 +2311,6 @@ function makeBrawlerMesh(color,isPlayer,id){
   deco.forEach(o=>g.add(o));
   addShadow(g,1.5,0.02);
   if(isPlayer){ const ring=new THREE.Mesh(new THREE.RingGeometry(0.62,0.8,32),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:0.7,side:THREE.DoubleSide})); ring.rotation.x=-Math.PI/2; ring.position.y=0.04; ring.name='ring'; g.add(ring); }
-  applyBrawlerModel(g,id);
   return g;
 }
 // A soft dark ellipse under everything that stands up. This single touch is what most reads as
@@ -3382,7 +3275,7 @@ function commonUpdate(e,dt){
   for(let i=G.pickups.length-1;i>=0;i--){ const pk=G.pickups[i]; if(Math.hypot(pk.x-e.x,pk.z-e.z)<0.9) collect(e,pk); }
   // bush fade
   const hide=obscured(G.player,e), op=hide?0:(e.stealthT>0?(e.isPlayer?0.35:0.18):(inBush(e)?0.55:1));
-  if(e.lastOp!==op){ e.lastOp=op; e.mesh.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } if(!o.material){ fadeSubtree(o,op); return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
+  if(e.lastOp!==op){ e.lastOp=op; e.mesh.children.forEach(o=>{ if(o.name==='ring') return; if(o.name==='shadow'){ o.visible=op>0.2; return; } if(o.material===outlineMat){ o.visible=op>=1; return; } o.material.transparent=op<1; o.material.opacity=op; o.material.needsUpdate=true; }); }
 }
 
 // ---------- emotes ----------
@@ -4163,22 +4056,6 @@ function startPv(){ try{ for(const b of Object.values(B)) if(b.id!==selBrawler) 
   if(!pv.running){ pv.running=true; requestAnimationFrame(pvLoop); } }
 
 // ---------- loop ----------
-// Models arrive after the lobby has already drawn itself on cubes. Rebuilding the preview
-// meshes on arrival is the whole of the swap: a match built later picks them up on its own.
-// Models arrive after the lobby has already drawn itself on cubes; the previews built without
-// them are rebuilt here. pvDraw clears the preview scene by walking pv.meshes, so an old mesh
-// has to leave the scene BEFORE its entry is overwritten — drop that removal and the stale
-// brawler stays in pv.scene forever, drawn under every card on top of the right one. That
-// superposition is what made every brawler look like the same yellow blob.
-loadBrawlerModels().then(() => {
-  if(!modelCache.size || !pv.renderer) return;
-  for(const id of modelCache.keys()){
-    if(!B[id]) continue;
-    if(pv.meshes[id]) pv.scene.remove(pv.meshes[id]);
-    pv.meshes[id]=makeBrawlerMesh(new THREE.Color(B[id].color),false,id);
-  }
-  renderLobby();
-});
 renderLobby();
 startTicker();
 armLobbyMusic();
