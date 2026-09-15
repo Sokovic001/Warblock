@@ -839,15 +839,15 @@ async function main() {
                 now() - ((m.id % 20) || ' hours')::interval
            from matches m where m.user_id = $1::bigint
          union all
-         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2,
+         select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2::integer,
                 now() - ((m.id % 20) || ' hours')::interval
            from matches m where m.user_id = $1::bigint
          union all
-         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3,
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3::integer,
                 now() - ((m.id % 20) || ' hours')::interval
            from matches m where m.user_id = $1::bigint
          union all
-         select 'gain', m.id::text, 'enjeu:'||m.id, 'joueur:'||$1||':disponible', $4,
+         select 'gain', m.id::text, 'enjeu:'||m.id, 'joueur:'||$1||':disponible', $4::integer,
                 now() - ((m.id % 20) || ' hours')::interval
            from matches m where m.user_id = $1::bigint`,
         [u, p.grossCents - 1000, p.feeCents, p.netCents]);
