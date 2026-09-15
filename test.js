@@ -1098,6 +1098,36 @@ test('bots hesitate before their first shot and fire slower than a human', () =>
 // audio, HUD — are never evaluated here, so a stray brace in them used to leave this file
 // printing "191 passed" while the page was blank in a browser. That check lived in CLAUDE.md
 // as a note for whoever remembered to run it; it belongs here, where it runs every time.
+console.log('\nThe simulation draws from the seed');
+test('no simulation function reaches for Math.random()', () => {
+  // The map was reproducible from its seed; the match was not. Every decision taken during a
+  // round drew on the global Math.random(), so two rounds on the same seed with the same inputs
+  // diverged — which rules out replays, reproducible debugging and any server-authoritative sim.
+  // Those draws now go through srnd(), backed by G.srng. This test is the thing that keeps them
+  // there: it reads the Game block, which nothing else here can reach, and fails the moment a
+  // simulation function grows a bare Math.random() again.
+  // Audio, sparks, ticker names and avatar ids keep Math.random() on purpose — they never touch
+  // game state, so seeding them would buy nothing and cost a stream.
+  const SIM_FUNCTIONS = ['makeEntity', 'fireSpec', 'spawnPickup', 'respawn', 'pickGoal', 'botUpdate', 'zoneUpdate'];
+  const offenders = [];
+  for (const name of SIM_FUNCTIONS) {
+    const start = html.indexOf(`function ${name}(`);
+    assert.notStrictEqual(start, -1, `${name}() has been renamed or removed — update SIM_FUNCTIONS`);
+    // Functions in this file start at column 0 and end at the next line that is a lone "}".
+    const end = html.indexOf('\n}', start);
+    assert.notStrictEqual(end, -1, `could not find the end of ${name}()`);
+    const body = html.slice(start, end);
+    if (body.includes('Math.random()')) offenders.push(name);
+  }
+  assert.deepStrictEqual(offenders, [],
+    `these simulation functions draw outside the seeded stream: ${offenders.join(', ')}. Use srnd().`);
+});
+test('srnd() exists and falls back when no match is running', () => {
+  // The lobby builds entities for its brawler previews, and no G exists then.
+  assert.ok(/function srnd\(\)\s*\{[^}]*G\.srng[^}]*Math\.random\(\)/.test(html),
+    'srnd() must read G.srng when a match is running and fall back to Math.random() otherwise');
+});
+
 console.log('\nThe file loads at all');
 test('every inline <script> block compiles', () => {
   const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)];

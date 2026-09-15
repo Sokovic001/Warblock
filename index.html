@@ -2464,10 +2464,26 @@ function discard(obj){
   });
 }
 
+// ---------- le tirage de la simulation ----------
+// La carte etait deja reproductible depuis sa graine, la partie ne l'etait pas : tout ce qui se
+// decide pendant un match tirait sur Math.random(). Deux parties lancees sur la meme graine avec
+// les memes entrees divergeaient donc, ce qui interdit le replay, le debogage reproductible et
+// toute simulation faisant autorite cote serveur.
+//
+//   graine du match ─┬─> buildWorld : G.rng   (decor, caisses, points d'apparition)
+//                    └─> srnd()     : G.srng  (temperament, visee, zone, butin, respawn)
+//
+// Deux flux et non un seul : ajouter un buisson au decor ne doit pas decaler le comportement des
+// bots. Le repli sur Math.random() couvre les appels hors match — le lobby construit des entites
+// pour ses apercus, et aucun G n'existe alors.
+// L'audio, les etincelles, les noms du bandeau et les ids d'avatar gardent Math.random() : ils ne
+// touchent pas l'etat du jeu, et les seeder n'apporterait rien.
+function srnd(){ return (G && G.srng) ? G.srng() : Math.random(); }
+
 // ---------- entities ----------
 function makeEntity(name,x,z,stake,isPlayer,brawler,acc,team){
   const e={ name,x,z,team:team||0,respawnT:0,lives:0,invuln:0,emote:'',emoteT:0,vx:0,vz:0,ax:0,az:-1,brawler,hp:brawler.hp,cubes:0,pouch:stake,kills:0,alive:true,isPlayer,
-    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:Math.random()*0.3,aim:0,id:Math.random(),
+    ammo:3,ammoT:0,super:0,burst:null,fireCd:0,lastDamageT:-99,lastHitBy:null,acc,target:null,goal:null,goalT:0,think:srnd()*0.3,aim:0,id:srnd(),
     speed:brawler.speed*(isPlayer?1:0.96), knockx:0,knockz:0,flash:0, gadget:C.smokeStart() };
   e.mesh=makeBrawlerMesh(new THREE.Color(brawler.color),isPlayer,brawler.id); e.mesh.position.set(x,0,z); world.add(e.mesh);
   e.stealthT=0; e.dashT=0;
@@ -2629,7 +2645,7 @@ function attack(e,dirx,dirz,aimDist){
 function fireSpec(e,dirx,dirz,spec,isSuper,aimDist,origin){
   const base=Math.atan2(dirx,dirz);
   for(let i=0;i<spec.n;i++){
-    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(Math.random()-0.5)*0.02;
+    const a=base+(spec.n>1&&spec.spread?(-spec.spread/2+spec.spread*i/(spec.n-1)):0)+(srnd()-0.5)*0.02;
     const pr=spawnProjectile(e,Math.sin(a),Math.cos(a),spec,isSuper,i*(spec.stagger||0),origin);
     if(spec.kind==='lob'){ pr.lob=true; pr.explodeAt=clamp(aimDist||spec.range,1.5,spec.range); }
   }
@@ -2747,13 +2763,13 @@ function spawnPickup(kind,x,z,amount,owner){
       // a canister lying in the grass, the same object you see flying when someone throws one
     : kind==='smoke' ? makeNade()
     :                  new THREE.Mesh(new THREE.BoxGeometry(0.6,0.45,0.45),bagMat);
-  let px=x+(Math.random()-0.5)*1.4, pz=z+(Math.random()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
+  let px=x+(srnd()-0.5)*1.4, pz=z+(srnd()-0.5)*1.4; if(isWall(px,pz)){ px=x; pz=z; }
   mesh.position.set(px, kind==='heart'?0.75:0.5, pz); world.add(mesh);
   // the shadow is owned by the pickup and torn down with it — an orphaned one would sit on the
   // ground for the rest of the match
   const shadow=new THREE.Mesh(shadowGeo,shadowMat);
   shadow.scale.setScalar(0.75); shadow.position.set(px,0.03,pz); world.add(shadow);
-  G.pickups.push({kind,x:px,z:pz,amount,owner,mesh,shadow,ph:Math.random()*6.283});
+  G.pickups.push({kind,x:px,z:pz,amount,owner,mesh,shadow,ph:srnd()*6.283});
 }
 function removePickup(pk){
   const i=G.pickups.indexOf(pk); if(i<0) return false;
@@ -2854,7 +2870,7 @@ function respawn(e){
   // come back somewhere safe inside the current circle, as far as possible from whoever is shooting
   let x=G.zone.cx, z=G.zone.cz, best=-1;
   for(let t=0;t<40;t++){
-    const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-3);
+    const a=srnd()*Math.PI*2, r=srnd()*Math.max(2,G.zone.r-3);
     const nx=clamp(G.zone.cx+Math.cos(a)*r,2,N-2), nz=clamp(G.zone.cz+Math.sin(a)*r,2,N-2);
     if(!free(nx,nz)) continue;
     let nearest=1e9;
@@ -2922,8 +2938,8 @@ function pickGoal(b){
   if(best) return best; bd=34;
   for(const bx of G.boxes){ if(bx.hp<=0||(bad&&bad.has(bx))) continue; const d=Math.hypot(bx.x-b.x,bx.z-b.z); if(d<bd&&inZone(bx.x,bx.z,1)){ bd=d; best={x:bx.x,z:bx.z,box:bx}; } }
   if(best) return best;
-  if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(Math.random()-0.5)*4,z:mate.z+(Math.random()-0.5)*4}; }
-  const a=Math.random()*Math.PI*2, r=Math.random()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
+  if(G.modeCfg.teamSize>1){ const mate=G.ents.find(t=>t!==b&&t.team===b.team&&t.alive); if(mate&&Math.hypot(mate.x-b.x,mate.z-b.z)>9) return {x:mate.x+(srnd()-0.5)*4,z:mate.z+(srnd()-0.5)*4}; }
+  const a=srnd()*Math.PI*2, r=srnd()*Math.max(2,G.zone.r-2); return {x:clamp(G.zone.cx+Math.cos(a)*r,2,N-2),z:clamp(G.zone.cz+Math.sin(a)*r,2,N-2)};
 }
 function botUpdate(b,dt){
   if(dashUpdate(b,dt)) return;
@@ -2938,9 +2954,9 @@ function botUpdate(b,dt){
       if(done) break; }
   }
   if(G.modeCfg.cashout){ b.cashLock=Math.max(0,(b.cashLock||0)-dt);
-    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&Math.random()<dt*0.25){ botCashOut(b); return; } }
+    if(b.pouch>=G.stake*4&&C.cashoutReady(b.cashLock)&&srnd()<dt*0.25){ botCashOut(b); return; } }
   b.think-=dt; b.fireCd-=dt; b.goalT-=dt; b.aim-=dt; b.stealthT-=dt;
-  if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+Math.random()*0.6); b.target=nt;
+  if(b.think<=0){ b.think=0.2; const nt=findTarget(b); if(nt&&nt!==b.target) b.aim=C.BOT.reaction*(0.7+srnd()*0.6); b.target=nt;
     if(!b.target&&(!b.goal||b.goalT<=0||Math.hypot(b.goal.x-b.x,b.goal.z-b.z)<0.8||(b.goal.box&&b.goal.box.hp<=0)||(b.goal.pick&&!G.pickups.includes(b.goal.pick)))){ b.goal=pickGoal(b); b.goalT=8; } }
   let mx=0,mz=0; const atk=b.brawler.attack;
   // Two ways of being hurt, split by temperament. A bot that has broken off is heading for its
@@ -2985,7 +3001,7 @@ function botUpdate(b,dt){
     else if(d>want){ mx=dx; mz=dz; }
     else { const s=Math.sin(G.time*(1.0+(b.id*11%1)*0.8)+b.id*9); mx=-dz*s; mz=dx*s; if(d<want*0.5&&b.brawler.id!=='brick'){ mx-=dx*0.7; mz-=dz*0.7; } }
     if(d<atk.range*0.98&&b.aim<=0&&b.fireCd<=0&&b.ammo>=1){
-      const err=(Math.random()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
+      const err=(srnd()-0.5)*2*C.botAimError(b.acc); const a=Math.atan2(dx,dz)+err;
       // lead a little on the player's velocity
       const lead=0.25; const lx=t.x+(t.vx||0)*lead-b.x, lz=t.z+(t.vz||0)*lead-b.z, la=Math.atan2(lx,lz)+err;
       attack(b,Math.sin(la),Math.cos(la),d);
@@ -2995,7 +3011,7 @@ function botUpdate(b,dt){
       b.fireCd=(atk.stagger||0)*atk.n+0.45*C.BOT.fireMult;
     }
     // smoke is a way out, not an opening: a losing bot drops it on itself and runs, same as you
-    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&Math.random()<dt*1.7) throwSmoke(b,0);
+    if(low&&d<atk.range*1.5&&C.canThrowSmoke(b.gadget)&&srnd()<dt*1.7) throwSmoke(b,0);
     const sp=b.brawler.super;
     if(b.super>=sp.cost){
       // A super's reach depends on its shape: a burst or a lob flies `range`, a thrown zone
@@ -3062,7 +3078,7 @@ function zoneUpdate(dt){
   const z=G.zone, ph=phases(); z.timer-=dt;
   // three seconds of warning before it starts moving, then a rolling rumble while it does
   if(!z.shrinking && z.phase<ph.length && !z.warned && z.timer<=3){ z.warned=true; zoneAlarm(); }
-  if(!z.shrinking){ if(z.phase<ph.length&&z.timer<=0){ z.shrinking=true; z.warned=false; rumble(true); z.from={cx:z.cx,cz:z.cz,r:z.r}; const nr=ph[z.phase].radius; const a=Math.random()*Math.PI*2, d=Math.random()*Math.max(0,z.r-nr)*0.7; z.to={cx:clamp(z.cx+Math.cos(a)*d,nr+2,N-nr-2),cz:clamp(z.cz+Math.sin(a)*d,nr+2,N-nr-2),r:nr}; z.timer=ph[z.phase].shrink; feed('Poison gas is closing in'); } }
+  if(!z.shrinking){ if(z.phase<ph.length&&z.timer<=0){ z.shrinking=true; z.warned=false; rumble(true); z.from={cx:z.cx,cz:z.cz,r:z.r}; const nr=ph[z.phase].radius; const a=srnd()*Math.PI*2, d=srnd()*Math.max(0,z.r-nr)*0.7; z.to={cx:clamp(z.cx+Math.cos(a)*d,nr+2,N-nr-2),cz:clamp(z.cz+Math.sin(a)*d,nr+2,N-nr-2),r:nr}; z.timer=ph[z.phase].shrink; feed('Poison gas is closing in'); } }
   else { const k=1-clamp(z.timer/ph[z.phase].shrink,0,1); z.cx=z.from.cx+(z.to.cx-z.from.cx)*k; z.cz=z.from.cz+(z.to.cz-z.from.cz)*k; z.r=z.from.r+(z.to.r-z.from.r)*k; if(z.timer<=0){ z.shrinking=false; rumble(false); z.phase++; z.timer=z.phase<ph.length?ph[z.phase].wait:Infinity; } }
   z.dps=ph[Math.min(z.phase,ph.length-1)].dps;
   G.zoneMesh.position.x=z.cx; G.zoneMesh.position.z=z.cz; G.zoneMesh.scale.set(z.r,1,z.r); G.gasFloor.position.x=z.cx; G.gasFloor.position.z=z.cz; G.gasFloor.scale.set(z.r,z.r,1);
@@ -3743,6 +3759,8 @@ function startMatch(stake){
   scene.background=new THREE.Color(mode.cashout?0xc2261c:0x2f8be8);
   $('cashout').className=mode.cashout?'on':'';
   Object.assign(G,buildWorld(seed));
+  // Flux propre a la simulation, derive de la meme graine mais independant de celui du decor.
+  G.srng=C.makeRng(seed^0x9e3779b9);
   G.gasParts.forEach((gp,i)=>gp.mesh.visible=i<Q.gas);
   G.zone={cx:N/2,cz:N/2,r:ZONE_START_R,phase:0,timer:phases()[0].wait,shrinking:false,warned:false,dps:0};
   for(let i=0;i<(mode.boxes||C.BOXES);i++){ let x,z,t=0; do{ x=3+Math.floor(G.rng()*(N-6))+0.5; z=3+Math.floor(G.rng()*(N-6))+0.5; t++; }while((cellAt(x,z)!==0||Math.abs(Math.hypot(x-N/2,z-N/2)-N*0.42)<3)&&t<40);
