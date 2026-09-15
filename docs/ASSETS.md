@@ -43,6 +43,18 @@ Il n'y a **pas d'étape de build**. Les `.glb` sont préparés une fois à la ma
 
 ## Ce que le code fait pour toi
 
+- **Le rig est retiré quand il ne sert à rien.** `deskinModel()` convertit les `SkinnedMesh` en
+  `Mesh` ordinaires tant que le fichier n'a aucun clip d'animation. Ce n'est pas une optimisation,
+  c'est une correction : **un `SkinnedMesh` est placé par son squelette, pas par ses parents** —
+  three.js annule la transformation du parent dans la matrice de skinning. La mise à l'échelle et
+  le centrage ne l'atteignaient donc jamais, et le personnage restait couché à la mauvaise taille
+  pendant que sa boîte englobante, elle, tournait bien. Tripo livre un squelette sans clips avec
+  tous les os à l'identité : la pose de repos est exactement la géométrie écrite, un `Mesh` simple
+  dessine la même chose et obéit à ses parents. **Le jour où un modèle arrive avec de vraies
+  animations, il faudra un vrai chemin skinné** — le code garde alors le rig et prévient en console.
+- **L'orientation est retournée.** Un personnage glTF regarde +Z par convention ; un brawler
+  Warblock regarde −Z (visage à `-(profondeur tête / 2)`, arme à `z -0.62`). `BRAWLER_MODEL_FACING`
+  vaut donc un demi-tour. Si un modèle arrive dos à la caméra, c'est cette constante qu'on touche.
 - **La mise à l'échelle est mesurée, pas configurée.** `fitBrawlerModel()` prend la boîte
   englobante, met le modèle à la hauteur d'un brawler cube (`BRAWLER_MODEL_HEIGHT`, 2.3),
   pose ses pieds au sol et le centre sur l'origine. Tripo, Mixamo et Blender sortent trois
@@ -68,3 +80,21 @@ Il n'y a **pas d'étape de build**. Les `.glb` sont préparés une fois à la ma
 
 Ces trois points sont à traiter avant qu'un modèle remplace un brawler pour de bon. Ils ne
 bloquent pas un test de direction artistique.
+
+## Mesuré sur le premier modèle (BOLT, Tripo)
+
+| | Avant | Après |
+|---|---|---|
+| Fichier | 2,77 Mo | **351 Ko** (−87 %) |
+| Texture | 4096×4096 JPEG | **512×512 WebP** |
+| VRAM | 89,5 Mo | **1,4 Mo** (−98 %) |
+| Triangles | 10 620 | 10 620 |
+
+La texture 4K est le piège : Tripo la livre par défaut et elle coûte à elle seule 89 Mo de VRAM,
+pour un personnage qui fait quarante pixels de haut à l'écran. Avec vingt brawlers en jeu, c'est
+la différence entre un jeu qui tourne sur téléphone et un jeu qui ne se charge pas.
+
+Verdict de lisibilité, à distance de jeu : le modèle **gagne dans la carte du lobby** (grand, vu
+de près, le visage et la casquette se lisent) et **perd en match** face au cube. Les bras en
+T-pose cassent la silhouette, et surtout le contour noir des cubes manque — c'est lui qui les
+détache du sol en vue de dessus. Voir les trois limites ci-dessus.

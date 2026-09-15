@@ -2209,9 +2209,12 @@ function buildWorld(seed){
 // all leave the cube brawler exactly as it was. Nothing here is a build step — the .glb files
 // are authored once (see docs/ASSETS.md) and committed, the game still opens from index.html.
 const BRAWLER_MODELS = {
-  // bolt: 'assets/brawlers/bolt.glb',
+  bolt: 'assets/brawlers/bolt.glb',
 };
 const BRAWLER_MODEL_HEIGHT = 2.3;    // the procedural brawlers stand about this tall
+// A glTF character conventionally faces +Z. A Warblock brawler faces -Z: its face sits at
+// -(head depth / 2) and its gun at z -0.62. Half a turn reconciles the two.
+const BRAWLER_MODEL_FACING = Math.PI;
 const modelCache = new Map();
 function loadBrawlerModels(){
   const ids = Object.keys(BRAWLER_MODELS);
@@ -2219,15 +2222,34 @@ function loadBrawlerModels(){
   const loader = new THREE.GLTFLoader();
   return Promise.all(ids.map(id => new Promise(done => {
     loader.load(BRAWLER_MODELS[id],
-      gltf => { modelCache.set(id, fitBrawlerModel(gltf.scene)); done(); },
+      gltf => { modelCache.set(id, fitBrawlerModel(gltf.scene, gltf.animations)); done(); },
       undefined,
       err => { console.warn('brawler model failed, keeping the cubes:', id, err); done(); });
   })));
 }
+// A SkinnedMesh is positioned by its skeleton, not by its parents: three.js cancels the parent
+// transform out of the skinning matrix, so scaling and centring the group left the character
+// lying at the wrong size, untouched — and the bounding box, which DOES rotate, then disagreed
+// with what was actually drawn. Tripo ships a rig with no clips and every bone at identity, so
+// the bind pose is exactly the authored geometry: a plain Mesh draws the same thing and obeys
+// its parents. With real animation this has to become a proper skinned path instead.
+function deskinModel(root,clips){
+  const skinned = [];
+  root.traverse(o => { if(o.isSkinnedMesh) skinned.push(o); });
+  if(!skinned.length) return;
+  if(clips && clips.length){ console.warn('brawler model has animation clips; keeping the skin, the fit will not apply'); return; }
+  for(const sk of skinned){
+    const plain = new THREE.Mesh(sk.geometry, sk.material);
+    plain.position.copy(sk.position); plain.quaternion.copy(sk.quaternion); plain.scale.copy(sk.scale);
+    sk.parent.add(plain); sk.parent.remove(sk);
+  }
+}
 // Tripo, Mixamo and Blender all disagree on scale, origin and facing. Rather than trust the
 // exporter, measure the thing: scale it to the height of a cube brawler, sit its feet on the
 // ground and centre it on the origin. Any source file then drops in without hand-tuning.
-function fitBrawlerModel(scene){
+function fitBrawlerModel(scene,clips){
+  deskinModel(scene,clips);
+  scene.rotation.y = BRAWLER_MODEL_FACING;
   const box = new THREE.Box3().setFromObject(scene);
   const size = box.getSize(new THREE.Vector3());
   if(size.y > 0) scene.scale.setScalar(BRAWLER_MODEL_HEIGHT / size.y);
@@ -4143,9 +4165,18 @@ function startPv(){ try{ for(const b of Object.values(B)) if(b.id!==selBrawler) 
 // ---------- loop ----------
 // Models arrive after the lobby has already drawn itself on cubes. Rebuilding the preview
 // meshes on arrival is the whole of the swap: a match built later picks them up on its own.
+// Models arrive after the lobby has already drawn itself on cubes; the previews built without
+// them are rebuilt here. pvDraw clears the preview scene by walking pv.meshes, so an old mesh
+// has to leave the scene BEFORE its entry is overwritten — drop that removal and the stale
+// brawler stays in pv.scene forever, drawn under every card on top of the right one. That
+// superposition is what made every brawler look like the same yellow blob.
 loadBrawlerModels().then(() => {
-  if(!modelCache.size) return;
-  for(const b of Object.values(B)) if(pv.meshes[b.id]) pv.meshes[b.id]=makeBrawlerMesh(new THREE.Color(b.color),false,b.id);
+  if(!modelCache.size || !pv.renderer) return;
+  for(const id of modelCache.keys()){
+    if(!B[id]) continue;
+    if(pv.meshes[id]) pv.scene.remove(pv.meshes[id]);
+    pv.meshes[id]=makeBrawlerMesh(new THREE.Color(B[id].color),false,id);
+  }
   renderLobby();
 });
 renderLobby();
