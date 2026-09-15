@@ -6326,8 +6326,23 @@ test('GARDE TEXTUELLE : la requête de fenêtre INTERPOLE REFERENCE_BILLET_SQL, 
   // AUCUN CAST SUR LA RÉFÉRENCE. `reference::bigint` lèverait `22P02` sur `gain:42` — c'est tout le
   // sujet — et le seul `::text` autorisé est celui qui porte l'identifiant du billet DANS L'AUTRE
   // SENS : on compare du texte à du texte.
-  for (const interdit of ['reference::', '::bigint', '::int', '::numeric', 'cast('])
+  //
+  // LA GARDE PORTE SUR LA RÉFÉRENCE, ET SUR ELLE SEULE. Elle interdisait `::bigint` n'importe où
+  // dans la requête, ce qui est plus large que ce qu'elle veut dire — et cette largeur-là a coûté :
+  // `user_id = $1` comparait un `bigint` au texte que le pilote `pg` rend pour un identifiant, la
+  // vraie Postgres refusait la requête entière en « operator does not exist: bigint = text », et la
+  // garde interdisait précisément le `$1::bigint` qui la répare. Un paramètre typé n'est pas un cast
+  // sur une colonne : il dit au serveur ce qu'on lui envoie, il ne transforme aucune donnée stockée.
+  for (const interdit of ['reference::', 'reference ::', 'cast(reference', 'cast (reference'])
     assert.ok(!requete.includes(interdit), `${interdit} dans la requête de fenêtre`);
+  for (const colonne of ['montant_cents::', 'compte_debit::', 'compte_credit::', 'motif::'])
+    assert.ok(!requete.includes(colonne), `${colonne} : un cast sur une colonne du livre`);
+  // ET L'IDENTIFIANT DU JOUEUR EST TYPÉ AUX DEUX ENDROITS OÙ IL ENTRE. Sans quoi la requête ne
+  // s'exécute pas du tout — ce qu'aucune doublure ne peut dire, et que seul le job `db` a vu.
+  assert.strictEqual((requete.match(/\$1::bigint/g) || []).length, 2,
+    'l\'identifiant du joueur doit être typé en bigint dans la sous-requête ET dans la jointure');
+  assert.ok(!/user_id = \$1(?!::bigint)/.test(requete),
+    'un `user_id = $1` non typé est revenu : la vraie Postgres le refuse en bigint = text');
   assert.ok(requete.includes('m.id::text'), 'la comparaison ne se fait plus sur matches.id::text');
   // ET LA RÈGLE N'EST ÉCRITE NULLE PART AILLEURS dans le pilote : ni l'expression régulière des
   // billets, ni l'extraction d'une contre-passation.
