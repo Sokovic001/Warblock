@@ -1082,4 +1082,19 @@ test('boxes give cubes more often than hearts', () => {
 });
 test('bots hesitate before their first shot and fire slower than a human', () => { assert.ok(C.BOT.reaction>=0.4); assert.ok(C.BOT.fireMult>1); });
 
+// Everything above reads the CORE slice only. The other 2600 lines — rendering, input, bots,
+// audio, HUD — are never evaluated here, so a stray brace in them used to leave this file
+// printing "191 passed" while the page was blank in a browser. That check lived in CLAUDE.md
+// as a note for whoever remembered to run it; it belongs here, where it runs every time.
+console.log('\nThe file loads at all');
+test('every inline <script> block compiles', () => {
+  const blocks = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)];
+  assert.ok(blocks.length >= 2, `expected the CORE and Game blocks, found ${blocks.length}`);
+  blocks.forEach(([, body], i) => {
+    // new Function parses without running: a syntax error throws, a missing `document` does not.
+    try { new Function(body); }
+    catch (e) { assert.fail(`inline <script> #${i + 1} does not compile: ${e.message}`); }
+  });
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);
