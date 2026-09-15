@@ -3429,12 +3429,17 @@ $('chatInput').addEventListener('keydown',e=>{ e.stopPropagation();
 const mapCtx=$('map').getContext('2d');
 function hudFast(){
   const p=G.player;
-  $('vignette').style.boxShadow=`inset 0 0 120px 40px rgba(229,72,77,${((p.damageFlash||0)*0.8+(p.hp<maxHp(p)*0.3?0.25:0)).toFixed(2)})`;
+  // Ces deux voiles sont des box-shadow de 120 a 160px de flou, parmi les proprietes les plus
+  // couteuses a recalculer, et leur valeur ne bouge pas la plupart du temps : damageFlash vaut 0
+  // et gasHurt vaut false. Les reecrire a chaque image invalidait le style pour rien.
+  const vign=((p.damageFlash||0)*0.8+(p.hp<maxHp(p)*0.3?0.25:0)).toFixed(2);
+  if(G.hudVign!==vign){ G.hudVign=vign; $('vignette').style.boxShadow=`inset 0 0 120px 40px rgba(229,72,77,${vign})`; }
   // le liseré ne pulse qu'en dessous du seuil, sinon l'écran clignoterait à chaque égratignure
   const bas=p.alive&&p.hp<maxHp(p)*0.3;
   document.body.classList.toggle('lowhp',bas);
 
-  $('gasWarn').style.boxShadow=`inset 0 0 160px 60px rgba(120,220,80,${p.gasHurt?0.5:0})`; p.gasHurt=false;
+  const gas=p.gasHurt?0.5:0; p.gasHurt=false;
+  if(G.hudGas!==gas){ G.hudGas=gas; $('gasWarn').style.boxShadow=`inset 0 0 160px 60px rgba(120,220,80,${gas})`; }
   // Ce que la fumee ou l'on se tient fait pour nous. Calcule une fois par image et range sur G :
   // le voile le lit tout de suite, le badge du HUD le relit a sa propre cadence.
   G.cover = (C.SMOKE_READY&&p.alive) ? C.smokeCover(G.smokes,p.x,p.z,p.team) : {hidden:false,window:0,exposed:false};
@@ -3469,13 +3474,19 @@ function hudFast(){
     // power cubes and remaining lives, each as its own labelled badge — a bare "◆8" told nobody anything
     // your own cubes and lives live in the top bar; over your head they were just noise
     // Le joueur ne voit pas son propre magot ici : il l'a deja en haut a gauche, en plus gros.
-    e.lbl.children[2].innerHTML = e.isPlayer ? ''
+    const badges = e.isPlayer ? ''
       // La barre affiche les PV absolus : un adversaire cube se trahit deja par son nombre, 280
       // au lieu de 140. Le badge ne repete donc son endurance pour rien — ce qu'il ajoute, ce
       // sont ses degats, qui doublent sans que rien d'autre le signale. Sous trois cubes l'ecart
       // ne change pas un duel, et le badge n'etait que du bruit au-dessus de chaque tete.
       : (e.cubes >= 3 ? `<span class="cb">⬢${e.cubes}</span>` : '')
       + (e.lives < C.livesFor(G.modeCfg) ? `<span class="lv">❤${e.lives}</span>` : '');
+    // Une affectation a innerHTML reparse du HTML meme quand la chaine est identique. Cette
+    // ligne tourne pour chaque entite a chaque image : en Resurgence, cinquante joueurs a cent
+    // vingt images par seconde faisaient jusqu'a six mille reparsings par seconde pour un
+    // resultat inchange. Le badge ne bouge qu'en ramassant un cube ou en perdant une vie.
+    // C'est la garde deja posee sur .mn quelques lignes plus haut.
+    if(e.lblBadges !== badges){ e.lblBadges = badges; e.lbl.children[2].innerHTML = badges; }
     const roi = e===G.riche;
     if(roi !== (e.lbl.dataset.roi==='1')){
       e.lbl.dataset.roi = roi ? '1' : '0';
