@@ -1029,7 +1029,16 @@ async function main() {
         // doublure imite : ici c'est `ledger_entries_mouvement_uniq` qui arbitre, et l'outil traduit
         // son `23505` en « c'était déjà fait ».
         const rejeu = await base.contrepasser(plan);
-        if (rejeu.pose || !rejeu.deja) throw new Error('le rejeu a posé une seconde contre-passation');
+        if (rejeu.pose || !rejeu.deja) {
+          // CE QUE LE REJEU A RÉELLEMENT RENDU, et ce que la base porte à cet instant. Un message
+          // qui n'affiche que sa conclusion oblige à deviner, et une erreur d'intégration continue
+          // se paie en cycles de trois minutes.
+          const jambes = await base.lireMouvement({ motif: 'contrepassation', reference: `gain:${m}` });
+          throw new Error('le rejeu a posé une seconde contre-passation : rejeu='
+            + JSON.stringify(rejeu) + ' jambes=' + jambes.length + '/' + plan.jambes
+            + ' plan=' + JSON.stringify((plan.contrepassation || []).map(
+                t => [t.motif, t.reference, t.compteDebit, t.compteCredit, t.montantCents])));
+        }
         const encore = await base.lireMouvement({ motif: 'contrepassation', reference: `gain:${m}` });
         if (encore.length !== plan.jambes) {
           throw new Error(`${encore.length} jambes après le rejeu au lieu de ${plan.jambes}`);
