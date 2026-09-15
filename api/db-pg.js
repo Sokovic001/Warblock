@@ -264,9 +264,9 @@ const EXPOSITION_FENETRE_SQL = `
                and cree_le <= $5
                and motif = any($4::text[])
                and (compte_debit = any($3::text[]) or compte_credit = any($3::text[]))
-               and ${L.REFERENCE_BILLET_SQL} in (select id::text from matches where user_id = $1)) e
+               and ${L.REFERENCE_BILLET_SQL} in (select id::text from matches where user_id = $1::bigint)) e
       join matches m on m.id::text = e.billet
-     where m.user_id = $1`;
+     where m.user_id = $1::bigint`;
 
 // LE FUSIBLE GLOBAL, ET IL NE FAIT AUCUNE JOINTURE. Ce n'est pas un oubli : c'est un INTERRUPTEUR,
 // pas un invariant. Le rattacher à `matches` en ferait un agrégat non borné sur DEUX tables, et il
