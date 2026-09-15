@@ -699,10 +699,17 @@ async function main() {
       const MISE = 1000, SIEGES = 50;
       const p = C.cashoutCents(C.purseBound(MISE, SIEGES).maxCents);
       const pireCas = L.expositionBilletMaxCents(p.netCents, MISE);
-      const demande = cle => base.createMatch({
+      // L'INSTANT D'OUVERTURE EST UN PARAMÈTRE, ET IL LE FALLAIT. La fenêtre du plafond est bornée
+      // en haut par l'`opened_at` du billet — c'est ce qui rend le verdict REJOUABLE des mois après
+      // — or `MAINTENANT` est figé au chargement de ce fichier, donc AVANT les écritures que ce cas
+      // sème. Les semer puis demander un billet daté de `MAINTENANT` les plaçait toutes hors de la
+      // fenêtre : l'exposition lue valait zéro, rien n'était refusé, et le cas accusait le produit
+      // d'un trou que le banc venait de creuser. Les deux ouvertures concurrentes gardent
+      // `MAINTENANT` — elles précèdent le semis ; celle d'après reçoit l'heure d'après.
+      const demande = (cle, ouvertA) => base.createMatch({
         userId: u, mode: 'resurgence', stakeCents: MISE, seats: SIEGES, teamSize: 1, paidSeats: 1,
         netMaxCents: p.netCents, brawler: 'bolt', seedPublic: 12345, seedSecret: SECRETE,
-        simVersion: 1, clientKey: cle, openedAt: MAINTENANT, expiresAt: DANS_UNE_HEURE });
+        simVersion: 1, clientKey: cle, openedAt: ouvertA || MAINTENANT, expiresAt: DANS_UNE_HEURE });
       try {
         // DEUX OUVERTURES EN MÊME TEMPS, deux clés de client différentes, deux connexions réelles.
         const [a, b] = await Promise.all([demande('course-a'), demande('course-b')]);
@@ -753,7 +760,7 @@ async function main() {
         // LA VRAIE REQUÊTE, CONTRE LA VRAIE BASE : elle doit retrouver le chiffre qu'on vient de
         // poser. C'est ici, et seulement ici, que l'expression `REFERENCE_BILLET_SQL` est exécutée
         // par Postgres, avec une contre-passation possible dans la colonne.
-        const refus = await demande('apres-plafond');
+        const refus = await demande('apres-plafond', new Date());
         if (refus.refus !== 'plafond') {
           throw new Error(`le billet suivant n'a pas été refusé (${JSON.stringify(refus).slice(0, 200)})`);
         }
