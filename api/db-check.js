@@ -827,23 +827,29 @@ async function main() {
                 'encaissement',$5,$6,$7
            from generate_series(1, 400) g`,
         [u, SECRETE, MAINTENANT, DANS_UNE_HEURE, p.grossCents, p.feeCents, p.netCents]);
+      // `$1` SERT ICI DANS DEUX RÔLES, ET POSTGRES N'EN CHOISIT QU'UN. Il entre dans une
+      // concaténation — `'joueur:'||$1||':disponible'` — donc le serveur fixe son type à `text` pour
+      // TOUTE la requête, et les `m.user_id = $1` qui suivent deviennent alors `bigint = text`, ce
+      // qu'il refuse. La requête entière ne s'exécutait donc pas, et le cas partait rouge sur une
+      // erreur de montage qu'on lisait comme un défaut du produit. Le nom du compte reste bâti en
+      // texte ; la comparaison dit explicitement qu'elle compare des entiers.
       await client.query(
         `insert into ledger_entries (motif, reference, compte_debit, compte_credit, montant_cents, cree_le)
          select 'mise', m.id::text, 'joueur:'||$1||':disponible', 'enjeu:'||m.id, 1000,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1
+           from matches m where m.user_id = $1::bigint
          union all
          select 'gain', m.id::text, 'maison:contrepartie', 'enjeu:'||m.id, $2,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1
+           from matches m where m.user_id = $1::bigint
          union all
          select 'gain', m.id::text, 'enjeu:'||m.id, 'maison:commission', $3,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1
+           from matches m where m.user_id = $1::bigint
          union all
          select 'gain', m.id::text, 'enjeu:'||m.id, 'joueur:'||$1||':disponible', $4,
                 now() - ((m.id % 20) || ' hours')::interval
-           from matches m where m.user_id = $1`,
+           from matches m where m.user_id = $1::bigint`,
         [u, p.grossCents - 1000, p.feeCents, p.netCents]);
       // LE LEST : des mises qui ne touchent aucun compte de maison. C'est ce qui rend le filtre
       // sélectif, donc l'index utile — sans elles, « aucun Seq Scan » serait une question vide.
