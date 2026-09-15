@@ -875,7 +875,8 @@ Phase 04a, module 4. La mesure devient une **borne** : `POST /api/match` refuse 
 ```
 POST /api/match      { mode, stake, brawler, clientKey }
 → 409                { erreur, code: 'plafond', portee: 'joueur' | 'maison',
-                       expositionCents, plafondCents, fenetreHeures }
+                       expositionCents, plafondCents, fenetreHeures,
+                       aucuneTableMoinsChere }
 ```
 
 **Le pire cas d'un billet est calculé par le JEU, et passé en paramètre.** `api/ledger.js` porte deux
@@ -966,6 +967,23 @@ Un seul code, parce que le sas n'a qu'un comportement à tenir ; mais une seule 
 un cas sur deux, donc la réponse porte `portee`. Portée `joueur` : une table moins chère marchera.
 Portée `maison` : aucune table moins chère n'aidera, rien n'a été débité, réessayer plus tard.
 **Portée absente ou illisible : on rend le message de la maison**, délibérément.
+
+**Et une TROISIÈME situation, qui est celle que le plafond est calibré pour produire.** Le pire cas
+d'un billet est strictement positif sur les vingt combinaisons mode × palier — 750 centimes pour solo
+à $0,50, 39 000 pour la Resurgence à 10 $ — donc dès que l'exposition réalisée d'un joueur arrive à
+moins d'un pire cas **minimal** du plafond, `plafondVerdict` rend `franchi` pour **toute** table,
+portée `joueur`. L'état n'est pas un cas limite : les quatre victoires maximales que
+`PLAFOND_TABLES_PAR_JOUR` existe pour laisser gagner y mènent exactement. Le joueur lisait alors
+« pick a smaller buy-in » sur les vingt tables du lobby, prenait vingt fois le même refus, épuisait
+son seau de débit et finissait sur un **429**, qui n'est pas dans `REFUS_SAS` et le renvoie jouer
+hors ligne. La réponse porte donc, **en plus** de la portée, un booléen `aucuneTableMoinsChere`, et
+`WBCore.refusMessage` ne fait que le **lire** : le seuil juste est `plafond − pire cas minimal du
+lobby`, jamais `plafond`. Ce nombre se dérive de `MODES × TIERS` dans `api/app.js` — 750 centimes
+aujourd'hui, `PIRE_CAS_MIN_CENTS`, calculé une fois au chargement — et jamais d'un littéral : même
+discipline que `PLAFOND_JOUEUR_CENTS`, qu'un test recalcule. La portée reste `joueur` : la faire
+mentir sur QUEL plafond a refusé aurait déplacé le défaut au lieu de le fermer, et descendre le
+calcul dans `WBCore` aurait fait voyager le pire cas minimal du lobby dans les 465 Ko que chaque
+joueur télécharge.
 
 **Trois limites, écrites plutôt que découvertes.** (1) Le refus par joueur **consomme une graine** :
 il se décide dans la transaction, donc après les deux tirages, exactement comme `fonds`. Le prix est

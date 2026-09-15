@@ -1288,6 +1288,41 @@ La leçon commune, pour la recette suivante : **ce n'est pas la même requête q
 ce sont les mêmes paramètres** ; et un contrôle doit mesurer le travail réellement fait, pas
 l'absence d'un symptôme.
 
+### La recette finale : le code était juste, les deux README ne l'étaient pas
+
+Seconde relecture, celle qui prononce la clôture. Les invariants de la spécification ont été repris
+un par un contre le test qui les porte, et **aucun n'a été trouvé non tenu** : les gardes sont
+réelles — le refus `plafond` est tenu à la fois par le TEXTE d'`app.js` et par un parcours des routes
+qui closent une ligne, `PLAFOND_JOUEUR_CENTS` est recalculé depuis `WBCore` et non recopié, le
+plancher d'horloge est éprouvé sur ses deux bords, et la garde des cascades **compte** les trois clés
+étrangères au lieu d'en chercher deux. 413 tests sur le jeu, 255 sur l'API sans rien installer, 264
+avec `jose` ; les trois blocs `<script>` d'`index.html` acceptés par `node --check`.
+
+Ce qui a été trouvé est ailleurs, et c'est **le défaut de la recette précédente déplacé dans la
+documentation** : une propriété corrigée dans le code sans que les deux `README.md` suivent.
+
+1. **`api/README.md` décrivait un corps de réponse qui n'était plus celui du serveur.** Le résumé de
+   tête portait bien `aucuneTableMoinsChere`, mais la section « Le plafond refuse à l'ouverture » —
+   c'est-à-dire **la page de référence de la route** — ne le portait ni dans son bloc de réponse ni
+   dans son paragraphe « un seul code, deux portées ». Un lecteur de cette section aurait écrit un
+   client qui ignore le drapeau, et remis en place le 429 que la correction existait pour fermer. Le
+   fichier est pourtant celui qu'on demande de lire en premier. La troisième situation y est
+   maintenant écrite en entier, avec le seuil `plafond − pire cas minimal du lobby` et l'endroit où
+   ce nombre se dérive.
+2. **`README.md` annonçait encore « aucune vraie Postgres n'a jamais tourné ».** La phrase avait
+   cessé d'être vraie au commit 948416c, deux commits avant l'ouverture de la phase, et elle a
+   traversé les six modules **plus** la première recette sans être relue : elle n'appartenait à aucune
+   liste, contrairement au compte des tests. Elle est remplacée par ce qui est vrai et plus utile —
+   le job est vert une fois, et ce passage est **antérieur** à tout ce que la 04a a écrit en SQL. Au
+   passage, `docs/PHASE-04A.md` manquait dans la structure du dépôt et la ligne `api/` s'arrêtait à
+   la phase 03.
+
+La leçon, à ranger à côté de « le compte des tests vit à quatre endroits » : **une phrase de README
+qui décrit un état du monde se périme sans qu'aucun test ne tombe.** Le compte des tests a fini par
+avoir sa règle de relecture parce qu'il avait décroché deux fois ; « jamais tourné », « n'existe pas
+encore », « aucune route ne fait X » sont de la même famille et n'en ont aucune. À la clôture d'une
+phase, on relit donc **ce que les README affirment du monde**, et pas seulement ce qu'ils comptent.
+
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.

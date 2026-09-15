@@ -47,7 +47,8 @@ test.js                 harnais Node du jeu
 corpus-grille.json      corpus gelé : la preuve que le code a bougé sans changer
 api/                    serveur Node, testable sans base : comptes et profils (phase 01),
                         billet de partie (phase 02a), rejeu de la partie (phase 02b),
-                        grand livre en partie double (phase 03)
+                        grand livre en partie double (phase 03), plafond d'exposition,
+                        plancher d'horloge et outil d'opérateur (phase 04a)
 manifest.webmanifest    « Ajouter à l'écran d'accueil » en plein écran
 icon-*.png              icônes
 docs/GAME-DESIGN.md     toutes les règles et les choix d'équilibrage
@@ -55,6 +56,8 @@ docs/HISTORIQUE.md      journal de développement : décisions, pistes abandonn�
 docs/PHASE-02.md        la phase 02a : billet, verdict, statistiques par agrégat
 docs/PHASE-02B.md       la phase 02b : pas fixe, bloc SIM, trace des entrées, rejeu serveur
 docs/PHASE-03.md        la phase 03 : le grand livre en partie double, en crédits fictifs
+docs/PHASE-04A.md       la phase 04a : le bord de l'argent réel — plafond, sièges payés,
+                        contre-passation, anonymisation
 docs/DEMANDES.md        les demandes d'origine, dans l'ordre
 docs/DEPLOY.md          mise en ligne
 docs/ICONS-PROMPTS.md   prompts de génération d'icônes
@@ -78,17 +81,20 @@ Tables : $0,50 · $1 · $5 · $10.
 Deux chantiers avant d'envisager de l'argent réel, détaillés dans
 [docs/DEPLOY.md](docs/DEPLOY.md) :
 
-1. **Le grand livre existe, et il n'a jamais vu une base.** Depuis la phase 03, le solde d'un
+1. **Le grand livre existe, et sa recette contre une vraie base est en retard sur le code.** Depuis la phase 03, le solde d'un
    joueur connecté est la **somme d'écritures immuables en centimes entiers** tenue par le serveur :
    dotation à la création du compte, mise débitée à l'ouverture du billet, gain écrit au règlement,
    quarantaine pour une partie dont le rejeu a divergé. Le jeu lit ce solde et ne l'écrit plus ; hors
    ligne, le portefeuille de démonstration reste une variable du navigateur, et il le dit à l'écran.
-   Ce qui reste ouvert, et qui n'est pas un détail : **aucune vraie Postgres n'a jamais tourné.**
-   `api/db-check.js` et son job d'intégration continue sont écrits, jamais verts — un test qui passe
-   contre la doublure prouve la doublure, et le verrou de ligne qui empêche deux onglets de dépenser
-   le même solde n'est éprouvé nulle part ailleurs. Reste aussi le vol de *précision* — aimbot et
-   ESP, entiers et structurels. **Aucun euro n'entre** : les crédits sont fictifs, dotés par la
-   maison.
+   Ce qui reste ouvert, et qui n'est pas un détail : **le job Postgres est vert une fois — le
+   2026-09-15, run 34894629071 — et ce passage est ANTÉRIEUR à tout ce que la phase 04a a écrit en
+   SQL.** Les quatre clauses ajoutées depuis — `paid_seats`, les deux index du plafond, `ledger_audit`,
+   les deux clés étrangères passées en `restrict` — n'ont donc été subies par rien d'autre qu'une
+   doublure, et un test qui passe contre la doublure prouve la doublure. Quatre propriétés n'ont de
+   preuve que là : deux ouvertures simultanées sous le plafond, la requête de fenêtre qui ne balaie
+   pas le livre, l'audit dont l'annulation est arbitrée par Postgres, et le `delete from users`
+   refusé. Reste aussi le vol de *précision* — aimbot et ESP, entiers et structurels. **Aucun euro
+   n'entre** : les crédits sont fictifs, dotés par la maison.
 2. **Cadre légal.** Miser de l'argent réel sur ce type de jeu relève du droit des jeux d'argent
    dans la plupart des juridictions. À faire trancher par un avocat spécialisé avant tout
    branchement de paiement.
