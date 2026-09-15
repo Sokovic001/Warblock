@@ -45,9 +45,20 @@ create index if not exists users_created_at_idx on users (created_at desc);
 -- Toujours aucune colonne « solde », et aucune ici non plus : `stake_cents` est la mise engagée,
 -- pas de l'argent détenu. Une ligne s'insère puis se règle UNE fois ; en phase 02a rien ne la
 -- règle encore, c'est le module du verdict qui ajoutera les colonnes du résultat.
+-- LA CASCADE EST DEVENUE `restrict` À LA PHASE 04a, MODULE 6, ET C'EST UN RENVERSEMENT.
+-- Elle était écrite `on delete cascade` depuis la phase 01, quand `matches` ne portait aucun
+-- montant : effacer un joueur emportait alors des lignes de statistique, et personne n'y avait
+-- regardé de plus près. Depuis la phase 03 ces lignes sont LES PIÈCES JUSTIFICATIVES de mouvements
+-- d'argent qui, eux, restent immortels : `ledger_entries` est en insertion seule et nomme ses
+-- comptes avec `users.id` et `matches.id` — `joueur:<id>:disponible`, `enjeu:<match_id>`. Un
+-- `delete from users` détruisait donc les billets et les traces en laissant derrière lui des
+-- écritures qui pointent sur des lignes mortes, c'est-à-dire un livre qu'on ne peut plus relire.
+-- `restrict` fait ÉCHOUER la suppression au lieu de la propager, et c'est le bon défaut : un compte
+-- ne s'EFFACE pas, il s'ANONYMISE — le verbe `anonymiser` d'`api/operateur.js` réécrit `users` sans
+-- jamais toucher à son `id`.
 create table if not exists matches (
   id           bigserial    primary key,
-  user_id      bigint       not null references users(id) on delete cascade,
+  user_id      bigint       not null references users(id) on delete restrict,
   -- l'identifiant du mode dans WBCore.MODES — solo, duo, trio, resurgence, resurgenceDuo
   mode         text         not null,
   -- en CENTIMES, entier, produit par WBCore.toCents() à partir de la table choisie. Strictement
@@ -292,8 +303,13 @@ create index if not exists matches_user_status_idx on matches (user_id, status);
 --
 -- Ce qui reste renvoyé plus loin : QUI a le droit de relire une trace. Il n'existe ni journal
 -- d'audit ni rôle d'administration, et c'est à nommer avant la phase 04, avec la contre-passation.
+-- LA CASCADE EST DEVENUE `restrict` À LA PHASE 04a, MODULE 6, pour la même raison qu'au-dessus et
+-- d'un cran plus fort : cette table-ci est LA pièce justificative, celle qui permet de refaire la
+-- partie qui a produit un `net_cents`. Un `delete from matches` l'emportait en silence. Il n'existe
+-- qu'un seul effacement légitime d'une trace, et il est nommé : la purge de `purgeTraces`, à ses
+-- quatre conditions, décrite plus bas. Tout le reste doit ÉCHOUER.
 create table if not exists match_traces (
-  match_id    bigint       not null references matches(id) on delete cascade,
+  match_id    bigint       not null references matches(id) on delete restrict,
   -- Le rang du segment. Une partie complète tient en un à trois envois, jamais vingt : on ne paie
   -- pas une sémantique d'ordre et de reprise pour une robustesse que la 02a possède déjà.
   seq         integer      not null check (seq >= 0 and seq < 64),
@@ -452,20 +468,20 @@ create index if not exists ledger_entries_credit_fenetre_idx on ledger_entries (
 -- ensemble. Un fichier de journal ou une sortie de terminal ne partagent aucune transaction : ils
 -- ont été écartés pour cela.
 --
--- POURQUOI UN `geste` ET PAS UNE TABLE `contrepassations`. Le module 6 y écrira l'ANONYMISATION d'un
--- compte, qui ne touche pas un centime : c'est le même registre — un geste manuel, rare, fait par
--- quelqu'un qui détient les identifiants de la base, et qui doit dire pourquoi. Deux tables
+-- POURQUOI UN `geste` ET PAS UNE TABLE `contrepassations`. Le module 6 y a écrit l'ANONYMISATION
+-- d'un compte, qui ne touche pas un centime : c'est le même registre — un geste manuel, rare, fait
+-- par quelqu'un qui détient les identifiants de la base, et qui doit dire pourquoi. Deux tables
 -- jumelles auraient produit deux écrivains, deux gardes et deux relectures.
 --
--- LA LISTE DES GESTES EST FERMÉE, ET ELLE N'A QU'UN MEMBRE AUJOURD'HUI. Pas deux : le dossier a déjà
--- tranché ce cas exact sur le motif de libération de quarantaine — « un membre de liste fermée que
--- personne n'écrit est une case en attente d'être créée de travers ». Ce que coûtera l'ajout de
--- `anonymisation` au module 6 est chiffré : une valeur dans ce `check`, une dans `AUDIT_GESTES`
--- d'`api/ledger.js`, et un test. La liste est recopiée de `AUDIT_GESTES` et une garde textuelle
+-- LA LISTE DES GESTES EST FERMÉE, ET ELLE A DEUX MEMBRES DEPUIS LE MODULE 6. Elle n'en avait qu'un
+-- au module 5, et c'était voulu : le dossier avait déjà tranché ce cas exact sur le motif de
+-- libération de quarantaine — « un membre de liste fermée que personne n'écrit est une case en
+-- attente d'être créée de travers ». `anonymisation` entre ici le jour où quelque chose l'écrit, et
+-- pas avant. La liste est recopiée de `AUDIT_GESTES` d'`api/ledger.js` et une garde textuelle
 -- compare les deux, exactement comme pour les motifs du grand livre.
 create table if not exists ledger_audit (
   id                bigserial    primary key,
-  geste             text         not null check (geste in ('contrepassation')),
+  geste             text         not null check (geste in ('contrepassation', 'anonymisation')),
   -- PAR QUI. Le nom que l'opérateur se donne, et rien de plus : il n'existe pas de rôle dans
   -- `users`, et il ne doit pas en exister — une route d'administration serait une surface d'attaque
   -- permanente pour un geste qui arrive deux fois par an. Ce nom n'est donc PAS une authentification,
@@ -476,10 +492,18 @@ create table if not exists ledger_audit (
   -- vide passerait, et « pourquoi » deviendrait une case cochée. Les bornes sont recopiées de
   -- `AUDIT_RAISON_MIN` et `AUDIT_RAISON_MAX` d'`api/ledger.js`, comparées par une garde textuelle.
   raison            text         not null check (char_length(raison) between 3 and 500),
+  -- SUR QUEL COMPTE, quand le geste porte sur un compte et non sur un mouvement d'argent. C'est
+  -- l'anonymisation, et c'est la seule aujourd'hui. La colonne est une CLÉ ÉTRANGÈRE `restrict`
+  -- vers `users`, ce qui n'est pas décoratif : ce module existe pour que `users.id` survive à
+  -- l'anonymisation — `joueur:<id>` et `enjeu:<match_id>` désigneraient sinon des lignes mortes —
+  -- et une trace d'anonymisation orpheline dirait qu'on a anonymisé quelqu'un qui n'existe plus.
+  -- Un joueur sans aucun billet aurait pu être effacé sans que rien ne s'y oppose ; désormais sa
+  -- propre trace s'y oppose.
+  user_id           bigint       references users(id) on delete restrict,
   -- LE MOUVEMENT D'ORIGINE, EN DEUX COLONNES ET PAS UNE : c'est le couple `(motif, reference)` qui
   -- NOMME un mouvement dans le grand livre, et les recoller en une seule chaîne obligerait à les
-  -- redécouper pour retrouver les jambes. NULL pour un geste qui ne porte sur aucun mouvement — le
-  -- module 6 en apporte un.
+  -- redécouper pour retrouver les jambes. NULL pour un geste qui ne porte sur aucun mouvement, et
+  -- l'anonymisation en est un : elle porte un `user_id` et rien d'autre.
   motif_origine     text         check (motif_origine in ('dotation', 'recharge', 'mise', 'gain',
                                                           'remboursement', 'contrepassation')),
   reference_origine text         check (char_length(reference_origine) between 1 and 128),
@@ -502,5 +526,25 @@ create table if not exists ledger_audit (
     geste <> 'contrepassation'
     or (motif_origine is not null and reference_origine is not null and reference_posee is not null
         and jambes is not null and montant_cents is not null)
+  ),
+
+  -- ET UNE ANONYMISATION PORTE SON COMPTE, ET AUCUN CENTIME. La symétrie de la contrainte ci-dessus,
+  -- écrite dans les deux sens : elle EXIGE le `user_id`, sans quoi la trace ne dirait plus qui a été
+  -- anonymisé, et elle INTERDIT les cinq colonnes d'argent, parce qu'une anonymisation ne bouge pas
+  -- un centime. Une ligne qui porterait les deux moitiés se lirait comme une correction du livre,
+  -- et c'est justement la confusion qu'une table à `geste` unique risque d'installer.
+  constraint ledger_audit_anonymisation_complete check (
+    geste <> 'anonymisation'
+    or (user_id is not null
+        and motif_origine is null and reference_origine is null and reference_posee is null
+        and jambes is null and montant_cents is null)
   )
 );
+
+-- LE JOURNAL SE RELIT PAR LE COMPTE quand le geste porte sur un compte, et c'est aussi important
+-- que de l'écrire : un audit que seul `psql` sait relire est une invitation à ouvrir `psql`, très
+-- exactement ce que `api/operateur.js` existe pour éviter. `montrer exposition <userId>` le lit.
+-- L'index est PARTIEL parce que la colonne est nulle sur toutes les contre-passations, et qu'un
+-- index qui range des NULL par millions n'aide aucune lecture.
+create index if not exists ledger_audit_user_idx
+  on ledger_audit (user_id) where user_id is not null;

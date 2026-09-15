@@ -456,6 +456,29 @@ l'historique d'un joueur se lit alors sur son `id` et jamais sur son nom. Tout �
 qui affiche un pseudo depuis une jointure devra le savoir, sinon deux personnes différentes
 apparaîtront comme une seule.
 
+**Trois précisions apportées à la livraison du module 6, écrites ici plutôt que découvertes.**
+
+La première est une **colonne** que cette section n'annonçait pas : `ledger_audit.user_id`, `bigint`,
+clé étrangère `restrict` vers `users`. La table du module 5 n'avait aucune place pour la CIBLE d'un
+geste qui ne porte sur aucun mouvement d'argent — elle ne connaissait que `(motif, reference)` — et
+sans cette colonne la trace d'une anonymisation ne dirait pas QUI a été anonymisé. La clé étrangère
+n'est pas décorative : un joueur sans aucun billet aurait pu être effacé sans que rien ne s'y oppose,
+et désormais sa propre trace s'y oppose. Elle vient avec sa contrainte jumelle,
+`ledger_audit_anonymisation_complete`, qui **exige** le compte et **interdit** les cinq colonnes
+d'argent — une anonymisation ne bouge pas un centime — et avec un index partiel, parce que le journal
+doit se relire par le chemin dont l'opérateur part : `montrer exposition <userId>`.
+
+La deuxième est un **refus de plus**, `deja_anonymise`. Rejouer le geste aurait réécrit les mêmes
+valeurs sans rien casser, mais aurait consigné une SECONDE ligne d'audit, donc raconté deux gestes là
+où il n'y en a eu qu'un. C'est la transposition exacte du « DÉJÀ POSÉE » de la contre-passation : un
+opérateur dont la connexion a lâché doit lire que c'était déjà fait.
+
+La troisième est la **conversion en `BigInt`**, et elle mérite d'être écrite parce que le défaut
+serait né vert. `Number('9223372036854775807')` arrondit : deux comptes voisins recevraient le même
+nom en base 36, donc la même `name_key`, donc une collision que rien n'expliquerait. Le pilote
+Postgres rend les `bigint` en CHAÎNE précisément pour cela ; le test l'éprouve sur le maximum du
+domaine et compare au résultat que `Number` aurait rendu.
+
 **Le trou qui reste, nommé et chiffré.** `findOrCreate` cherche par `auth_id`. Un joueur anonymisé
 qui se reconnecte avec le même email obtient une ligne neuve et une nouvelle `DOTATION_CENTS` de
 5 000 centimes — un robinet à crédits, dans la phase qui existe pour borner ce que la maison émet. Ce

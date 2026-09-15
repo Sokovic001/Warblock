@@ -1,4 +1,4 @@
-# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b), grand livre (phase 03), bord de l'argent réel (phase 04a, en cours)
+# API Warblock — comptes et profils (phase 01), billet de partie (phase 02a), rejeu de partie (phase 02b), grand livre (phase 03), bord de l'argent réel (phase 04a)
 
 Le jeu reste ce qu'il est : un seul fichier `index.html`, servi en statique, sans build. Ce dossier
 ajoute à côté un petit serveur qui détient les profils, et depuis la phase 02a l'**identité des
@@ -1391,6 +1391,94 @@ raison de le dire — l'outil corrige le livre, il ne décide pas de la suite. C
 pas** : que la transaction est arbitrée par Postgres plutôt que par l'ordre des `await` d'un mono-fil.
 C'est `api/db-check.js` qui l'éprouve, en faisant échouer l'audit sur une **vraie** contrainte.
 
+## Un compte ne s'efface pas, il s'anonymise
+
+Phase 04a, module 6. `schema.sql` portait depuis la phase 01 deux cascades que personne n'avait
+regardées : `matches` sur `users`, `match_traces` sur `matches`. Depuis la phase 03, ces lignes sont
+**les pièces justificatives de mouvements d'argent qui, eux, restent** — `ledger_entries` est en
+insertion seule et nomme ses comptes avec `users.id` et `matches.id`, `joueur:<id>:disponible` et
+`enjeu:<match_id>`. Un `delete from users` détruisait donc les billets et les traces en laissant
+derrière lui des écritures immortelles qui pointent sur des lignes mortes.
+
+**Les deux cascades sont en `restrict`.** La suppression échoue au lieu de se propager. Écarté :
+l'effacement réel avec purge des écritures, qui détruit la partie double ; et « ne jamais supprimer
+de compte », qui est une règle qu'aucun code ne tient, donc pas une règle.
+
+**Le geste qui remplace la suppression est `anonymiser`, second verbe d'écriture de l'outil.**
+
+```
+anonymiser <userId> --par "<qui>" --raison "<pourquoi>" [--confirme]
+```
+
+**C'est une RÉÉCRITURE SOUS CONTRAINTES, pas une suppression de colonnes**, et l'écrire autrement
+serait faux : `users` porte `auth_id text not null unique`, `email not null`, `name not null`,
+`name_key text not null unique`, plus deux `check` de longueur. Aucun de ces champs ne peut
+« partir ». Ce qui est écrit à la place :
+
+| colonne    | après                    | pourquoi |
+|---|---|---|
+| `id`       | **inchangé**             | `joueur:<id>` et `enjeu:<match_id>` doivent rester des comptes valides |
+| `auth_id`  | `anonyme:<id>`           | unique par construction, et l'identifiant du fournisseur ne survit pas |
+| `email`    | `anonyme+<id>@invalid`   | `.invalid` est un TLD **réservé**, donc jamais routable |
+| `name`     | `x<base36(id)>`          | quatorze caractères au plus : un `bigserial` tient sur treize chiffres en base 36 |
+| `name_key` | `WBCore.nameKey(name)`   | la clé se dérive du nom, jamais écrite à côté |
+| `avatar`   | `''`                     | la valeur par défaut de la colonne |
+| `country`  | `null`                   | la colonne l'autorise |
+
+**Le nom est calculé en JavaScript, pas en SQL**, et c'est le seul endroit où `WBCore.nameKey` et la
+contrainte de quatorze caractères se lisent ensemble. `planAnonymisation` est pure et vit dans
+`api/ledger.js` comme `planCorrection` ; `nameKey` lui est **injectée**, parce que ce fichier-là ne
+`require` rien. L'identifiant est converti en `BigInt` et jamais en `Number` : au-delà de 2^53 un
+`Number` arrondit en silence, deux comptes voisins recevraient le même nom, donc la même `name_key`,
+donc une collision que rien n'explique — le pilote rend les `bigint` en chaîne précisément pour cela,
+et un test l'éprouve sur 9 223 372 036 854 775 807.
+
+**Une collision sur `name_key` sort en `23505`, et l'outil LE DIT puis s'arrête.** Quelqu'un peut
+porter le pseudo `x1`. `findOrCreate` réessaie avec un suffixe à l'inscription, et c'est le bon geste
+**à cet endroit-là** — il arrange un joueur qui ne remarquera rien ; ici, ce serait décider à la place
+d'un opérateur, sur un geste rare, manuel et irréversible. Les refus de `planAnonymisation` :
+`compte_inconnu`, `operateur_vide`, `operateur_trop_long`, `raison_vide`, `raison_trop_longue`,
+`deja_anonymise`, `cle_indisponible`, `cle_hors_bornes`, `nom_hors_bornes`.
+
+**La ligne d'audit est écrite dans la MÊME transaction**, et le geste est **refusé sans raison
+écrite** — même exigence que la contre-passation, et pour la même raison : un compte réécrit sans
+qu'on sache pourquoi est indistinguable d'une erreur de manipulation, et celui-ci ne se défait pas.
+`ledger_audit` reçoit une colonne `user_id`, clé étrangère `restrict` vers `users`, et une contrainte
+jumelle de celle des contre-passations : `ledger_audit_anonymisation_complete` **exige** le compte et
+**interdit** les cinq colonnes d'argent, parce qu'une anonymisation ne bouge pas un centime. La liste
+`AUDIT_GESTES` passe donc à deux membres, et pas un de plus. La trace ne conserve **pas** l'ancienne
+identité : un journal qui garderait l'ancien email n'anonymiserait rien. Elle se relit par le compte,
+`montrer exposition <userId>`, puisque le geste ne porte sur aucune écriture du livre.
+
+**L'ancien pseudo redevient disponible, et c'est voulu.** Le corollaire est à connaître :
+l'historique d'un joueur se lit alors sur son `id` et jamais sur son nom. Tout écran ou toute requête
+qui afficherait un pseudo depuis une jointure devra le savoir, sinon deux personnes différentes
+apparaîtront comme une seule.
+
+**La surface de régression de ce module est VIDE, et c'est un test qui le dit, pas une lecture.** Il
+n'existe aucune route ni aucune méthode qui supprime un compte : le seul `delete` du pilote reste la
+purge nommée de `match_traces`. Le passage en `restrict` ne peut donc rien casser aujourd'hui — mais
+« aujourd'hui » est une date, pas une propriété, et son unique effet observable est un **refus** que
+seule l'intégration continue peut montrer. `api/db-check.js` fait subir les deux : un `delete from
+users` refusé par `matches_user_id_fkey` tant qu'un billet référence la ligne, et un `delete from
+matches` refusé par `match_traces_match_id_fkey`.
+
+### Le trou qui reste, nommé et chiffré
+
+`findOrCreate` cherche par `auth_id`. **Un joueur anonymisé qui se reconnecte avec le même email
+obtient une ligne NEUVE** — son `auth_id` Crossmint n'est plus dans la base — **et une nouvelle
+`DOTATION_CENTS` de 5 000 centimes.** C'est un **robinet à crédits**, dans la phase qui existe pour
+borner ce que la maison émet.
+
+Ce qui le tient aujourd'hui : **il n'existe aucune route qui demande l'anonymisation.** Le robinet
+exige que l'opérateur l'ouvre lui-même, un compte à la fois, en ligne de commande. Un test le vérifie
+des deux côtés — `app.js` ne nomme pas le geste, et l'outil est le seul à le porter.
+
+Le jour où une route de suppression de compte existera — c'est-à-dire le jour où une juridiction
+l'imposera — elle devra porter une **empreinte de l'`auth_id`** dans une table en **insertion seule**,
+lue par `findOrCreate` **avant** de doter. Chiffré : une table, un index unique, une lecture, un test.
+C'est écrit ici plutôt que laissé à découvrir sur un plafond qu'on croirait tenir.
+
 ## `db-check.js` — la vraie Postgres, et ce qui est livré est la RECETTE
 
 **Livrer un script n'est pas l'avoir lancé.** Ce qui est livré ici, c'est la recette : un script, un
@@ -1470,12 +1558,13 @@ crossmint-key.js    lit une clé d'API Crossmint et vérifie sa signature — sa
 auth-crossmint.js   vérifie les jetons de session                  ← touche le réseau
 db-pg.js            Postgres                                       ← touche la base
 db-check.js         éprouve le schéma contre une VRAIE Postgres    ← hors de npm test
-operateur.js        l'outil de correction du grand livre, en LIGNE DE COMMANDE. Jamais une route,
-                    et `app.js` ne le charge pas — une garde textuelle le vérifie.
+operateur.js        l'outil d'opération : corriger le grand livre, anonymiser un compte. En LIGNE
+                    DE COMMANDE, jamais une route, et `app.js` ne le charge pas — une garde
+                    textuelle le vérifie.
 main.js             assemble les trois et écoute
 schema.sql          users, matches, match_traces, ledger_entries, ledger_audit.
                     Aucune colonne « solde ».
-test.js             237 tests sans rien installer, 246 avec jose
+test.js             248 tests sans rien installer, 257 avec jose
 ```
 
 ## Les règles ne sont pas recopiées
@@ -1578,8 +1667,8 @@ npm start
 ## Tests
 
 ```bash
-node api/test.js          # 237 tests, aucune dépendance, aucune base
-cd api && npm install && node test.js   # 246 : les 237, plus la chaîne complète de vérification
+node api/test.js          # 248 tests, aucune dépendance, aucune base
+cd api && npm install && node test.js   # 257 : les 248, plus la chaîne complète de vérification
 
 DATABASE_URL=postgres://… node api/db-check.js   # à part, et sort 0 sans DATABASE_URL
 DATABASE_URL=postgres://… node api/operateur.js  # l'outil d'opération, hors de npm test aussi
@@ -1822,20 +1911,31 @@ est écrit ici, tout est au même endroit — `Auth` dans `index.html`, quatre f
   `api/db-check.js` n'a jamais tourné.
 - **La fenêtre de renoncement fait payer sa mise au joueur honnête dont l'onglet meurt à la onzième
   seconde.** C'est le prix de la fermeture du vol « jouer, perdre, ne rien envoyer, laisser expirer,
-  se faire rembourser ». Il n'y a aucun chemin de correction : la contre-passation existe, personne
-  n'est habilité à l'emprunter, et rien dans l'API ne l'expose.
+  se faire rembourser ». Le chemin de correction existe depuis le module 5 de la phase 04a — la
+  contre-passation, par `api/operateur.js` — mais rien dans l'API ne l'expose, et c'est délibéré :
+  rendre sa mise à un joueur honnête reste un geste d'opérateur, un compte à la fois, avec sa raison
+  écrite.
 - **La temporisation `renonce_recent` n'est pas atomique.** Elle lit le dernier billet renoncé puis
   ouvre le nouveau : deux requêtes simultanées peuvent la franchir toutes les deux. L'index partiel
   « un seul billet ouvert » les rattrape — le pire cas reste un billet — mais la propriété n'est pas
   tenue par une contrainte, et elle est donc à relire le jour où les adversaires seront humains.
-- **Personne n'est habilité à contre-passer.** C'est le seul chemin de correction du grand livre, et
-  ni journal d'audit ni rôle d'administration n'existent : le premier incident réel se réglera à la
-  main dans `psql`, un dimanche soir, et c'est ce jour-là que la règle « aucun `update` » tombera. À
-  nommer avant la phase 04.
-- **Pas encore de journal d'audit.** Chaque changement de pseudo devra être tracé avant que des
-  comptes ne valent de l'argent.
-- **Pas de suppression de compte.** À ajouter, avec ce que la juridiction retenue impose de
-  conserver malgré la suppression.
+- ~~**Personne n'est habilité à contre-passer.**~~ **Fermé par le module 5 de la phase 04a :**
+  `api/operateur.js` est l'appelant, en ligne de commande et jamais en HTTP, et `ledger_audit` est le
+  journal qui partage la transaction de l'écriture. Ce qui reste derrière, et qui n'est pas la même
+  chose : **le dimanche soir existe toujours**, mais il se passe désormais dans un outil dont chaque
+  geste laisse une raison écrite, et non dans `psql`.
+- **Le journal d'audit existe, et il ne trace que DEUX gestes.** `ledger_audit` porte la
+  contre-passation et l'anonymisation. **Un changement de pseudo n'y est toujours pas tracé**, et il
+  devra l'être avant que des comptes ne vaillent de l'argent : `PATCH /api/me` écrit `name` et
+  `name_key` sans rien consigner. Ce n'est pas un oubli du module 6 — c'est une route du client, donc
+  un geste fréquent, donc une décision de volume et de rétention que rien n'a encore prise.
+- **La suppression de compte est REFUSÉE, et le geste disponible est l'anonymisation.** Les deux
+  cascades du schéma sont en `restrict` depuis le module 6 de la phase 04a : un `delete from users`
+  échoue tant qu'un billet référence la ligne, parce que ce billet est la pièce justificative d'un
+  mouvement d'argent qui, lui, reste. Ce qui reste ouvert derrière : **ce que la juridiction retenue
+  impose de conserver malgré une demande de suppression**, et la **route** qui portera cette demande —
+  avec elle viendra l'empreinte d'`auth_id` en table d'insertion seule, sans quoi un compte anonymisé
+  qui se reconnecte se fait doter une seconde fois (voir « Le trou qui reste, nommé et chiffré »).
 - **Le portefeuille n'existe pas encore.** Crossmint sait en créer un à l'inscription, mais rien ne
   doit être branché avant la phase 03 : tant que le grand livre n'existe pas, un solde n'aurait nulle
   part où être écrit correctement.

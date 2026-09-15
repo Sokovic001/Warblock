@@ -238,14 +238,22 @@ function fakeDb(seed = [], horloge = null) {
       throw refuseAudit('ledger_audit_raison_check');
     }
     // Une contre-passation porte ses cinq colonnes, ou elle n'est pas une contre-passation.
-    if (plan.geste === 'contrepassation'
-        && [plan.motifOrigine, plan.referenceOrigine, plan.referencePosee,
-            plan.jambes, plan.montantCents].some(v => v === null || v === undefined)) {
+    const ARGENT = [plan.motifOrigine, plan.referenceOrigine, plan.referencePosee,
+                    plan.jambes, plan.montantCents];
+    const absent = v => v === null || v === undefined;
+    if (plan.geste === 'contrepassation' && ARGENT.some(absent)) {
       throw refuseAudit('ledger_audit_contrepassation_complete');
+    }
+    // Et une anonymisation porte son compte, et AUCUN centime : la contrainte jumelle, écrite dans
+    // les deux sens. Une ligne qui porterait les deux moitiés se lirait comme une correction du
+    // livre, alors qu'aucun argent n'a bougé.
+    if (plan.geste === 'anonymisation' && (absent(plan.userId) || !ARGENT.every(absent))) {
+      throw refuseAudit('ledger_audit_anonymisation_complete');
     }
     verifierColonnes({ montant_cents: plan.montantCents });
     audit.push(Object.freeze({
       id: String(nextAudit++), geste: plan.geste, operateur: plan.par, raison: plan.raison,
+      user_id: absent(plan.userId) ? null : String(plan.userId),
       motif_origine: plan.motifOrigine, reference_origine: plan.referenceOrigine,
       reference_posee: plan.referencePosee, jambes: plan.jambes,
       montant_cents: plan.montantCents,
@@ -624,10 +632,19 @@ function fakeDb(seed = [], horloge = null) {
       return audit.filter(l => l.motif_origine === motif && l.reference_origine === reference)
                   .map(l => ({ ...l }));
     },
+    // Les gestes consignés sur un COMPTE. L'anonymisation ne porte sur aucune écriture du livre :
+    // sans cette seconde lecture, sa trace n'aurait aucun chemin de relecture par l'outil.
+    async lireAuditJoueur({ userId }) {
+      return audit.filter(l => l.user_id !== null && memeId(l.user_id, userId))
+                  .map(l => ({ ...l }));
+    },
     // Le billet SANS `user_id` dans la clause : l'outil part d'une écriture du livre, dont la
     // référence ne porte que le billet, et il n'y a personne à protéger de l'opérateur.
     async lireBillet({ matchId }) {
       return matches.find(x => memeId(x.id, matchId)) || null;
+    },
+    async lireUtilisateur({ userId }) {
+      return users.find(x => memeId(x.id, userId)) || null;
     },
     async expositionJoueurCents({ userId, maintenant }) {
       return expositionFenetre(userId, fenetreDepuis(maintenant));
@@ -660,6 +677,55 @@ function fakeDb(seed = [], horloge = null) {
         throw e;
       }
       return { pose: true, jambes: plan.jambes, montantCents: plan.montantCents };
+    },
+    // L'ANONYMISATION ET SA RAISON, DANS LA MÊME TRANSACTION — imitée comme la contre-passation, et
+    // avec le même aveu : la doublure réécrit la ligne d'abord, consigne ensuite, et REMET la ligne
+    // d'origine si l'audit échoue. C'est un `rollback` décidé par l'ordre des `await`, pas par
+    // Postgres ; seul `api/db-check.js` fait arbitrer l'atomicité par la base.
+    //
+    // ELLE IMITE AUSSI LES CONTRAINTES DE `users`, une par une et par leur nom, parce que c'est très
+    // exactement ce que ce module peut se raconter à tort : « la valeur écrite à la place satisfait
+    // la colonne ». `not null` sur quatre colonnes, deux `check` de longueur, deux index uniques.
+    async anonymiser(plan) {
+      const u = users.find(x => memeId(x.id, plan.userId));
+      if (!u) return { pose: false, absent: true };
+      const refuse = (code, contrainte, message) => {
+        const e = new Error(message); e.code = code; e.constraint = contrainte; return e;
+      };
+      const avant = { ...u };
+      try {
+        const a = plan.apres;
+        for (const [col, v] of [['auth_id', a.authId], ['email', a.email], ['name', a.name],
+                                ['name_key', a.nameKey]]) {
+          if (typeof v !== 'string' || v.length === 0) {
+            throw refuse('23502', `users_${col}_not_null`, `null value in column "${col}"`);
+          }
+        }
+        if (a.name.length < L.USERS_NOM_MIN || a.name.length > L.USERS_NOM_MAX) {
+          throw refuse('23514', 'users_name_len', `new row for relation "users" violates constraint "users_name_len"`);
+        }
+        if (a.nameKey.length < L.USERS_CLE_MIN || a.nameKey.length > L.USERS_CLE_MAX) {
+          throw refuse('23514', 'users_name_key_len', `new row for relation "users" violates constraint "users_name_key_len"`);
+        }
+        if (users.some(x => x !== u && x.auth_id === a.authId)) {
+          throw refuse('23505', 'users_auth_id_key', 'duplicate key value violates unique constraint "users_auth_id_key"');
+        }
+        if (users.some(x => x !== u && x.name_key === a.nameKey)) {
+          throw refuse('23505', 'users_name_key_key', 'duplicate key value violates unique constraint "users_name_key_key"');
+        }
+        // `id` n'est PAS dans cette liste, et c'est tout le module : le grand livre nomme ses comptes
+        // avec lui, et il est en insertion seule.
+        Object.assign(u, { auth_id: a.authId, email: a.email, name: a.name, name_key: a.nameKey,
+                           avatar: a.avatar, country: a.country });
+        ecrireAudit(plan);
+      } catch (e) {
+        Object.assign(u, avant);
+        if (e && e.code === '23505') {
+          return { pose: false, collision: true, contrainte: e.constraint || '', message: e.message };
+        }
+        throw e;
+      }
+      return { pose: true };
     },
     // LA DOTATION ET LA RECHARGE SONT ÉCRITES ICI, PAR LE SERVEUR, et il n'existe aucune route que
     // le client puisse appeler pour en déclencher une. Le miroir exact de `findOrCreate` de
@@ -6574,10 +6640,16 @@ test('GARDE TEXTUELLE : ledger_audit est en INSERTION SEULE, et ses bornes sont 
   assert.ok(gestes, 'la liste des gestes a disparu du schéma');
   assert.deepStrictEqual((gestes[1].match(/'([^']*)'/g) || []).map(s => s.slice(1, -1)),
     L.AUDIT_GESTES.slice(), 'le schéma et api/ledger.js ne connaissent pas les mêmes gestes');
-  // UN SEUL MEMBRE AUJOURD'HUI, ET C'EST VOULU : le module 6 y ajoutera `anonymisation`. L'y mettre
-  // d'avance serait ce que le dossier refuse depuis le motif de libération de quarantaine — un membre
-  // de liste fermée que personne n'écrit est une case en attente d'être créée de travers.
-  assert.deepStrictEqual(L.AUDIT_GESTES.slice(), ['contrepassation']);
+  // DEUX MEMBRES DEPUIS LE MODULE 6, ET PAS TROIS. Le second est entré le jour où quelque chose
+  // l'écrit — le verbe `anonymiser` — et pas d'avance : un membre de liste fermée que personne
+  // n'écrit est une case en attente d'être créée de travers, ce que le dossier refuse depuis le
+  // motif de libération de quarantaine. Chacun des deux a donc un écrivain, ci-dessous.
+  assert.deepStrictEqual(L.AUDIT_GESTES.slice(), ['contrepassation', 'anonymisation']);
+  const outil = lireApi('operateur.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  for (const geste of L.AUDIT_GESTES)
+    assert.ok(new RegExp(`geste: '${geste}'`).test(lireApi('ledger.js')),
+      `le geste ${geste} n'est produit par aucun plan d'api/ledger.js`);
+  assert.match(outil, /db\.anonymiser\(/, 'le geste anonymisation n\'a aucun appelant');
   assert.ok(bloc.includes(`check (char_length(raison) between ${L.AUDIT_RAISON_MIN} and ${L.AUDIT_RAISON_MAX})`),
     'les bornes de la raison divergent entre schema.sql et api/ledger.js');
   assert.ok(bloc.includes(`check (char_length(operateur) between 1 and ${L.AUDIT_OPERATEUR_MAX})`),
@@ -6709,6 +6781,404 @@ test('db-check.js n\'entre pas dans npm test, et le job existant reste sans base
   // détruite avec l'exécution.
   assert.match(job, /DATABASE_URL:\s*postgres:\/\/[^\n]*127\.0\.0\.1/);
   assert.ok(!/secrets\./.test(job), 'le job va chercher un secret : la base doit rester jetable');
+});
+
+console.log('Un compte ne s\'efface pas, il s\'anonymise');
+
+// LE BANC D'UN COMPTE QUI A VÉCU : une ligne `users`, un billet réglé, et les trois écritures que ce
+// billet a laissées. C'est le seul état qui rende la question intéressante — un compte sans histoire
+// pourrait être effacé sans que rien ne s'y oppose, et il n'apprendrait rien.
+async function bancAnonyme({ id = 1, nom = 'Loïc' } = {}) {
+  const db = fakeDb([{ id, auth_id: `crossmint|${id}`, email: `joueur${id}@exemple.test`,
+                       name: nom, name_key: C.nameKey(nom), avatar: 'a2', country: 'FR',
+                       created_at: '2026-01-01T00:00:00Z' }]);
+  const matchId = 4242, miseCents = 50, quand = new Date(T0).toISOString();
+  db.matches.push({
+    id: matchId, user_id: id, mode: 'solo', stake_cents: miseCents, seats: 20, team_size: 1,
+    paid_seats: 1, brawler: BRAWLER, seed_public: 1, seed_secret: SECRETS[0],
+    sim_version: SIM.SIM_VERSION, client_key: 'anon', status: 'settled',
+    first_result_at: quand, opened_at: quand, expires_at: quand, settled_at: quand,
+    issue: 'defaite', controle: null, motif: null,
+    gross_cents: 0, fee_cents: 0, net_cents: 0, purse_cents: 0,
+    declared_net_cents: null, ecart_cents: null,
+    seconds: 1, kills: 0, deaths: 1, rank: 20, cubes: 0, damage: 0, cashed_out: false,
+    trace_steps: 1, replay_digest: null, digest_match: true, divergence_step: null, replay_ms: 0,
+  });
+  await db.ledgerWrite(L.mouvementDotation({ userId: id, montantCents: L.DOTATION_CENTS }));
+  await db.ledgerWrite(L.mouvementMise({ userId: id, matchId, miseCents }));
+  await db.ledgerWrite(L.mouvementGain({ userId: id, matchId, miseCents, grossCents: 0,
+                                         feeCents: 0, netCents: 0, convergee: true }));
+  return { db, id, matchId, miseCents };
+}
+// L'OPÉRATEUR NE PORTE PAS LE MÊME NOM QUE LE JOUEUR, et ce n'est pas de la coquetterie : le test
+// vérifie plus bas qu'aucun identifiant de personne ne survit dans `ledger_audit`, et un opérateur
+// homonyme du joueur rendrait cette assertion vraie pour la mauvaise raison — ou fausse alors que
+// tout va bien. C'est le nom de QUI A SIGNÉ, et il reste écrit ; c'est le nom du JOUEUR qui part.
+const ANON_SIGNE = ['--par', 'Astrid', '--raison', 'demande de suppression du 14, ticket 231'];
+
+test('GARDE TEXTUELLE : plus UNE SEULE cascade de users vers matches, ni de matches vers match_traces', () => {
+  // Les deux cascades dataient de la phase 01, quand `matches` ne portait aucun montant. Depuis la
+  // phase 03, ces lignes sont les PIÈCES JUSTIFICATIVES de mouvements d'argent qui, eux, restent :
+  // `ledger_entries` est en insertion seule et nomme ses comptes avec `users.id` et `matches.id`.
+  // Un `delete from users` détruisait donc la pièce et laissait l'écriture pointer dans le vide.
+  const sql = SQL_NU();
+  assert.match(sql, /user_id\s+bigint\s+not null references users\(id\) on delete restrict/,
+    'la cascade de matches vers users est encore là');
+  assert.match(sql, /match_id\s+bigint\s+not null references matches\(id\) on delete restrict/,
+    'la cascade de match_traces vers matches est encore là');
+  assert.ok(!/on delete cascade/i.test(sql), 'une cascade a survécu dans schema.sql');
+  // ET TOUTES les clés étrangères du schéma portent `restrict`, comptées une par une : une
+  // quatrième qui entrerait en cascade passerait sous les deux assertions ci-dessus.
+  const fks = sql.match(/references \w+\(id\)[^,\n]*/g) || [];
+  assert.strictEqual(fks.length, 3,
+    `${fks.length} clés étrangères : matches.user_id, match_traces.match_id, ledger_audit.user_id`);
+  for (const fk of fks) assert.match(fk, /on delete restrict/, fk);
+  // LA RAISON EST ÉCRITE À CÔTÉ, et sur le texte COMMENTÉ : ailleurs, elle serait une intention que
+  // rien ne rappelle à celui qui rouvrira le fichier pour « simplifier ».
+  const commente = lireApi('schema.sql');
+  const entete = commente.slice(commente.lastIndexOf('-- LA CASCADE', commente.indexOf('create table if not exists matches')),
+                                commente.indexOf('create table if not exists matches'));
+  assert.match(entete, /restrict/);
+  assert.match(entete, /pièces justificatives|PIÈCES JUSTIFICATIVES/i,
+    'la raison du renversement n\'est plus écrite au-dessus de la table');
+  assert.match(entete, /anonymise/i, 'le geste qui remplace la suppression n\'est pas nommé');
+});
+
+test('LE NOM D\'UN COMPTE ANONYMISÉ TIENT DANS LA COLONNE, y compris sur un id de dix-neuf chiffres', () => {
+  // C'est le point sur lequel ce module se serait trompé : l'anonymisation est une RÉÉCRITURE SOUS
+  // CONTRAINTES, pas une suppression de colonnes. `auth_id`, `email`, `name` et `name_key` sont
+  // toutes `not null`, deux d'entre elles sont uniques, et deux `check` bornent les longueurs.
+  const MAX = '9223372036854775807';
+  for (const id of ['1', '9', '42', '1000000', '9007199254740993', MAX]) {
+    const nom = L.nomAnonyme(id);
+    assert.strictEqual(nom, 'x' + BigInt(id).toString(36));
+    assert.ok(nom.length >= L.USERS_NOM_MIN && nom.length <= L.USERS_NOM_MAX,
+      `« ${nom} » fait ${nom.length} caractères`);
+    const cle = C.nameKey(nom);
+    assert.ok(cle.length >= L.USERS_CLE_MIN && cle.length <= L.USERS_CLE_MAX, cle);
+    // Le nom anonyme survit à `sanitizeName` sans perdre un caractère : s'il en perdait, deux
+    // identifiants voisins pourraient se replier sur la même clé.
+    assert.strictEqual(cle, nom);
+    assert.strictEqual(L.authIdAnonyme(id), `anonyme:${id}`);
+    assert.strictEqual(L.emailAnonyme(id), `anonyme+${id}@invalid`);
+  }
+  // LE MAXIMUM D'UN `bigserial` TIENT EXACTEMENT DANS LA COLONNE, et c'est ce qui justifie la base
+  // 36 : en base 10 il aurait fallu vingt caractères pour quatorze disponibles.
+  assert.strictEqual(L.nomAnonyme(MAX).length, L.USERS_NOM_MAX);
+  assert.ok(('x' + BigInt(MAX).toString(10)).length > L.USERS_NOM_MAX,
+    'la base 36 ne sert plus à rien : la base 10 tiendrait');
+  // ET LE PIÈGE DE PRÉCISION EST ÉPROUVÉ, PAS SUPPOSÉ : `Number` arrondit au-delà de 2^53, donc deux
+  // comptes voisins recevraient le même nom, donc la même clé, donc une collision inexplicable. Le
+  // pilote Postgres rend les `bigint` en CHAÎNE précisément pour cela.
+  assert.notStrictEqual(L.nomAnonyme(MAX), 'x' + Number(MAX).toString(36));
+  assert.strictEqual(L.nomAnonyme('9007199254740993'), 'x' + BigInt('9007199254740993').toString(36));
+  assert.notStrictEqual(L.nomAnonyme('9007199254740993'), L.nomAnonyme('9007199254740992'));
+  // LES BORNES SONT CELLES DE LA COLONNE ET CELLES DU JEU, et les trois écritures se confrontent :
+  // `schema.sql`, `api/ledger.js`, `WBCore.NAME`. Deux d'entre elles qui divergeraient ne se
+  // verraient qu'au premier compte anonymisé.
+  const sql = SQL_NU();
+  assert.ok(sql.includes(`check (char_length(name) between ${L.USERS_NOM_MIN} and ${L.USERS_NOM_MAX})`), sql);
+  assert.ok(sql.includes(`check (char_length(name_key) between ${L.USERS_CLE_MIN} and ${L.USERS_CLE_MAX})`), sql);
+  assert.strictEqual(L.USERS_NOM_MAX, C.NAME.max);
+  assert.strictEqual(L.USERS_NOM_MIN, C.NAME.min);
+});
+
+await test('UN COMPTE ANONYMISÉ CONSERVE SON id : joueur:<id> et enjeu:<match_id> restent des comptes valides', async () => {
+  // La propriété entière du module. Le grand livre est immortel et nomme ses comptes avec `users.id`
+  // et `matches.id` : déplacer l'identifiant ferait pointer des écritures qu'on ne peut pas corriger
+  // sur des lignes qui n'existent plus.
+  const { db, id, matchId } = await bancAnonyme({ id: '9223372036854775807' });
+  reconcilier(db, 'avant l\'anonymisation');
+  const comptes = [L.compteJoueur(id), L.compteQuarantaine(id), L.compteEnjeu(matchId)];
+  const avant = comptes.map(c => L.soldeDe(livreDe(db), c));
+  const ecritures = db.ledger.length;
+
+  const outil = bancOutil(db);
+  assert.strictEqual(await outil.lancer(['anonymiser', id, ...ANON_SIGNE, '--confirme']), 0, outil.texte());
+
+  assert.strictEqual(db.users[0].id, id, 'l\'identifiant du compte a bougé');
+  assert.strictEqual(db.matches[0].user_id, id, 'le billet a changé de propriétaire');
+  for (const c of comptes) assert.ok(L.compteValide(c), `${c} n'est plus un compte valide`);
+  assert.deepStrictEqual(comptes.map(c => L.soldeDe(livreDe(db), c)), avant,
+    'l\'anonymisation a déplacé de l\'argent');
+  assert.strictEqual(db.ledger.length, ecritures, 'l\'anonymisation a écrit dans le grand livre');
+  reconcilier(db, 'après l\'anonymisation');
+  zeroGlobal(db, 'après l\'anonymisation');
+});
+
+await test('LES IDENTIFIANTS DE PERSONNE SONT PARTIS, et la trace ne les garde pas non plus', async () => {
+  const { db, id } = await bancAnonyme({ nom: 'Loïc' });
+  const avant = { ...db.users[0] };
+  const outil = bancOutil(db);
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 0, outil.texte());
+
+  const u = db.users[0];
+  assert.strictEqual(u.auth_id, `anonyme:${id}`);
+  assert.strictEqual(u.email, `anonyme+${id}@invalid`);
+  assert.strictEqual(u.name, L.nomAnonyme(id));
+  assert.strictEqual(u.name_key, C.nameKey(u.name));
+  assert.strictEqual(u.avatar, '');
+  assert.strictEqual(u.country, null);
+  // `.invalid` est un domaine de premier niveau RÉSERVÉ : il n'est routable nulle part, jamais.
+  assert.ok(u.email.endsWith('@invalid'));
+  // Et RIEN de l'ancienne identité ne survit dans la ligne, ni de près ni de loin.
+  const ligne = JSON.stringify(u);
+  for (const parti of [avant.auth_id, avant.email, avant.name, avant.name_key, avant.avatar, avant.country])
+    assert.ok(!ligne.includes(parti), `« ${parti} » est resté sur la ligne`);
+  // LA TRACE NON PLUS NE LES GARDE PAS, et c'est délibéré : un journal d'audit qui conserverait
+  // l'ancien email n'anonymiserait rien du tout. Ce qu'il garde, c'est QUI, QUAND et POURQUOI.
+  const t = db.ledgerAudit[0];
+  const trace = JSON.stringify(t);
+  for (const parti of [avant.auth_id, avant.email, avant.name])
+    assert.ok(!trace.includes(parti), `« ${parti} » est resté dans ledger_audit`);
+  // L'OPÉRATEUR, LUI, L'A VU AVANT DE CONFIRMER : la sortie de terminal est la seule mémoire de ce
+  // qu'il avait sous les yeux, et elle ne va nulle part en base.
+  assert.ok(outil.texte().includes(avant.email), 'l\'outil n\'a pas montré ce qui allait disparaître');
+  assert.ok(outil.texte().includes(avant.auth_id));
+});
+
+await test('L\'ANCIEN PSEUDO REDEVIENT DISPONIBLE, et l\'historique se lit alors sur l\'id', async () => {
+  const { db, id } = await bancAnonyme({ nom: 'Loïc' });
+  // AVANT : le pseudo est pris, et `findOrCreate` suffixe plutôt que d'échouer au nez du nouveau.
+  const occupe = await db.findOrCreate({ authId: 'crossmint|second', email: 'b@x.test',
+                                         name: 'Loïc', nameKey: C.nameKey, at: T0 });
+  assert.notStrictEqual(occupe.user.name_key, C.nameKey('Loïc'), 'le pseudo n\'était donc pas pris');
+
+  const outil = bancOutil(db);
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 0, outil.texte());
+
+  // APRÈS : un nouveau venu obtient le pseudo EXACT, sans suffixe. C'est voulu, et c'est le prix.
+  const repris = await db.findOrCreate({ authId: 'crossmint|tiers', email: 'c@x.test',
+                                         name: 'Loïc', nameKey: C.nameKey, at: T0 });
+  assert.strictEqual(repris.user.name, 'Loïc');
+  assert.strictEqual(repris.user.name_key, C.nameKey('Loïc'));
+  // LE COROLLAIRE, ET IL EST À CONNAÎTRE : deux personnes différentes ont porté ce pseudo, donc toute
+  // lecture d'historique par le NOM les confondrait. Le billet du premier reste attaché à son id.
+  assert.notStrictEqual(repris.user.id, id);
+  assert.strictEqual(db.matches[0].user_id, id);
+  assert.strictEqual(db.matches.filter(m => m.user_id === repris.user.id).length, 0,
+    'le nouveau venu hérite de l\'historique de l\'ancien : la jointure se fait par le nom');
+  assert.match(OP.AIDE, /l'historique d'un joueur se/i);
+});
+
+await test('L\'ANONYMISATION ET SA RAISON PARTAGENT LA TRANSACTION, et le geste est REFUSÉ sans raison écrite', async () => {
+  // La même propriété que pour la contre-passation, et la même raison : un compte réécrit sans qu'on
+  // sache pourquoi est indistinguable d'une erreur de manipulation, et ce geste-là ne se défait pas.
+  const { db, id } = await bancAnonyme();
+  const outil = bancOutil(db);
+  const identite = { ...db.users[0] };
+
+  // SANS RAISON, ET SANS NOM : rien n'est écrit, et le refus est nommé.
+  for (const [argv, code] of [
+    [['anonymiser', String(id), '--par', 'Astrid', '--confirme'], 'raison_vide'],
+    // Les blancs ne comptent pas : sinon « pourquoi » serait une case à cocher, et une espace
+    // suffirait à la cocher.
+    [['anonymiser', String(id), '--par', 'Astrid', '--raison', '   ', '--confirme'], 'raison_vide'],
+    [['anonymiser', String(id), '--raison', 'ticket 231', '--confirme'], 'operateur_vide'],
+  ]) {
+    outil.lignes.length = 0;
+    assert.strictEqual(await outil.lancer(argv), 1, argv.join(' '));
+    assert.match(outil.texte(), new RegExp(`REFUSÉ \\(${code}\\)`));
+    assert.deepStrictEqual({ ...db.users[0] }, identite, 'la ligne a été réécrite malgré le refus');
+    assert.strictEqual(db.ledgerAudit.length, 0);
+  }
+
+  // ET LA SECONDE MOITIÉ QUI ÉCHOUE NE LAISSE AUCUNE RÉÉCRITURE. C'est ce que la doublure sait
+  // imiter, et ce qu'elle ne sait pas PROUVER : elle décide de l'ordre de ses `await`. Seul
+  // `api/db-check.js` fait arbitrer ce `rollback` par Postgres.
+  outil.lignes.length = 0;
+  db.panne.audit = () => true;
+  await assert.rejects(() => outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']),
+    e => e.code === '23514');
+  assert.deepStrictEqual({ ...db.users[0] }, identite,
+    'la ligne users a été réécrite alors que sa raison n\'a pas pu être consignée');
+  assert.strictEqual(db.ledgerAudit.length, 0);
+
+  // Sans la panne, les deux arrivent ENSEMBLE.
+  db.panne.audit = null;
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 0, outil.texte());
+  assert.match(outil.texte(), /ANONYMISÉ/);
+  assert.strictEqual(db.ledgerAudit.length, 1);
+  const t = db.ledgerAudit[0];
+  assert.strictEqual(t.geste, 'anonymisation');
+  assert.strictEqual(t.operateur, 'Astrid');
+  assert.strictEqual(t.raison, 'demande de suppression du 14, ticket 231');
+  assert.strictEqual(t.user_id, String(id));
+  // UNE ANONYMISATION NE BOUGE PAS UN CENTIME, et les cinq colonnes d'argent sont NULLES — pas zéro.
+  // Un zéro se lirait comme un montant nul, donc comme une correction du livre qui n'a rien corrigé.
+  for (const vide of ['motif_origine', 'reference_origine', 'reference_posee', 'jambes', 'montant_cents'])
+    assert.strictEqual(t[vide], null, `${vide} devrait être nul sur une anonymisation`);
+  assert.ok(Object.isFrozen(t));
+  assert.throws(() => { t.raison = 'autre chose'; }, TypeError);
+  // ET LA TRACE SE RELIT PAR L'OUTIL, par le COMPTE et non par un mouvement : l'anonymisation ne
+  // porte sur aucune écriture du livre, donc `montrer mouvement` ne la retrouverait jamais.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['montrer', 'exposition', String(id)]), 0);
+  assert.match(outil.texte(), /anonymisation par Astrid/);
+  assert.match(outil.texte(), /ticket 231/);
+});
+
+await test('UNE COLLISION SUR name_key EST DITE, et l\'outil S\'ARRÊTE au lieu de deviner', async () => {
+  // Le nom anonyme est `x<id en base 36>` : quelqu'un peut parfaitement porter ce pseudo-là.
+  // `findOrCreate` réessaie avec un suffixe à l'inscription, et c'est le bon geste À CET ENDROIT —
+  // il arrange un joueur qui ne remarquera rien. Ici, ce serait décider à la place d'un opérateur,
+  // sur un geste rare, manuel et irréversible.
+  const { db, id } = await bancAnonyme();
+  const squatte = L.nomAnonyme(id);
+  db.users.push({ id: 77, auth_id: 'crossmint|squatteur', email: 'sq@exemple.test', name: squatte,
+                  name_key: C.nameKey(squatte), avatar: '', country: null,
+                  created_at: '2026-01-01T00:00:00Z' });
+  const identite = { ...db.users[0] };
+  const outil = bancOutil(db);
+
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 1);
+  // Elle est DITE, avec la contrainte qui a refusé, et pas rendue en pile d'appels.
+  assert.match(outil.texte(), /REFUSÉ \(collision\)/);
+  assert.match(outil.texte(), /users_name_key_key/);
+  assert.match(outil.texte(), new RegExp(`Quelqu'un porte déjà « ${squatte} »`));
+  assert.match(outil.texte(), /deviner à ta place serait pire/);
+  // ET RIEN N'A ÉTÉ ÉCRIT, ni la ligne, ni sa raison.
+  assert.deepStrictEqual({ ...db.users[0] }, identite);
+  assert.strictEqual(db.ledgerAudit.length, 0);
+
+  // L'identité anonyme déjà prise par quelqu'un d'autre est refusée de la même façon.
+  db.users[1].name = 'Libre'; db.users[1].name_key = C.nameKey('Libre');
+  db.users[1].auth_id = L.authIdAnonyme(id);
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 1);
+  assert.match(outil.texte(), /users_auth_id_key/);
+  assert.strictEqual(db.ledgerAudit.length, 0);
+});
+
+await test('anonymiser MONTRE avant d\'écrire, et rejouer le geste ne réécrit rien', async () => {
+  const { db, id } = await bancAnonyme();
+  const outil = bancOutil(db);
+  const identite = { ...db.users[0] };
+
+  // SANS `--confirme`, c'est un verbe de lecture de plus, et il le dit.
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE]), 0);
+  assert.match(outil.texte(), /ce qui disparaît/);
+  assert.match(outil.texte(), /ce qui est écrit à la place/);
+  assert.match(outil.texte(), new RegExp(`l'identifiant ${id} NE BOUGE PAS`));
+  assert.match(outil.texte(), /RIEN N'A ÉTÉ ÉCRIT/);
+  assert.deepStrictEqual({ ...db.users[0] }, identite);
+  assert.strictEqual(db.ledgerAudit.length, 0);
+
+  // Un identifiant illisible est refusé AVANT de partir en SQL : `where id = $1` sur « abc » lève
+  // `22P02`, et l'opérateur lirait une pile d'appels au lieu d'une phrase.
+  for (const mauvais of ['abc', '007', '0', '-1'])
+    assert.strictEqual(await outil.lancer(['anonymiser', mauvais, ...ANON_SIGNE, '--confirme']), 2, mauvais);
+  // Un compte qui n'existe pas est un refus NOMMÉ, pas une panne.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['anonymiser', '999', ...ANON_SIGNE, '--confirme']), 1);
+  assert.match(outil.texte(), /REFUSÉ \(compte_inconnu\)/);
+
+  // LE GESTE, PUIS SON REJEU. Un opérateur qui relance parce que sa connexion a lâché doit lire
+  // « c'était déjà fait » : réécrire n'aurait rien cassé, mais aurait consigné une SECONDE raison,
+  // donc raconté deux gestes là où il n'y en a eu qu'un.
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 0, outil.texte());
+  const apres = { ...db.users[0] };
+  outil.lignes.length = 0;
+  assert.strictEqual(await outil.lancer(['anonymiser', String(id), ...ANON_SIGNE, '--confirme']), 0,
+    'le rejeu doit sortir proprement, pas en erreur');
+  assert.match(outil.texte(), /DÉJÀ ANONYMISÉ/);
+  assert.deepStrictEqual({ ...db.users[0] }, apres);
+  assert.strictEqual(db.ledgerAudit.length, 1, 'le rejeu a consigné une seconde raison');
+});
+
+test('planAnonymisation est PURE et rend ses refus, elle ne lance pas', () => {
+  // Même discipline que `planCorrection` : un opérateur qui lit une pile d'appels un dimanche soir
+  // n'apprend rien, et ces refus sont des cas normaux.
+  const ligne = { id: 3, auth_id: 'crossmint|3', email: 'a@x.test', name: 'Loïc',
+                  name_key: C.nameKey('Loïc'), avatar: 'a1', country: 'FR' };
+  const bon = { par: 'Loïc', raison: 'ticket 231', nameKey: C.nameKey };
+  assert.strictEqual(L.planAnonymisation(ligne, bon).ok, true);
+  assert.strictEqual(L.planAnonymisation(null, bon).code, 'compte_inconnu');
+  assert.strictEqual(L.planAnonymisation({ ...ligne, id: '007' }, bon).code, 'compte_inconnu');
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, par: '  ' }).code, 'operateur_vide');
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, par: 'x'.repeat(L.AUDIT_OPERATEUR_MAX + 1) }).code,
+    'operateur_trop_long');
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, raison: ' ' }).code, 'raison_vide');
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, raison: 'x'.repeat(L.AUDIT_RAISON_MAX + 1) }).code,
+    'raison_trop_longue');
+  assert.strictEqual(L.planAnonymisation({ ...ligne, auth_id: L.authIdAnonyme(3) }, bon).code,
+    'deja_anonymise');
+  // LA CLÉ EST INJECTÉE, ET SON ABSENCE EST UN REFUS ET PAS UN PLANTAGE : `api/ledger.js` porte une
+  // garde de pureté qui lui interdit tout `require`, donc il ne peut pas aller chercher `WBCore`.
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, nameKey: undefined }).code, 'cle_indisponible');
+  // Une dérivation qui rendrait n'importe quoi est arrêtée ici, là où la contrainte de la colonne se
+  // lit avec le nom fabriqué. C'est la raison pour laquelle le nom est calculé en JavaScript et pas
+  // en SQL : les deux moitiés de la règle sont au même endroit.
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, nameKey: () => '' }).code, 'cle_hors_bornes');
+  assert.strictEqual(L.planAnonymisation(ligne, { ...bon, nameKey: () => 'x'.repeat(15) }).code,
+    'cle_hors_bornes');
+  // Le plan est GELÉ, comme celui d'une correction : un pilote ne retouche pas ce qu'il exécute.
+  const plan = L.planAnonymisation(ligne, bon);
+  assert.ok(Object.isFrozen(plan) && Object.isFrozen(plan.apres) && Object.isFrozen(plan.avant));
+  assert.strictEqual(plan.geste, 'anonymisation');
+  // Et elle ne TOUCHE rien : c'est un plan, pas une écriture.
+  assert.strictEqual(ligne.auth_id, 'crossmint|3');
+});
+
+test('LA SURFACE DE RÉGRESSION DE CE MODULE EST VIDE, et c\'est un TEST qui le dit', () => {
+  // Il faut le présenter comme tel plutôt que le prétendre prouvé : il n'existe AUJOURD'HUI aucune
+  // route ni aucune méthode qui supprime un compte, donc le passage des cascades en `restrict` ne
+  // peut rien casser. Son seul effet observable est un REFUS, et un refus de contrainte ne se
+  // constate que contre une vraie base. C'est vrai aujourd'hui SEULEMENT, et c'est pour cela que la
+  // phrase est ici, sous forme d'assertions, et pas dans une relecture.
+  const app = lireApi('app.js').replace(/^[ \t]*\/\/[^\n]*/gm, '');
+  for (const interdit of ['delete from users', 'deleteUser', 'supprimerCompte', 'anonymiser'])
+    assert.ok(!app.includes(interdit), `app.js parle de ${interdit} : une route de suppression s'ouvre`);
+  assert.ok(!/'DELETE'|"DELETE"/.test(app), 'une route DELETE est apparue');
+  // Le pilote n'a QU'UN `delete`, et c'est la purge nommée de `match_traces` — l'unique exception
+  // écrite du dépôt. Aucun autre effacement n'existe, donc aucun ne peut être refusé par surprise.
+  const effacements = (PG_NU().match(/delete\s+from\s+\w+/gi) || []).map(s => s.toLowerCase().replace(/\s+/g, ' '));
+  assert.deepStrictEqual(effacements, ['delete from match_traces']);
+  // Et la doublure n'expose aucun chemin de suppression non plus, à l'exception NOMMÉE qui existe
+  // depuis la phase 03 : la purge des traces, à ses quatre conditions.
+  const db = fakeDb();
+  assert.deepStrictEqual(Object.keys(db).filter(k => /suppr|delete|efface|purge/i.test(k)),
+    ['purgeTraces']);
+  // CE QUI RESTE À PROUVER EST NOMMÉ, ET IL EST AILLEURS : `api/db-check.js` fait SUBIR la contrainte
+  // à une vraie base. Une doublure ne peut pas subir une contrainte, elle ne fait que l'imiter.
+  const check = lireApi('db-check.js');
+  assert.match(check, /delete from users/, 'la seule preuve du refus n\'est plus dans db-check.js');
+  assert.match(check, /matches_user_id_fkey/, 'le refus n\'est pas attribué à une contrainte nommée');
+});
+
+test('LE TROU QUI RESTE EST ÉCRIT, NOMMÉ ET CHIFFRÉ : findOrCreate cherche par auth_id', () => {
+  // `findOrCreate` retrouve un compte par `auth_id`. Un joueur anonymisé qui se reconnecte avec le
+  // même email obtient donc une ligne NEUVE — son `auth_id` Crossmint n'est plus dans la base — et
+  // une nouvelle DOTATION_CENTS. C'est un robinet à crédits, dans la phase qui existe pour borner ce
+  // que la maison émet, et il est écrit plutôt que découvert.
+  const pg = PG_NU();
+  const trouve = pg.slice(pg.indexOf('async findOrCreate('), pg.indexOf('async updateProfile('));
+  assert.ok(trouve.length > 200, 'findOrCreate n\'a pas été retrouvé');
+  assert.match(trouve, /from users where auth_id = \$1/,
+    'findOrCreate ne cherche plus par auth_id : le trou ci-dessous a changé de forme');
+  assert.match(trouve, /mouvementDotation/, 'la dotation n\'est plus écrite à la création');
+  // CE QUI LE TIENT AUJOURD'HUI : le robinet exige que l'OPÉRATEUR l'ouvre lui-même, un compte à la
+  // fois, en ligne de commande. Il n'existe aucune route qui demande l'anonymisation.
+  const app = lireApi('app.js');
+  assert.ok(!app.includes('anonymis'), 'une route demande l\'anonymisation : le robinet est ouvert au client');
+  assert.match(lireApi('operateur.js'), /anonymiser <userId>/, 'le seul chemin n\'est plus l\'outil');
+  // ET IL EST CHIFFRÉ AUX DEUX ENDROITS QUI COMPTENT, pour que le jour où une route de suppression
+  // existera, personne n'ait à le redécouvrir : une table, un index unique, une lecture, un test.
+  for (const [f, texte] of [['api/README.md', lireApi('README.md')],
+                            ['docs/HISTORIQUE.md', require('node:fs').readFileSync(
+                              require('node:path').join(__dirname, '..', 'docs', 'HISTORIQUE.md'), 'utf8')]]) {
+    const i = texte.indexOf('robinet à crédits');
+    assert.ok(i > 0, `${f} ne nomme pas le robinet à crédits`);
+    const autour = texte.slice(i - 1500, i + 1500);
+    // Le montant est écrit en français — « 5 000 » — donc l'espace des milliers est optionnelle
+    // dans la garde, mais le CHIFFRE vient de `DOTATION_CENTS` et pas d'un littéral recopié.
+    const chiffre = String(L.DOTATION_CENTS).replace(/\B(?=(\d{3})+(?!\d))/g, '\\s?');
+    assert.match(autour, new RegExp(chiffre), `${f} ne chiffre pas ce que le robinet verse`);
+    assert.match(autour, /empreinte/, `${f} ne dit pas ce qu'il faudra construire`);
+    assert.match(autour, /insertion seule/, `${f} ne dit pas de quelle nature est la table à venir`);
+  }
 });
 
 console.log('Lecture de la clé d\'API Crossmint');

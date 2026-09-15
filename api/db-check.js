@@ -979,10 +979,9 @@ async function main() {
         ...poser('contrepassation', 'op', 'x'.repeat(L.AUDIT_RAISON_MAX + 1)));
       await refuse(client, '23514', 'ledger_audit_operateur_check',
         ...poser('contrepassation', '', 'ticket 118'));
-      // La liste des gestes est fermée, et elle n'a qu'un membre aujourd'hui : le module 6 y ajoutera
-      // `anonymisation`, et ce refus-là tombera avec lui. C'est voulu — on ne crée pas une case que
-      // personne n'écrit.
-      for (const inconnu of ['anonymisation', 'correction', 'ajustement', '']) {
+      // La liste des gestes est fermée, et elle a DEUX membres depuis le module 6 : `contrepassation`
+      // et `anonymisation`. Ce qui est refusé, c'est tout ce qui n'y est pas.
+      for (const inconnu of ['suppression', 'correction', 'ajustement', '']) {
         await refuse(client, '23514', 'ledger_audit_geste_check',
           ...poser(inconnu, 'op', 'ticket 118'));
       }
@@ -996,6 +995,180 @@ async function main() {
       const relu = await client.query('select cree_le from ledger_audit order by id desc limit 1');
       if (!relu.rows[0].cree_le) throw new Error('la trace n\'est pas datée');
       await client.query('rollback');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('ledger_audit REFUSE une anonymisation sans compte, et une qui porte de l\'argent', async () => {
+      // La contrainte jumelle de la précédente, écrite dans les deux sens : une anonymisation porte
+      // son compte, et AUCUN centime. Une ligne qui porterait les deux moitiés se lirait comme une
+      // correction du livre alors qu'aucun argent n'a bougé.
+      await client.query('begin');
+      const u = await creerJoueur(client, 'Anonat');
+      await refuse(client, '23514', 'ledger_audit_anonymisation_complete',
+        `insert into ledger_audit (geste, operateur, raison) values ('anonymisation','op','ticket 231')`);
+      await refuse(client, '23514', 'ledger_audit_anonymisation_complete',
+        `insert into ledger_audit (geste, operateur, raison, user_id, motif_origine, reference_origine,
+                                   reference_posee, jambes, montant_cents)
+         values ('anonymisation','op','ticket 231',$1,'gain','42','gain:42',3,900)`, [u]);
+      // Un compte qui n'existe pas est refusé par la CLÉ ÉTRANGÈRE, et c'est le point : une trace
+      // d'anonymisation orpheline dirait qu'on a anonymisé quelqu'un dont la ligne n'est plus là.
+      await refuse(client, '23503', 'ledger_audit_user_id_fkey',
+        `insert into ledger_audit (geste, operateur, raison, user_id)
+         values ('anonymisation','op','ticket 231', 999999999)`);
+      // Et la ligne juste passe : le compte, la raison, et rien d'autre.
+      const ok = await client.query(
+        `insert into ledger_audit (geste, operateur, raison, user_id)
+         values ('anonymisation','op','ticket 231',$1)`, [u]);
+      if (ok.rowCount !== 1) throw new Error('la ligne d\'anonymisation a été refusée');
+      // ET ELLE EMPÊCHE À SON TOUR L'EFFACEMENT DU COMPTE, par la même clé étrangère. Un joueur sans
+      // aucun billet aurait pu partir sans que rien ne s'y oppose ; sa propre trace s'y oppose.
+      await refuse(client, '23503', 'ledger_audit_user_id_fkey',
+        'delete from users where id = $1', [u]);
+      await client.query('rollback');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('UN delete from users EST REFUSÉ tant qu\'un billet référence la ligne', async () => {
+      // LA PREUVE QU'AUCUNE DOUBLURE NE PEUT DONNER : elle IMITE une contrainte, elle ne la SUBIT
+      // pas. Les deux cascades du schéma dataient de la phase 01, quand `matches` ne portait aucun
+      // montant ; depuis la phase 03, ces lignes sont les PIÈCES JUSTIFICATIVES de mouvements
+      // d'argent qui, eux, restent, et `ledger_entries` est en insertion seule. Un `delete from
+      // users` détruisait donc la pièce en laissant l'écriture pointer dans le vide.
+      //
+      // C'est aussi le SEUL effet observable du module 6 : il n'existe aucune route de suppression de
+      // compte, donc rien d'autre ne peut être vu tourner.
+      await client.query('begin');
+      const u = await creerJoueur(client, 'Restrict');
+      const m = await ouvrirBillet(client, u, { status: 'settled' });
+      await ledgerWrite(client, L.mouvementDotation({ userId: u, montantCents: 5000 }));
+      await ledgerWrite(client, L.mouvementMise({ userId: u, matchId: m, miseCents: 50 }));
+      await client.query(
+        `insert into match_traces (match_id, seq, sim_version, steps, data)
+         values ($1, 0, 1, 3, 'xxx')`, [m]);
+
+      await refuse(client, '23503', 'matches_user_id_fkey', 'delete from users where id = $1', [u]);
+      // Et la trace tient le billet de la même façon : la pièce ne part pas avec la ligne qu'elle
+      // justifie. Le SEUL effacement légitime d'une trace est la purge nommée, à ses quatre
+      // conditions, et elle efface la trace SANS toucher au billet.
+      await refuse(client, '23503', 'match_traces_match_id_fkey', 'delete from matches where id = $1', [m]);
+      // Et l'écriture du livre est toujours là, avec le compte qu'elle nomme : c'est ce que la
+      // cascade détruisait.
+      const reste = await ledgerDe(client, { reference: String(m) });
+      if (reste.length !== 1) throw new Error(`${reste.length} écritures sur le billet au lieu d'une`);
+      if (reste[0].compte_credit !== L.compteEnjeu(m)) {
+        throw new Error('le séquestre a changé de nom : ' + reste[0].compte_credit);
+      }
+      await client.query('rollback');
+    });
+
+    // ---------------------------------------------------------------------------------------
+    await cas('L\'ANONYMISATION RÉÉCRIT users SANS TOUCHER À SON id, et sa raison partage la transaction', async () => {
+      // Le geste qui remplace la suppression, éprouvé contre les VRAIES contraintes : quatre colonnes
+      // `not null`, deux index uniques, deux `check` de longueur. Une doublure les imite ; ici elles
+      // s'appliquent.
+      const base = pgDb(URL_BASE);
+      const u = await creerJoueur(client, 'Anonyme');
+      const m = await ouvrirBillet(client, u, { status: 'settled' });
+      await ledgerWrite(client, L.mouvementDotation({ userId: u, montantCents: 5000 }));
+      await ledgerWrite(client, L.mouvementMise({ userId: u, matchId: m, miseCents: 50 }));
+      // Comme le cas de la contre-passation, celui-ci ne prend AUCUNE transaction sur la connexion
+      // partagée : la suite passe par `pgDb`, donc par d'autres connexions du bassin, qui ne
+      // verraient rien d'une transaction ouverte ailleurs. Le `finally` efface tout.
+      try {
+        const ligne = await base.lireUtilisateur({ userId: u });
+        if (!ligne) throw new Error('le compte tout juste créé est introuvable');
+        const plan = L.planAnonymisation(ligne, {
+          par: 'db-check', raison: 'épreuve du geste d\'anonymisation', nameKey: C.nameKey });
+        if (!plan.ok) throw new Error(`plan refusé : ${plan.code} ${plan.message}`);
+
+        // D'ABORD L'AUDIT QUI ÉCHOUE, SUR UNE VRAIE CONTRAINTE : la raison vidée après coup. Postgres
+        // annule, et la ligne `users` doit être restée telle quelle — c'est cela que la doublure
+        // décide avec ses `await` et que seule la base peut arbitrer.
+        let leve = null;
+        try { await base.anonymiser({ ...plan, raison: '' }); } catch (e) { leve = e; }
+        if (!leve) throw new Error('la base a ACCEPTÉ une anonymisation sans raison écrite');
+        if (leve.code !== '23514') throw new Error(`code ${leve.code} au lieu de 23514`);
+        const intacte = await base.lireUtilisateur({ userId: u });
+        if (intacte.auth_id !== ligne.auth_id || intacte.name !== ligne.name) {
+          throw new Error('la ligne users a été réécrite sans que sa raison soit consignée');
+        }
+
+        // PUIS LE CAS NOMINAL.
+        const pose = await base.anonymiser(plan);
+        if (!pose.pose) throw new Error('l\'anonymisation n\'a pas été posée : ' + JSON.stringify(pose));
+        const apres = await base.lireUtilisateur({ userId: u });
+        if (String(apres.id) !== String(u)) throw new Error('l\'identifiant du compte a bougé');
+        if (apres.auth_id !== plan.apres.authId || apres.email !== plan.apres.email
+            || apres.name !== plan.apres.name || apres.name_key !== plan.apres.nameKey
+            || apres.avatar !== '' || apres.country !== null) {
+          throw new Error('la ligne anonymisée ne porte pas ce que le plan annonçait : '
+            + JSON.stringify(apres));
+        }
+        // LE BILLET N'A PAS BOUGÉ NON PLUS, et c'est tout l'intérêt de garder l'`id` : le compte
+        // `enjeu:<match_id>` du grand livre désigne encore une ligne vivante.
+        const billet = await base.lireBillet({ matchId: m });
+        if (!billet || String(billet.user_id) !== String(u)) {
+          throw new Error('le billet a perdu son joueur');
+        }
+        // LA TRACE EST LÀ, relue par le COMPTE et pas par un mouvement : une anonymisation ne porte
+        // sur aucune écriture du livre.
+        const traces = await base.lireAuditJoueur({ userId: u });
+        if (traces.length !== 1) throw new Error(`${traces.length} traces au lieu d'une`);
+        const t = traces[0];
+        if (t.geste !== 'anonymisation' || t.operateur !== 'db-check'
+            || String(t.user_id) !== String(u)) {
+          throw new Error('la trace ne décrit pas le geste : ' + JSON.stringify(t));
+        }
+        // Les cinq colonnes d'argent sont NULLES et non zéro : `null` se lit « pas de montant »,
+        // `0` se lirait « un montant nul », c'est-à-dire une correction qui n'a rien corrigé.
+        for (const vide of ['motif_origine', 'reference_origine', 'reference_posee', 'jambes',
+                            'montant_cents']) {
+          if (t[vide] !== null) throw new Error(`${vide} vaut ${JSON.stringify(t[vide])} au lieu de null`);
+        }
+        // ET REJOUER LE GESTE NE RÉÉCRIT RIEN : le plan refuse, l'outil le dit, l'audit reste à une
+        // seule ligne. C'est le pendant du « DÉJÀ POSÉE » de la contre-passation.
+        const rejeu = L.planAnonymisation(apres, {
+          par: 'db-check', raison: 'épreuve du rejeu', nameKey: C.nameKey });
+        if (rejeu.ok || rejeu.code !== 'deja_anonymise') {
+          throw new Error('le rejeu n\'est pas refusé : ' + JSON.stringify(rejeu));
+        }
+
+        // ENFIN LA COLLISION, SUBIE ET NON IMITÉE : un second compte qui porterait déjà le pseudo
+        // anonyme fait sortir `23505`, et l'outil le DIT au lieu de deviner un suffixe.
+        const v = await creerJoueur(client, 'Voisin');
+        const plan2 = L.planAnonymisation(await base.lireUtilisateur({ userId: v }), {
+          par: 'db-check', raison: 'épreuve de la collision', nameKey: C.nameKey });
+        const squatteur = await pool.connect();
+        try {
+          await squatteur.query('update users set name = $2, name_key = $3 where id = $1',
+            [u, plan2.apres.name, plan2.apres.nameKey]);
+        } finally { squatteur.release(); }
+        const refusee = await base.anonymiser(plan2);
+        if (refusee.pose || !refusee.collision) {
+          throw new Error('la collision de name_key n\'a pas été rendue : ' + JSON.stringify(refusee));
+        }
+        if (!/name_key/.test(refusee.contrainte)) {
+          throw new Error('la contrainte qui refuse n\'est pas nommée : ' + refusee.contrainte);
+        }
+        const inchange = await base.lireUtilisateur({ userId: v });
+        if (inchange.auth_id !== 'auth-Voisin') throw new Error('la ligne a été réécrite malgré la collision');
+        const rien = await base.lireAuditJoueur({ userId: v });
+        if (rien.length !== 0) throw new Error('une raison a été consignée sans son geste');
+      } finally {
+        await base.close().catch(() => {});
+        const net = await pool.connect();
+        try {
+          await net.query(`delete from ledger_audit where user_id in
+                             (select id from users where auth_id in ($1, $2) or auth_id like 'anonyme:%')`,
+            ['auth-Anonyme', 'auth-Voisin']);
+          await net.query('delete from ledger_entries where reference in ($1, $2, $3)',
+            [String(m), `mise:${m}`, String(u)]);
+          await net.query('delete from match_traces where match_id = $1', [m]);
+          await net.query('delete from matches where user_id = $1', [u]);
+          await net.query('delete from users where id = $1', [u]);
+          await net.query(`delete from users where auth_id = 'auth-Voisin'`);
+        } finally { net.release(); }
+      }
     });
   } finally {
     partage = null;

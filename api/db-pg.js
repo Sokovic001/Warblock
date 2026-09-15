@@ -156,8 +156,18 @@ async function ledgerDe(client, { reference }) {
 // garde d'`api/test.js` relit toute constante nommée `LEDGER_*` comme une liste de colonnes du
 // GRAND LIVRE, et exigerait de `geste` ou de `raison` qu'elles soient des colonnes de
 // `ledger_entries`.
-const AUDIT_COLS = 'id, geste, operateur, raison, motif_origine, reference_origine, ' +
+const AUDIT_COLS = 'id, geste, operateur, raison, user_id, motif_origine, reference_origine, ' +
                    'reference_posee, jambes, montant_cents, cree_le';
+
+// Un geste qui ne porte sur AUCUN mouvement d'argent — l'anonymisation d'un compte — laisse les cinq
+// colonnes d'argent à NULL, et la contrainte `ledger_audit_anonymisation_complete` l'exige. `Number`
+// appliqué sans réfléchir rendrait `0`, c'est-à-dire un montant nul là où il n'y a PAS de montant :
+// le même piège de frontière que partout ailleurs dans ce fichier, à l'envers.
+function ligneAudit(l) {
+  const ou = (v, f) => (v === null || v === undefined ? null : f(v));
+  return { ...l, id: String(l.id), user_id: ou(l.user_id, String),
+           jambes: ou(l.jambes, Number), montant_cents: ou(l.montant_cents, Number) };
+}
 
 // LE JOURNAL SE RELIT, ET C'EST AUSSI IMPORTANT QUE DE L'ÉCRIRE. Un audit que seul `psql` sait lire
 // est une invitation à ouvrir `psql` — c'est-à-dire ce que ce module existe pour éviter. Il se relit
@@ -166,17 +176,26 @@ async function ledgerAuditDe(client, { motif, reference }) {
   const r = await client.query(
     `select ${AUDIT_COLS} from ledger_audit
       where motif_origine = $1 and reference_origine = $2 order by id`, [motif, reference]);
-  return r.rows.map(l => ({ ...l, id: String(l.id),
-                            jambes: Number(l.jambes), montant_cents: Number(l.montant_cents) }));
+  return r.rows.map(ligneAudit);
+}
+
+// ET IL SE RELIT AUSSI PAR LE COMPTE, depuis le module 6 : l'anonymisation ne porte sur aucun
+// mouvement, donc la lecture ci-dessus ne la retrouverait jamais. Une trace qu'on ne sait pas relire
+// par le chemin dont on part ne trace rien d'utile.
+async function ledgerAuditDeJoueur(client, { userId }) {
+  const r = await client.query(
+    `select ${AUDIT_COLS} from ledger_audit where user_id = $1 order by id`, [userId]);
+  return r.rows.map(ligneAudit);
 }
 
 async function ledgerAuditWrite(client, plan) {
   await client.query(
     `insert into ledger_audit
-       (geste, operateur, raison, motif_origine, reference_origine, reference_posee,
+       (geste, operateur, raison, user_id, motif_origine, reference_origine, reference_posee,
         jambes, montant_cents)
-     values ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [plan.geste, plan.par, plan.raison, plan.motifOrigine, plan.referenceOrigine,
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [plan.geste, plan.par, plan.raison, plan.userId === undefined ? null : plan.userId,
+     plan.motifOrigine, plan.referenceOrigine,
      plan.referencePosee, plan.jambes, plan.montantCents]);
   return { ecrites: 1 };
 }
@@ -1115,6 +1134,31 @@ function pgDb(connectionString) {
       }
     },
 
+    // Les gestes consignés sur un COMPTE, et pas sur un mouvement. L'anonymisation ne porte sur
+    // aucune écriture du livre : sans cette seconde lecture, sa trace n'aurait aucun chemin de
+    // relecture par l'outil, donc un seul chemin — `psql`.
+    async lireAuditJoueur({ userId }) {
+      const client = await pool.connect();
+      try {
+        return await ledgerAuditDeJoueur(client, { userId });
+      } finally {
+        client.release();
+      }
+    },
+
+    // Le compte lui-même, tel qu'il est. C'est la lecture dont `anonymiser` part : le plan a besoin
+    // de l'`auth_id` pour savoir si le geste a déjà été fait, et l'outil MONTRE ce qui va disparaître
+    // avant de le faire disparaître.
+    async lireUtilisateur({ userId }) {
+      const client = await pool.connect();
+      try {
+        const r = await client.query(`select ${COLS} from users where id = $1`, [userId]);
+        return r.rows[0] || null;
+      } finally {
+        client.release();
+      }
+    },
+
     // Le billet, SANS `user_id` dans la clause — et c'est la seule lecture du dépôt qui se le
     // permette. `findMatch` met le joueur dans la recherche parce qu'un identifiant deviné ne doit
     // rien apprendre sur la partie de quelqu'un d'autre ; ici il n'y a personne à protéger de
@@ -1176,6 +1220,48 @@ function pgDb(connectionString) {
       }
     },
 
+    // L'ANONYMISATION ET SA RAISON, DANS LA MÊME TRANSACTION, pour la même raison que la
+    // contre-passation : un compte réécrit sans qu'on sache pourquoi est indistinguable d'une erreur
+    // de manipulation, et ce geste-là ne se défait pas — l'`auth_id` d'origine n'est écrit nulle
+    // part ailleurs.
+    //
+    // `users.id` N'EST PAS DANS LE `set`, ET C'EST TOUT LE MODULE. Le grand livre nomme ses comptes
+    // avec lui — `joueur:<id>:disponible`, `enjeu:<match_id>` — et il est en insertion seule :
+    // déplacer l'identifiant ferait pointer des écritures immortelles sur une ligne qui n'existe
+    // plus. C'est aussi pourquoi les deux cascades du schéma sont devenues `restrict`.
+    //
+    // UNE COLLISION SUR `name_key` SORT EN `23505`, ET ON LA REND PLUTÔT QUE DE LA DEVINER. Le nom
+    // anonyme est `x<id en base 36>` : quelqu'un peut parfaitement porter ce pseudo-là. Réessayer
+    // avec un suffixe — ce que fait `findOrCreate` à l'inscription — serait le mauvais geste ici :
+    // à l'inscription on arrange un joueur qui ne remarquera rien, ici on prendrait une décision à
+    // la place d'un opérateur, sur un geste rare et manuel qui ne se défait pas.
+    async anonymiser(plan) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const r = await client.query(
+          `update users set auth_id = $2, email = $3, name = $4, name_key = $5,
+                            avatar = '', country = null, updated_at = now()
+            where id = $1 returning id`,
+          [plan.userId, plan.apres.authId, plan.apres.email, plan.apres.name, plan.apres.nameKey]);
+        if (r.rowCount === 0) {
+          await client.query('rollback');
+          return { pose: false, absent: true };
+        }
+        await ledgerAuditWrite(client, plan);
+        await client.query('commit');
+        return { pose: true };
+      } catch (e) {
+        await client.query('rollback').catch(() => {});
+        if (e && e.code === '23505') {
+          return { pose: false, collision: true, contrainte: e.constraint || '', message: e.message };
+        }
+        throw e;
+      } finally {
+        client.release();
+      }
+    },
+
     close: () => pool.end(),
   };
 }
@@ -1189,4 +1275,5 @@ function pgDb(connectionString) {
 // l'occasion. Un harnais qui recopie ce qu'il vérifie ne vérifie rien — le dossier l'a déjà payé une
 // fois — et c'est le seul contrôle qui puisse dire qu'un index SERT.
 module.exports = { pgDb, ledgerWrite, ledgerSolde, ledgerDe, ledgerAuditWrite, ledgerAuditDe,
+                   ledgerAuditDeJoueur,
                    reglerSequestre, jourDe, EXPOSITION_FENETRE_SQL, fenetreDepuis, AUDIT_COLS };

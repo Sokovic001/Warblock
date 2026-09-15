@@ -705,6 +705,102 @@ refus de `ledger_audit` nommés par leur contrainte. **Ce module touche des clau
 (run 34894629071), antérieur à `paid_seats`, aux deux index de fenêtre et à `ledger_audit`. À ce
 stade, **412 tests sur le jeu et 237 sur l'API** sans rien installer, 246 avec `jose`.
 
+### Un compte ne s'efface pas, il s'anonymise — phase 04a, module 6
+
+Deux lignes de `schema.sql` dataient de la phase 01 et personne ne les avait relues depuis :
+`matches.user_id … on delete cascade` et `match_traces.match_id … on delete cascade`. Écrites, elles
+étaient justes : `matches` ne portait alors aucun montant, et effacer un joueur emportait des lignes
+de statistique. La phase 03 les a rendues fausses **sans les toucher** — c'est la forme de défaut la
+plus silencieuse du dossier, et c'est la seconde fois qu'elle se présente.
+
+Depuis le grand livre, ces lignes sont **les pièces justificatives de mouvements d'argent qui, eux,
+restent**. `ledger_entries` est en insertion seule et nomme ses comptes avec `users.id` et
+`matches.id` : `joueur:<id>:disponible`, `enjeu:<match_id>`. Un `delete from users` détruisait donc
+la pièce en laissant l'écriture — immortelle, incorrigible autrement que par contre-passation —
+pointer sur une ligne morte. Les deux cascades sont passées en `restrict` : la suppression **échoue**
+au lieu de se propager. Écarté : l'effacement réel avec purge des écritures, qui détruit la partie
+double ; et « ne jamais supprimer de compte », qui est une règle qu'aucun code ne tient, donc pas une
+règle.
+
+**Ce qui remplace la suppression est une RÉÉCRITURE SOUS CONTRAINTES, et c'est le point où ce module
+se serait trompé.** « Anonymiser » se lit comme « effacer des colonnes », et aucune colonne de `users`
+ne peut partir : `auth_id text not null unique`, `email not null`, `name not null`, `name_key text
+not null unique`, plus `check (char_length(name) between 2 and 14)` et
+`check (char_length(name_key) between 1 and 14)`. On écrit donc à la place des valeurs qui ne
+désignent plus personne et satisfont quand même la colonne : `anonyme:<id>`, `anonyme+<id>@invalid`
+— `.invalid` est un domaine de premier niveau **réservé**, donc jamais routable — `x<id en base 36>`,
+et la clé dérivée du nom par `WBCore.nameKey`, jamais écrite à côté. `avatar` redevient `''`,
+`country` redevient `null`.
+
+**`users.id` SURVIT, et c'est tout le module.** Le déplacer ferait de `joueur:<id>` et
+`enjeu:<match_id>` des comptes désignant des lignes qui n'existent plus, sur un livre qu'on ne peut
+pas corriger. Un test le vérifie sur un identifiant de dix-neuf chiffres, et `ledgerReconcile` ne
+produit aucun grief avant comme après.
+
+**La base 36 n'est pas une coquetterie, et le `BigInt` non plus.** Un `bigserial` monte à
+9 223 372 036 854 775 807, soit treize chiffres en base 36 : `x` plus treize tient **exactement** dans
+les quatorze caractères de la colonne, là où la base 10 en aurait demandé vingt. Et l'identifiant se
+convertit en `BigInt` et jamais en `Number` : au-delà de 2^53, `Number` arrondit en silence, deux
+comptes voisins recevraient le même nom, donc la même `name_key`, donc une collision que rien
+n'explique. Le pilote Postgres rend les `bigint` en **chaîne** précisément pour cela ; on ne défait
+pas sa précaution. Le test l'éprouve sur le maximum, et compare au résultat que `Number` aurait rendu.
+
+**Le nom est calculé en JavaScript, pas en SQL**, et c'est le seul endroit où `WBCore.nameKey` et la
+contrainte de quatorze caractères se lisent ensemble. `planAnonymisation` est pure et vit dans
+`api/ledger.js`, comme `planCorrection` ; `nameKey` lui est **injectée**, parce que ce fichier porte
+une garde qui lui interdit tout `require`. C'est `api/operateur.js` qui charge `WBCore` et la lui
+passe : il n'existe jamais deux écritures de « quelle est la clé de ce pseudo ».
+
+**Une collision sur `name_key` est DITE, et l'outil s'arrête.** Quelqu'un peut porter le pseudo `x1`.
+`findOrCreate` réessaie avec un suffixe à l'inscription, et c'est le bon geste **à cet endroit-là** —
+il arrange un joueur qui ne remarquera rien. Ici, ce serait décider à la place d'un opérateur, sur un
+geste rare, manuel et qui ne se défait pas : l'`auth_id` d'origine n'est écrit nulle part ailleurs.
+
+**L'ancien pseudo redevient disponible, et c'est voulu.** Corollaire à connaître : l'historique d'un
+joueur se lit alors sur son `id` et jamais sur son nom. Toute requête qui afficherait un pseudo depuis
+une jointure confondrait deux personnes — un test le montre en faisant reprendre le pseudo libéré par
+un compte neuf, et en vérifiant que le billet de l'ancien reste attaché à son identifiant.
+
+**La trace partage la transaction, et elle ne garde PAS ce qu'elle efface.** `ledger_audit` reçoit un
+`user_id`, clé étrangère `restrict` vers `users`, et `AUDIT_GESTES` passe à deux membres — le second
+entre le jour où quelque chose l'écrit, pas avant, exactement comme le module 5 l'avait chiffré : une
+valeur dans le `check`, une dans la liste, un test. Une contrainte jumelle de celle des
+contre-passations, `ledger_audit_anonymisation_complete`, **exige** le compte et **interdit** les cinq
+colonnes d'argent : une anonymisation ne bouge pas un centime, et une ligne qui porterait les deux
+moitiés se lirait comme une correction du livre. Les cinq colonnes sont `null` et non zéro — `null` se
+lit « pas de montant », `0` se lirait « un montant nul ». Ce que la trace ne garde pas : l'ancien
+email, l'ancien `auth_id`, l'ancien pseudo. Un journal qui les conserverait n'anonymiserait rien.
+L'opérateur, lui, les a vus : l'outil montre avant d'écrire, et la sortie de terminal ne va nulle part
+en base.
+
+**LA SURFACE DE RÉGRESSION DE CE MODULE EST VIDE, et il fallait le dire plutôt que prétendre l'avoir
+prouvé.** Il n'existe aujourd'hui aucune route ni aucune méthode qui supprime un compte : le seul
+`delete` du pilote reste la purge nommée de `match_traces`. Le passage en `restrict` ne peut donc rien
+casser — mais « aujourd'hui » est une date, pas une propriété, et c'est un **test** qui l'affirme, pas
+une lecture. Son unique effet observable est un refus, et un refus de contrainte ne se constate que
+contre une vraie base.
+
+**Le trou qui reste, nommé et chiffré.** `findOrCreate` cherche par `auth_id`. Un joueur anonymisé qui
+se reconnecte avec le même email obtient une ligne **neuve** — son `auth_id` Crossmint n'est plus dans
+la base — et une nouvelle `DOTATION_CENTS` de 5 000 centimes. C'est un **robinet à crédits**, dans la
+phase qui existe pour borner ce que la maison émet. Ce qui le tient aujourd'hui : **il n'existe aucune
+route qui demande l'anonymisation**, donc le robinet exige que l'opérateur l'ouvre lui-même, un compte
+à la fois. Le jour où une route de suppression existera — le jour où une juridiction l'imposera —
+elle devra porter une **empreinte de l'`auth_id`** dans une table en **insertion seule**, lue par
+`findOrCreate` avant de doter. Chiffré : une table, un index unique, une lecture, un test.
+
+**Ce que seule l'intégration continue peut montrer, et c'est la quatrième propriété de la phase dans
+ce cas.** `api/db-check.js` reçoit trois cas neufs : un `delete from users` refusé par
+`matches_user_id_fkey` tant qu'un billet référence la ligne, un `delete from matches` refusé par
+`match_traces_match_id_fkey`, et l'anonymisation de bout en bout — l'audit qu'on fait échouer sur une
+vraie contrainte, la ligne `users` restée intacte, puis le cas nominal, le rejeu refusé et la
+collision de `name_key` **subie** au lieu d'être imitée. Une doublure ne peut pas subir une
+contrainte. **Le job `db` n'a pas pu être lancé sur la machine de travail** : ni Postgres, ni
+`docker`, ni `podman`, ni `psql`, ni `initdb`, ni `pg_ctl`, ni `gh`, vérifié une fois de plus. Le
+dernier passage vert connu reste celui du 2026-09-15 (run 34894629071), antérieur à `paid_seats`, aux
+deux index de fenêtre, à `ledger_audit` et aux deux cascades renversées. À ce stade, **412 tests sur
+le jeu et 248 sur l'API** sans rien installer, 257 avec `jose`.
+
 ## Trois choses consignées avant le premier euro
 
 Aucune des trois n'est de l'architecture, aucune n'apparaît dans le plan en sept phases, et toutes
@@ -804,6 +900,49 @@ coéquipier se bat encore annonce le nombre d'équipes **plus un**. La borne a �
 le joueur refusé. C'est le troisième contrôle qui s'avère faux à l'usage, après les deux que la
 spécification avait déjà écartés — la leçon se répète : une règle de plausibilité se vérifie contre
 le code du jeu, jamais contre l'intuition.
+
+## Quatre phrases sur le dépôt, consignées par la 04a pour la 04b
+
+Elles ne sont **pas construites** ici : la phase 04a n'ouvre aucun dépôt, et un membre de liste fermée
+que personne n'écrit est une case en attente d'être créée de travers. Mais chacune est la
+transposition exacte d'une doctrine que le dépôt tient déjà, et les écrire maintenant coûte un
+paragraphe quand les redécouvrir coûtera un crédit en double.
+
+1. **Un seul écrivain, et ce n'est pas le webhook.** Le webhook **réveille** ; il ne décide pas.
+   C'est le patron de `first_result_at` et du veilleur : l'événement extérieur déclenche, le serveur
+   arbitre.
+2. **Le montant vient d'une RELECTURE chez le prestataire, jamais du corps signé.** C'est
+   « le serveur ne croit plus aucun fait déclaré : il rejoue », transposé de la partie au paiement.
+   Un corps signé prouve qui parle, pas ce qui a été payé.
+3. **La référence d'idempotence nomme L'ARGENT — l'identifiant de paiement — et non le MESSAGE.**
+   Deux messages peuvent décrire le même paiement ; c'est le paiement qui ne doit être crédité
+   qu'une fois. La clé `(motif, reference, compte_debit, compte_credit)` du grand livre l'arbitrera,
+   comme elle arbitre déjà la dotation et la contre-passation.
+4. **Aucune colonne de statut.** Un dépôt est payé **si et seulement si** le livre porte son
+   mouvement. Un statut qu'on écrit est une case qu'on écrase — la doctrine de `user_stats`, du
+   solde, et de tout ce que ce journal a déjà tranché deux fois.
+
+## Deux migrations gratuites aujourd'hui, chères après le premier euro
+
+Elles n'ont **aucun appelant**, et la 04a en avait déjà un sans elles. Mais leur fenêtre se referme au
+premier euro, et c'est exactement la leçon de `user_stats` et de `seed_secret` passée à 128 bits :
+tant qu'aucune base de production n'existe, renommer ne coûte rien ; après, il faut une reprise de
+données et une fenêtre de maintenance.
+
+**Échéance nommée : avant la première écriture de production**, c'est-à-dire avant le premier module
+de la 04b qui touche une base qui garde ses données.
+
+**(a) La devise en premier segment du nom de compte.** `fictif:joueur:7:disponible`, `reel:enjeu:12`,
+avec une contrainte « les deux comptes d'une ligne portent le même segment ». Le croisement de
+monnaies devient alors **structurellement impossible** au lieu d'être asserté, et `reel:maison:dotation`
+cesse d'être **engendrable** : la maison ne peut pas frapper d'argent réel, tenu par une expression
+régulière et non par un `if`. C'est la même nature de garantie que « une écriture est une
+ligne-transfert », qui rend la partie double structurelle.
+
+**(b) Le séquestre portant le pot notionnel entier `mise × sièges` dès l'ouverture.** La solvabilité
+du règlement devient une **conséquence** de la conservation déjà assertée plutôt qu'une espérance, et
+`mouvementGain` perd une branche. Après le premier euro, cela demande de rejouer l'historique des
+séquestres ; aujourd'hui, c'est une fonction et un test.
 
 ---
 
@@ -1048,6 +1187,45 @@ passe contre la doublure prouve la doublure.
   **solde** inviolable ; elle ne rend pas la **partie** honnête — le vol de précision, aimbot et ESP,
   reste entier et structurel.
 
+## État après la phase 04a
+
+- Le jeu n'a toujours pas changé de nature : un seul `index.html`, sans build, sans bundler, sans
+  React, **jouable sans compte ni serveur, graine comprise**. Trois blocs `<script>`, tous internes.
+  La phase ne lui a rien ajouté d'autre que deux fonctions pures et un membre de plus dans une liste
+  fermée : `WBCore.horlogePlancher`, `ENVELOPPE.margePlancherS`, et `plafond` dans `REFUS_SAS`.
+  **`SIM_VERSION` n'a pas bougé.**
+- **L'exposition de la maison est bornée, et la borne REFUSE.** `409 plafond` à l'ouverture du billet,
+  jamais au règlement — une garde textuelle et un parcours de tous les chemins de clôture le tiennent,
+  parce que refuser une partie gagnée serait irréparable. Le **plafond par joueur** est exact, lu dans
+  la transaction et sous le verrou de ligne qui existait déjà ; le **fusible global** est approché, lu
+  hors transaction et amorti à soixante secondes sur l'horloge injectée. Les cinq nombres sont des
+  entiers, et `PLAFOND_JOUEUR_CENTS` est **dérivé** du pire cas de la table la plus chère, recalculé
+  par le test depuis `WBCore`.
+- **Un règlement qui PAIE exige une attente réelle.** Elle était **nulle** sur le chemin
+  d'encaissement Resurgence, celui qui porte le plus gros paiement du dossier. Le refus `plancher`
+  est armé sur tout règlement dont le net est positif, et sur lui seul.
+- **`matches` enregistre combien de sièges un humain a payés.** `paid_seats`, écrite par le serveur,
+  figée à l'ouverture, bornée par `between 1 and seats`, valant 1 partout — **dormante et assumée
+  telle**, sans lecteur, parce qu'après coup le chiffre serait irrécupérable.
+- **La correction du grand livre a un appelant, et ce n'est pas une route.** `api/operateur.js`, en
+  ligne de commande, avec `montrer` avant `contrepasser` et `anonymiser`. `ledger_audit` est en
+  insertion seule et partage la **transaction** de ce qu'elle justifie. Aucune route d'administration
+  n'existe, et une garde textuelle le vérifie.
+- **Un compte ne s'efface plus, il s'anonymise.** Les deux cascades de la phase 01 sont en
+  `restrict` ; `users.id` survit toujours, sans quoi `joueur:<id>` et `enjeu:<match_id>`
+  désigneraient des lignes mortes.
+- **412 tests sur le jeu, 248 sur l'API** sans rien installer, 257 avec `jose`. Aucune base, aucun
+  réseau, aucun navigateur : tout est injecté.
+- **QUATRE PROPRIÉTÉS DE CETTE PHASE N'ONT DE PREUVE QU'EN INTÉGRATION CONTINUE**, et le job `db` n'a
+  pas pu être lancé une seule fois pendant les six modules : deux ouvertures simultanées qui ne
+  franchissent pas le plafond à deux, la requête de fenêtre qui ne balaie pas `ledger_entries`,
+  l'audit dont le `rollback` est arbitré par Postgres, et le `delete from users` refusé. Le dernier
+  passage vert connu est celui du 2026-09-15 (run 34894629071), **antérieur à tout ce que la phase a
+  écrit en SQL**. Le premier push de la branche déclenche le job, et c'est LE moment de le regarder.
+- **Toujours aucun euro.** La phase borne le **bord** de l'argent réel ; elle n'ouvre aucun dépôt, et
+  elle ne rend pas la partie honnête — le vol de précision reste entier, et c'est lui qui dimensionne
+  le plafond.
+
 ## Ce qui reste ouvert
 
 - **Lobby mobile** : la version actuelle est une adaptation du desktop, pas une conception propre.
@@ -1099,13 +1277,20 @@ passe contre la doublure prouve la doublure.
   couverte, pas sa dramaturgie — les bots y sont remplacés par une conduite de quelques lignes. Le
   trou se referme au module 5, pas avant. La seule preuve que le gaz déterministe n'a pas rendu les parties
   ennuyeuses reste un humain qui joue une partie entière.
-- **L'écran de FIN crédite le portefeuille de démonstration sur l'économie de l'instant, pas sur
-  celle du coup d'envoi.** Le sas a été corrigé à la recette de la 03 — il lit `W.enLigne` — l'écran
-  de fin ne l'a pas été : `demoCredit(take.net)` y consulte `Auth.online()`, si bien qu'un jeton mort
-  pendant la partie fait atterrir dans l'économie de démonstration un gain que le grand livre n'a pas
-  accordé, jusqu'à quarante fois la mise. La raison de la retenue et le prix des deux options sont
-  écrits plus haut, avec la recette ; ce qui manque est une **décision écrite** et un test, à prendre
-  avec la session de jeu réelle, qui verra les deux écrans.
+- ~~**L'écran de FIN crédite le portefeuille de démonstration sur l'économie de l'instant, pas sur
+  celle du coup d'envoi.**~~ **FERMÉ, et ce journal était en retard, pas le code.** Le correctif date
+  du commit `8f0a63f`, « L'economie de la fin de partie est celle du coup d'envoi » : `startMatch`
+  reçoit désormais l'économie du sas et la fige dans `matchEnLigne` (`index.html` lignes 4124 et
+  6702), et l'écran de fin lit `if(!matchEnLigne) demoCredit(take.net);` (ligne 6902) au lieu
+  d'interroger `Auth.online()`. Un test de `test.js` (ligne 3340) tient les trois moitiés : la
+  signature qui transporte l'économie, le gel au coup d'envoi, et l'absence de tout `demoCredit`
+  non gardé dans l'écran de fin. La **décision écrite** qui manquait est donc prise : les deux bouts
+  d'une partie nomment la même économie, celle du coup d'envoi, exactement comme le sas nomme celle
+  de son entrée. Ce qui reste derrière, et qui n'est pas la même chose : **personne n'a encore VU les
+  deux écrans dans un navigateur avec un vrai serveur** — c'est la session de jeu réelle, ci-dessous.
+  *Relevé à la clôture de la phase 04a : cette entrée annonçait un défaut refermé depuis quatre
+  commits, et rien ne l'avait signalé. Un point ouvert qui décrit du code est un point ouvert qui
+  périme.*
 - **La session de jeu réelle due après le module 1 de la 02b n'a toujours pas eu lieu**, et la phase
   03 est finie sans elle non plus. Elle a maintenant un **cinquième** point à juger, arrivé avec le
   module 5 de la phase 03 : **deux économies sur le même écran**, connecté et hors ligne. Ce que
@@ -1126,10 +1311,15 @@ passe contre la doublure prouve la doublure.
   contre-passation reçoit son unique appelant, et il n'est pas une route ». `api/operateur.js` est
   cet appelant, en ligne de commande et jamais en HTTP ; `ledger_audit` est le journal, en insertion
   seule, et il partage la **transaction** de l'écriture d'argent ; `planCorrection` est la partie
-  pure qui décide, et elle refuse un mouvement portant sur un billet encore `open`. Ce qui reste
-  ouvert derrière, et qui n'est pas la même chose : **la suppression de compte et le changement de
-  pseudo tracés**, renvoyés au module 6 de la même phase — c'est lui qui passe les cascades en
-  `restrict` et qui écrit le verbe `anonymiser`, avec son `geste` dans la même table.
+  pure qui décide, et elle refuse un mouvement portant sur un billet encore `open`. Ce qui restait
+  ouvert derrière — **la suppression de compte** — est fermé par le module 6 : les cascades sont en
+  `restrict`, le verbe `anonymiser` existe, et son `geste` est consigné dans la même table. Ce qui
+  reste encore : **le changement de pseudo n'est pas tracé.** `PATCH /api/me` écrit `name` et
+  `name_key` sans rien consigner, et ce n'est pas un oubli — c'est une route du client, donc un geste
+  fréquent, donc une décision de volume et de rétention que rien n'a prise. Et **la route de
+  suppression de compte n'existe pas** : le jour où une juridiction l'imposera, elle devra porter une
+  empreinte d'`auth_id` en table d'insertion seule, lue par `findOrCreate` avant de doter — sans quoi
+  un compte anonymisé qui se reconnecte se fait doter une seconde fois.
 - **Le sort de la quarantaine**, et le seuil sur `ecart_cents` : renvoyés à la phase 06, sur des
   données réelles. La phase 03 produit ce qui manquait pour trancher — un rendement de quarantaine
   **en centimes** et non plus en nombre de lignes — et n'ajoute délibérément aucun motif de

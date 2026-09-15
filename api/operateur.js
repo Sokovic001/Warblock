@@ -29,15 +29,30 @@
 // séquestre incohérent avec le statut de la ligne. Le refus porte un nom, `billet_ouvert`, et il est
 // le seul de la liste à regarder ailleurs que dans le livre.
 //
-// LA PARTIE QUI DÉCIDE N'EST PAS ICI : c'est `L.planCorrection`, pure, dans `api/ledger.js`, donc
-// entièrement testable sans base. Ce fichier est un pilote — il lit, il imprime, il confirme — et
-// une décision qui vit dans un pilote ne se prouve qu'en le lançant.
+// LE SECOND VERBE D'ÉCRITURE, DEPUIS LE MODULE 6 : `anonymiser`. Il ne touche pas un centime, et il
+// est pourtant ici plutôt qu'ailleurs, parce que c'est le même registre — un geste manuel, rare,
+// irréversible, fait par quelqu'un qui détient les identifiants de la base et qui doit dire
+// pourquoi. Le schéma portait depuis la phase 01 deux cascades qui, en effaçant un compte,
+// détruisaient les PIÈCES JUSTIFICATIVES de mouvements d'argent qui, eux, restent : elles sont
+// passées en `restrict`, et un compte ne s'efface plus, il se RÉÉCRIT. `users.id` survit toujours,
+// sans quoi `joueur:<id>` et `enjeu:<match_id>` désigneraient des lignes mortes.
+//
+// LA PARTIE QUI DÉCIDE N'EST PAS ICI : c'est `L.planCorrection` et `L.planAnonymisation`, pures,
+// dans `api/ledger.js`, donc entièrement testables sans base. Ce fichier est un pilote — il lit, il
+// imprime, il confirme — et une décision qui vit dans un pilote ne se prouve qu'en le lançant.
 //
 // AUCUNE DÉPENDANCE NOUVELLE, ET AUCUN SECRET : les identifiants de la base viennent de
 // `DATABASE_URL`, comme dans `api/main.js`.
 'use strict';
 
 const L = require('./ledger');
+// `WBCore`, pour `nameKey` et pour elle seule. La clé d'unicité d'un pseudo est une règle du JEU —
+// « Loïc », « loic » et « LO.IC » sont le même nom à l'œil — et elle vit donc dans `index.html`,
+// chargée par `api/core.js` comme partout ailleurs dans ce dossier. `api/ledger.js` ne peut pas
+// l'appeler : il porte une garde de pureté qui lui interdit tout `require`. C'est donc ce pilote qui
+// la lui passe, et le nom d'un compte anonymisé se dérive exactement de la même fonction que celui
+// d'un joueur inscrit — il n'existe jamais deux écritures de « quelle est la clé de ce pseudo ».
+const C = require('./core');
 
 const AIDE = `Warblock — outil d'opération du grand livre.
 
@@ -54,7 +69,8 @@ LIRE (n'écrit rien, n'exige aucune confirmation) :
       C'est ce qui répond à « pourquoi ce billet a-t-il été refusé en plafond ».
 
   montrer exposition <userId>
-      L'exposition réalisée du joueur sur la fenêtre glissante, et ce qu'il lui reste.
+      L'exposition réalisée du joueur sur la fenêtre glissante, ce qu'il lui reste,
+      et les gestes d'opération déjà consignés sur son compte.
 
 CORRIGER (écrit, et exige une raison, un nom et --confirme) :
 
@@ -63,6 +79,14 @@ CORRIGER (écrit, et exige une raison, un nom et --confirme) :
       Avec --confirme, pose la contre-passation ET sa raison dans la MÊME transaction.
       Rejouer la commande ne pose rien une seconde fois, et le dit.
 
+  anonymiser <userId> --par "<qui>" --raison "<pourquoi>" [--confirme]
+      Sans --confirme, montre ce qui serait réécrit et n'écrit RIEN.
+      Avec --confirme, réécrit la ligne users ET consigne la raison dans la MÊME transaction.
+      L'identifiant du compte NE BOUGE PAS : joueur:<id> et enjeu:<match_id> restent des
+      comptes valides du grand livre, qui est immortel. Partent : auth_id, email, pseudo,
+      avatar et pays. L'ancien pseudo redevient disponible — l'historique d'un joueur se
+      lit donc sur son id et jamais sur son nom.
+
 CE QUE CET OUTIL NE FAIT PAS, ET OÙ ALLER :
 
   Un billet encore « open » n'est PAS contre-passable, et le refus s'appelle billet_ouvert.
@@ -70,6 +94,11 @@ CE QUE CET OUTIL NE FAIT PAS, ET OÙ ALLER :
   et vide le séquestre vers maison:contrepartie. Contre-passer une écriture d'un billet
   ouvert laisserait son séquestre incohérent avec son statut : c'est le seul cas où une
   correction du livre casserait ce que la réconciliation vérifie.
+
+  Un compte ne s'EFFACE pas. Les cascades du schéma sont en « restrict » depuis la phase
+  04a : un delete from users est REFUSÉ tant qu'un billet référence la ligne, parce que ce
+  billet est la pièce justificative d'un mouvement d'argent qui, lui, reste. Le geste
+  disponible est « anonymiser », et c'est une réécriture.
 
   Le grand livre reste en INSERTION SEULE : il n'existe ici ni update, ni delete, et il ne
   doit jamais en exister. Une écriture modifiée est une preuve détruite.
@@ -141,6 +170,7 @@ async function executer(argv, { db, sortie = console.log, maintenant = Date.now 
 
   if (a.verbe === 'montrer') return montrer(a, { db, dit, maintenant });
   if (a.verbe === 'contrepasser') return contrepasser(a, { db, dit, maintenant });
+  if (a.verbe === 'anonymiser') return anonymiser(a, { db, dit });
 
   dit(`verbe inconnu : ${a.verbe}`);
   dit('');
@@ -240,6 +270,13 @@ async function montrer(a, { db, dit, maintenant }) {
     dit(`  retenue après clamp : ${verdict.expositionCents} centimes`);
     dit(`  plafond            : ${verdict.plafondCents} centimes`);
     dit(`  marge restante     : ${verdict.plafondCents - verdict.expositionCents} centimes`);
+    // ET CE QUE LE JOURNAL D'OPÉRATION DIT DE CE COMPTE. L'anonymisation ne porte sur aucune
+    // écriture du livre, donc `montrer mouvement` ne la retrouverait jamais : sans cette lecture-ci,
+    // sa trace n'aurait qu'un seul chemin de relecture, `psql`, c'est-à-dire celui que cet outil
+    // existe pour fermer.
+    const gestes = await db.lireAuditJoueur({ userId });
+    if (gestes.length === 0) dit('  aucun geste d\'opération consigné sur ce compte');
+    else for (const g of gestes) dit(`  ${g.geste} par ${g.operateur} le ${g.cree_le} : ${g.raison}`);
     return 0;
   }
 
@@ -312,6 +349,81 @@ async function contrepasser(a, { db, dit, maintenant }) {
   }
   dit('');
   dit(`POSÉE : ${r.jambes} jambe(s), ${r.montantCents} centimes, avec sa raison, dans la même transaction.`);
+  return 0;
+}
+
+// UN COMPTE NE S'EFFACE PAS, IL S'ANONYMISE. Le schéma portait depuis la phase 01 deux cascades que
+// personne n'avait regardées — `matches` sur `users`, `match_traces` sur `matches` — et un
+// `delete from users` détruisait donc les PIÈCES JUSTIFICATIVES de mouvements d'argent qui, eux,
+// restent : le grand livre est en insertion seule et nomme ses comptes avec `users.id` et
+// `matches.id`. Les deux cascades sont passées en `restrict`, et ce verbe est le geste qui remplace
+// la suppression.
+//
+// CE QUI NE BOUGE PAS EST LE POINT DU MODULE : `users.id`. Le déplacer ferait de `joueur:<id>` et
+// `enjeu:<match_id>` des comptes désignant des lignes mortes, sur un livre qu'on ne peut pas
+// corriger. Tout le reste de l'identité est réécrit, pas supprimé — aucune de ces colonnes ne peut
+// « partir », elles sont toutes `not null`.
+async function anonymiser(a, { db, dit }) {
+  const userId = a.positions[0];
+  if (!userId) {
+    dit('usage : anonymiser <userId> --par "<qui>" --raison "<pourquoi>" [--confirme]');
+    return 2;
+  }
+  if (!ID_RE.test(userId)) { dit(`identifiant de joueur illisible : ${userId}`); return 2; }
+
+  const ligne = await db.lireUtilisateur({ userId });
+  const plan = L.planAnonymisation(ligne, { par: a.par, raison: a.raison, nameKey: C.nameKey });
+  if (!plan.ok && plan.code === 'deja_anonymise') {
+    // REJOUER LE GESTE NE RÉÉCRIT RIEN, ET CE N'EST PAS UNE PANNE — même doctrine que « DÉJÀ POSÉE »
+    // sur la contre-passation. Réécrire les mêmes valeurs n'aurait rien cassé, mais aurait consigné
+    // une SECONDE ligne d'audit, donc raconté deux gestes là où il n'y en a eu qu'un.
+    dit(`DÉJÀ ANONYMISÉ : ${plan.message}`);
+    dit('Rien n\'a été écrit cette fois-ci, et la ligne porte déjà son identité anonyme.');
+    return 0;
+  }
+  if (!plan.ok) { dit(`REFUSÉ (${plan.code}) : ${plan.message}`); return 1; }
+
+  // ON MONTRE AVANT D'ÉCRIRE, TOUJOURS. Ici plus qu'ailleurs : le geste ne se défait pas, l'`auth_id`
+  // d'origine n'est écrit nulle part ailleurs, et la sortie de terminal est la seule trace de ce que
+  // l'opérateur avait sous les yeux — elle ne part PAS dans `ledger_audit`, qui n'anonymiserait plus
+  // rien s'il gardait l'ancien email.
+  dit(`anonymisation du compte ${plan.userId}`);
+  dit('  ce qui disparaît :');
+  dit(`    auth_id  ${plan.avant.authId}`);
+  dit(`    email    ${plan.avant.email}`);
+  dit(`    pseudo   ${plan.avant.name}  (clé ${plan.avant.nameKey})`);
+  dit(`    avatar   ${plan.avant.avatar === '' ? '(vide)' : plan.avant.avatar}`);
+  dit(`    pays     ${plan.avant.country === null || plan.avant.country === undefined ? '(aucun)' : plan.avant.country}`);
+  dit('  ce qui est écrit à la place :');
+  dit(`    auth_id  ${plan.apres.authId}`);
+  dit(`    email    ${plan.apres.email}`);
+  dit(`    pseudo   ${plan.apres.name}  (clé ${plan.apres.nameKey})`);
+  dit(`  l'identifiant ${plan.userId} NE BOUGE PAS : ${L.compteJoueur(plan.userId)} reste un compte valide.`);
+  dit(`  l'ancien pseudo « ${plan.avant.name} » redevient disponible : l'historique se lit sur l'id.`);
+  dit(`  par     : ${plan.par}`);
+  dit(`  raison  : ${plan.raison}`);
+
+  if (!a.confirme) {
+    dit('');
+    dit('RIEN N\'A ÉTÉ ÉCRIT. Relance la même commande avec --confirme pour réécrire cette ligne.');
+    return 0;
+  }
+
+  const r = await db.anonymiser(plan);
+  if (!r.pose && r.absent) { dit(''); dit(`REFUSÉ : le compte ${plan.userId} a disparu entre-temps.`); return 1; }
+  if (!r.pose && r.collision) {
+    // LA COLLISION EST DITE, ET L'OUTIL S'ARRÊTE. Le nom anonyme est `x<id en base 36>` : quelqu'un
+    // peut parfaitement porter ce pseudo-là. `findOrCreate` réessaie avec un suffixe à l'inscription,
+    // et c'est le bon geste À CET ENDROIT-LÀ — il arrange un joueur qui ne remarquera rien. Ici, ce
+    // serait décider à la place de l'opérateur, sur un geste rare, manuel et irréversible.
+    dit('');
+    dit(`REFUSÉ (collision) : ${r.message}`);
+    dit(`Quelqu'un porte déjà « ${plan.apres.name} » ou l'identité ${plan.apres.authId}.`);
+    dit('Rien n\'a été écrit. Fais changer ce pseudo-là, puis relance : deviner à ta place serait pire.');
+    return 1;
+  }
+  dit('');
+  dit(`ANONYMISÉ : la ligne ${plan.userId} et sa raison, dans la même transaction.`);
   return 0;
 }
 

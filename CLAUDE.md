@@ -51,8 +51,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
   n'est pas testable automatiquement (il lui faut un navigateur), donc plus la logique y descend,
   mieux le projet se porte.
 - **Lancer `npm test` après chaque modification.** 412 tests sur le jeu (`node test.js`) et
-  237 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
-  pour les autres. `api/test.js` en ajoute neuf — 246 en tout — de bout en bout avec de la vraie
+  248 sur l'API (`node api/test.js`), aucune dépendance ni base de données pour les uns comme
+  pour les autres. `api/test.js` en ajoute neuf — 257 en tout — de bout en bout avec de la vraie
   cryptographie, quand `jose` est installé ; l'intégration continue le lance deux fois, avant et
   après installation, pour que les deux promesses tiennent. Ce compte est écrit à **quatre**
   endroits — ici, `README.md`, `api/README.md` et `docs/HISTORIQUE.md` — et il a décroché à la
@@ -343,8 +343,8 @@ porte : le reste a besoin d'un navigateur pour tourner.
   montre, exige une raison écrite, un nom et `--confirme`, puis pose l'écriture **et sa raison dans la
   même transaction** : une raison consignée après coup peut ne jamais l'être, et une contre-passation
   sans raison est indistinguable d'une erreur de manipulation. `ledger_audit` est en insertion seule
-  et porte un **`geste`** — le module 6 y écrira l'anonymisation — mais sa liste est **fermée à un
-  membre** tant que personne n'écrit le second. La partie qui décide est **pure** :
+  et porte un **`geste`**, dont la liste est fermée et compte **deux** membres : un membre n'y entre
+  que le jour où quelque chose l'écrit. La partie qui décide est **pure** :
   `WBCore` n'en sait rien, `planCorrection` vit dans `api/ledger.js` et rend un refus **nommé** plutôt
   que de lancer. **Un mouvement portant sur un billet encore `open` est refusé** (`billet_ouvert`) :
   c'est le seul cas qui laisserait un séquestre incohérent avec son statut, et un billet ouvert coincé
@@ -353,6 +353,26 @@ porte : le reste a besoin d'un navigateur pour tourner.
   cesserait de la voir. Rejouer l'outil ne pose rien et **le dit**, et un gain contre-passé rend les
   quatre comptes touchés au centime — mais **réhabite le séquestre** de sa ligne, grief légitime que
   `ledgerReconcile` prononce et qu'un test asserte au lieu de le taire.
+- **Un compte ne s'efface pas, il s'anonymise, et son `id` SURVIT.** Les deux cascades écrites à la
+  phase 01 — `matches` sur `users`, `match_traces` sur `matches` — sont devenues **fausses sans être
+  touchées** le jour où le grand livre est arrivé : ces lignes sont les **pièces justificatives** de
+  mouvements d'argent qui, eux, restent, et `ledger_entries` nomme ses comptes avec `users.id` et
+  `matches.id`. Elles sont en `restrict` : la suppression **échoue**. Le geste qui la remplace est le
+  second verbe d'`api/operateur.js`, et c'est une **réécriture sous contraintes**, pas une
+  suppression de colonnes — `auth_id`, `email`, `name` et `name_key` sont `not null`, deux sont
+  uniques, deux `check` bornent les longueurs. On écrit `anonyme:<id>`, `anonyme+<id>@invalid`
+  (`.invalid` est réservé, donc jamais routable), `x<id en base 36>` — quatorze caractères au plus,
+  un `bigserial` tenant sur treize chiffres en base 36 — et la clé **dérivée** du nom par
+  `WBCore.nameKey`, jamais écrite à côté. L'identifiant se convertit en `BigInt` et **jamais** en
+  `Number` : au-delà de 2^53 deux comptes voisins recevraient le même nom. Une collision sur
+  `name_key` est **dite** et arrête l'outil — deviner à la place de l'opérateur, sur un geste rare et
+  irréversible, serait pire. La trace partage la transaction, ne garde **pas** l'ancienne identité, et
+  se relit par le compte. **La surface de régression est vide, et c'est un test qui le dit** : aucune
+  route ne supprime un compte, donc le seul effet observable est un refus que seule l'intégration
+  continue peut montrer. Le trou qui reste est **nommé et chiffré** : `findOrCreate` cherche par
+  `auth_id`, donc un compte anonymisé qui se reconnecte est doté une seconde fois — une route de
+  suppression devra porter une empreinte d'`auth_id` en table d'insertion seule, soit une table, un
+  index unique, une lecture, un test.
 - **La conservation de l'argent est assertée au règlement**, sur la partie réellement rejouée ; si
   elle est fausse, c'est le serveur qui se trompe, et il n'écrit aucun montant.
 - **Le solde est une SOMME d'écritures, et les routes l'écrivent.** La dotation et la recharge sont
@@ -477,11 +497,22 @@ tout solde y est modifiable depuis la console.
   nulle part. **Aucun euro n'entre** : les comptes sont en crédits fictifs, dotés par la maison.
 - Phase 04 — l'argent réel. Comme la 02, elle s'est révélée être deux chantiers, et les deux moitiés
   sont nommées pour qu'on ne croie jamais la phase finie alors qu'elle ne l'est qu'à moitié :
-  - Phase 04a — le **bord** de l'argent réel. **EN COURS**, spécification écrite :
-    `docs/PHASE-04A.md`. Elle ne contient aucun dépôt : elle livre les prérequis que ce fichier et
+  - Phase 04a — le **bord** de l'argent réel. **FAITE, les six modules livrés** — spécification :
+    `docs/PHASE-04A.md`. Ce qu'elle a tranché : le plafond d'exposition **refuse** à l'ouverture du
+    billet, exact par joueur sous le verrou et approché pour la maison hors transaction ; un
+    règlement qui **paie** exige une attente réelle, qui était nulle sur le chemin d'encaissement le
+    plus cher ; `matches` enregistre les sièges payés, dormante et assumée telle ; la
+    contre-passation a un appelant, et c'est un **outil** en ligne de commande, jamais une route ;
+    un compte ne s'efface plus, il s'**anonymise**, et `users.id` survit. **Réserve, et elle est
+    entière : le job `db` n'a pas tourné une seule fois pendant les six modules.** Quatre propriétés
+    nouvelles n'ont de preuve que là — deux ouvertures simultanées sous le plafond, la requête de
+    fenêtre qui ne balaie pas le livre, l'audit dont le `rollback` est arbitré par Postgres, et le
+    `delete from users` refusé — et le dernier passage vert connu (run 34894629071, 2026-09-15) est
+    **antérieur à tout ce que la phase a écrit en SQL**.
+    Elle ne contient aucun dépôt : elle livre les prérequis que ce fichier et
     `docs/HISTORIQUE.md` déclarent eux-mêmes bloquants — un **plafond d'exposition** décidé à
     l'ouverture du billet, le **compte des sièges payés** que `matches` n'enregistrait pas, et **qui
-    a le droit de contre-passer** — plus une cascade de schéma qui détruit aujourd'hui les pièces
+    a le droit de contre-passer** — plus deux cascades de schéma qui détruisaient les pièces
     justificatives d'un compte effacé, et un **plancher d'horloge** sur les règlements qui paient.
     Six modules. Rien n'y ouvre de table en argent réel, `SIM_VERSION` ne bouge pas, et le jeu ne
     reçoit qu'un membre de plus dans `WBCore.REFUS_SAS` et une fonction pure de plus dans `WBCore`.
@@ -512,6 +543,14 @@ tout solde y est modifiable depuis la console.
     nommé `billet_ouvert`, et la garde « aucune route d'administration ». `mouvementContrepassation`
     cesse d'être du code mort. Troisième module de la phase à toucher des clauses SQL : le job `db` le
     concerne, et il n'a pas pu être lancé sur la machine de travail.
+    *Module 6* : **livré**, et il ferme la phase. Les deux cascades de la phase 01 passent en
+    `restrict` ; `api/operateur.js` reçoit `anonymiser`, une **réécriture sous contraintes** où
+    `users.id` survit toujours ; `ledger_audit` reçoit un `user_id` et un second geste ;
+    `docs/HISTORIQUE.md` reçoit l'état après la phase, la doctrine de dépôt en quatre phrases, les
+    deux migrations gratuites avec leur échéance, et corrige son entrée périmée sur l'écran de fin.
+    Quatrième module à toucher des clauses SQL, et le seul dont la **surface de régression est
+    vide** : un test le dit plutôt qu'une lecture. Le job `db` le concerne, et il n'a pas pu être
+    lancé sur la machine de travail.
   - Phase 04b — le **dépôt** lui-même : compte fournisseur de paiement, webhook d'encaissement,
     idempotence sur l'événement PSP, vérification d'identité, cadre légal. Le motif `depot` du grand
     livre s'ouvre là et pas avant. Rien ne s'en vérifie sans hébergement.

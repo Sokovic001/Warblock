@@ -558,12 +558,13 @@ function plafondVerdict({ expositionRealiseeCents, expositionBilletCents, plafon
 // qu'elle se teste : `api/operateur.js` est un pilote — il lit la base, il écrit, il imprime — et
 // une décision qui vit dans un pilote ne se prouve qu'en le lançant.
 //
-// LES GESTES TRACÉS, liste fermée à UN membre. Le module 6 y ajoutera `anonymisation` ; l'y mettre
-// aujourd'hui serait exactement ce que le dossier refuse depuis le motif de libération de
-// quarantaine — « un membre de liste fermée que personne n'écrit est une case en attente d'être
-// créée de travers ». Le coût de l'ajout est chiffré : une valeur ici, une dans le `check` de
+// LES GESTES TRACÉS, liste fermée à DEUX membres depuis le module 6. Elle n'en portait qu'un au
+// module 5, et c'était voulu : `anonymisation` y aurait été ce que le dossier refuse depuis le motif
+// de libération de quarantaine — « un membre de liste fermée que personne n'écrit est une case en
+// attente d'être créée de travers ». Le second membre entre ici le jour où quelque chose l'écrit, et
+// il coûte exactement ce qui avait été chiffré : une valeur ici, une dans le `check` de
 // `ledger_audit`, un test.
-const AUDIT_GESTES = Object.freeze(['contrepassation']);
+const AUDIT_GESTES = Object.freeze(['contrepassation', 'anonymisation']);
 
 // LES BORNES DE LA RAISON ÉCRITE, et elles sont recopiées dans `api/schema.sql` — une garde
 // textuelle compare les deux, comme pour la grammaire des comptes. Le minimum n'est pas
@@ -690,6 +691,127 @@ function planCorrection(transferts, options) {
     montantCents: transferts.reduce((s, t) => s + t.montantCents, 0),
     billet: ref,
     contrepassation: Object.freeze(contrepassation),
+  });
+}
+
+// ---------- Un compte ne s'efface pas, il s'anonymise ----------
+//
+// `schema.sql` portait depuis la phase 01 deux cascades que personne n'avait regardées : `matches`
+// sur `users`, `match_traces` sur `matches`. Or ce fichier-ci nomme ses comptes avec `users.id` et
+// `matches.id`, et le grand livre est en INSERTION SEULE : effacer un joueur détruisait ses billets
+// et ses traces — les pièces justificatives de mouvements d'argent qui, eux, restent — et laissait
+// `joueur:<id>` et `enjeu:<match_id>` désigner des lignes mortes. Les deux cascades sont devenues
+// `restrict`, et la suppression d'un compte est remplacée par sa RÉÉCRITURE.
+//
+// ET C'EST BIEN UNE RÉÉCRITURE SOUS CONTRAINTES, PAS UNE SUPPRESSION DE COLONNES. `users` porte
+// `auth_id not null unique`, `email not null`, `name not null`, `name_key not null unique`, plus
+// deux `check` de longueur : AUCUN de ces champs ne peut « partir ». On écrit donc à la place des
+// valeurs qui ne désignent plus personne et qui satisfont quand même toutes les contraintes.
+//
+// LES BORNES DES DEUX COLONNES SONT ICI, et elles sont recopiées dans `api/schema.sql` — une garde
+// textuelle compare les deux, exactement comme pour la raison de l'audit et la grammaire des
+// comptes. C'est le seul endroit où la contrainte de quatorze caractères et le nom fabriqué se
+// lisent ensemble : un nom calculé en SQL aurait mis les deux à deux endroits.
+const USERS_NOM_MIN = 2;
+const USERS_NOM_MAX = 14;
+const USERS_CLE_MIN = 1;
+const USERS_CLE_MAX = 14;
+
+// LE NOM D'UN COMPTE ANONYMISÉ : `x` suivi de l'identifiant en base 36. Le choix tient en une
+// ligne d'arithmétique — un `bigserial` va jusqu'à 9 223 372 036 854 775 807, soit treize chiffres
+// en base 36 — donc quatorze caractères au plus, ce qui est exactement la borne de la colonne. En
+// base 10 il en aurait fallu vingt, et la contrainte aurait refusé l'anonymisation du dix-neuf
+// millionième compte sans que personne ne l'ait jamais essayé.
+//
+// L'IDENTIFIANT EST CONVERTI EN `BigInt` ET JAMAIS EN `Number` : au-delà de 2^53 un `Number` arrondit
+// en silence, et deux comptes voisins recevraient le même nom — donc la même `name_key`, donc une
+// collision que rien n'explique. Le pilote Postgres rend les `bigint` en CHAÎNE précisément pour
+// cela ; on ne défait pas sa précaution.
+function nomAnonyme(id) {
+  return 'x' + BigInt(identifiant(id, 'users.id')).toString(36);
+}
+function authIdAnonyme(id) { return `anonyme:${identifiant(id, 'users.id')}`; }
+// `.invalid` est un domaine de premier niveau RÉSERVÉ : il n'est routable nulle part, jamais, par
+// construction. Une adresse en `example.com` aurait pu appartenir à quelqu'un.
+function emailAnonyme(id) { return `anonyme+${identifiant(id, 'users.id')}@invalid`; }
+
+// LE PLAN D'UNE ANONYMISATION, jumeau exact de `planCorrection` : il ne touche rien, il rend ce
+// qu'il faudrait écrire ou un REFUS NOMMÉ. `nameKey` lui est INJECTÉE, parce que ce fichier ne
+// `require` rien — c'est l'une de ses deux gardes de pureté — et parce que la clé d'un pseudo est
+// une règle du JEU, qui vit dans `WBCore` et nulle part ailleurs. Le pilote la lui passe.
+function planAnonymisation(ligne, options) {
+  const { par, raison, nameKey } = options || {};
+  const refus = (code, message) => Object.freeze({ ok: false, code, message });
+
+  if (!ligne || ligne.id === undefined || ligne.id === null) {
+    return refus('compte_inconnu', 'aucun compte ne porte cet identifiant : il n\'y a rien à anonymiser');
+  }
+  let id;
+  try { id = identifiant(ligne.id, 'users.id'); }
+  catch (e) { return refus('compte_inconnu', (e && e.message) || String(e)); }
+
+  const nom = typeof par === 'string' ? par.trim() : '';
+  if (nom.length === 0) return refus('operateur_vide', 'une anonymisation se signe : --par « qui »');
+  if (nom.length > AUDIT_OPERATEUR_MAX) {
+    return refus('operateur_trop_long', `le nom de l'opérateur dépasse ${AUDIT_OPERATEUR_MAX} caractères`);
+  }
+  // LA MÊME EXIGENCE QUE POUR UNE CONTRE-PASSATION, ET POUR LA MÊME RAISON. Effacer l'identité d'un
+  // joueur sans dire pourquoi est indistinguable d'une erreur de manipulation, et c'est un geste qui
+  // ne se défait pas : l'`auth_id` d'origine n'est écrit nulle part ailleurs.
+  const pourquoi = typeof raison === 'string' ? raison.trim() : '';
+  if (pourquoi.length < AUDIT_RAISON_MIN) {
+    return refus('raison_vide',
+      'une anonymisation sans raison écrite est indistinguable d\'une erreur de manipulation : --raison « pourquoi »');
+  }
+  if (pourquoi.length > AUDIT_RAISON_MAX) {
+    return refus('raison_trop_longue', `la raison dépasse ${AUDIT_RAISON_MAX} caractères`);
+  }
+
+  const authId = authIdAnonyme(id);
+  // REJOUER LE GESTE NE RÉÉCRIT RIEN, ET L'OUTIL LE DIT. Même doctrine que la clé d'idempotence de la
+  // contre-passation : un opérateur qui relance sa commande parce que sa connexion a lâché doit lire
+  // « c'était déjà fait ». Réécrire n'aurait pourtant rien cassé — les valeurs sont les mêmes — mais
+  // cela aurait posé une SECONDE ligne d'audit, donc raconté deux gestes là où il n'y en a eu qu'un.
+  if (ligne.auth_id === authId) {
+    return refus('deja_anonymise', `le compte ${id} porte déjà l'identité anonyme ${authId}`);
+  }
+
+  const nouveauNom = nomAnonyme(id);
+  if (nouveauNom.length < USERS_NOM_MIN || nouveauNom.length > USERS_NOM_MAX) {
+    return refus('nom_hors_bornes',
+      `le nom anonyme « ${nouveauNom} » fait ${nouveauNom.length} caractères, hors de [${USERS_NOM_MIN}, ${USERS_NOM_MAX}]`);
+  }
+  if (typeof nameKey !== 'function') {
+    return refus('cle_indisponible', 'la dérivation du pseudo (WBCore.nameKey) n\'a pas été fournie');
+  }
+  // LA CLÉ SE DÉRIVE DU NOM, JAMAIS ÉCRITE À CÔTÉ. Deux écritures de « quelle est la clé de ce
+  // pseudo » finiraient par différer, et celle qui différerait porterait l'index unique.
+  const cle = nameKey(nouveauNom);
+  if (typeof cle !== 'string' || cle.length < USERS_CLE_MIN || cle.length > USERS_CLE_MAX) {
+    return refus('cle_hors_bornes',
+      `la clé du nom anonyme est « ${String(cle)} », hors de [${USERS_CLE_MIN}, ${USERS_CLE_MAX}]`);
+  }
+
+  return Object.freeze({
+    ok: true,
+    geste: 'anonymisation',
+    par: nom,
+    raison: pourquoi,
+    userId: id,
+    // CE QUI DISPARAÎT, relevé pour que l'outil le montre AVANT d'écrire. Il n'est pas consigné dans
+    // `ledger_audit` : une trace qui garderait l'ancien email n'anonymiserait rien du tout.
+    avant: Object.freeze({
+      authId: ligne.auth_id, email: ligne.email, name: ligne.name,
+      nameKey: ligne.name_key, avatar: ligne.avatar, country: ligne.country,
+    }),
+    apres: Object.freeze({
+      authId, email: emailAnonyme(id), name: nouveauNom, nameKey: cle, avatar: '', country: null,
+    }),
+    // LES CINQ COLONNES D'ARGENT SONT NULLES, ET LA CONTRAINTE
+    // `ledger_audit_anonymisation_complete` l'exige : une anonymisation ne bouge pas un centime, et
+    // une ligne qui porterait les deux moitiés se lirait comme une correction du livre.
+    motifOrigine: null, referenceOrigine: null, referencePosee: null,
+    jambes: null, montantCents: null,
   });
 }
 
@@ -854,4 +976,6 @@ module.exports = {
   COMPTES_EXPOSITION, MOTIFS_EXPOSITION,
   expositionBilletMaxCents, referenceBillet, REFERENCE_BILLET_SQL, expositionDe, plafondVerdict,
   AUDIT_GESTES, AUDIT_RAISON_MIN, AUDIT_RAISON_MAX, AUDIT_OPERATEUR_MAX, planCorrection,
+  USERS_NOM_MIN, USERS_NOM_MAX, USERS_CLE_MIN, USERS_CLE_MAX,
+  nomAnonyme, authIdAnonyme, emailAnonyme, planAnonymisation,
 };
