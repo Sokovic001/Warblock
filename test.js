@@ -506,7 +506,19 @@ test('a message is trimmed, collapsed and capped so it cannot break the layout',
 test('anything that is not usable text comes back empty', () => {
   for (const v of [null, undefined, 42, {}, [], '', '   ', '\n\t ']) assert.strictEqual(C.sanitizeChat(v), '');
 });
-test('control characters are stripped, so no message can inject markup breaks', () => {
+test('sanitizeChat is NOT an HTML sanitizer, and the renderer must not assume it is', () => {
+  // This test pins a contract rather than a behaviour, so read it before changing the renderer.
+  // sanitizeChat exists for layout: it trims, collapses and caps. Markup goes straight through,
+  // on purpose — a player who types <3 sees <3. That is only safe because addBubble puts the
+  // text in a text node. The old renderer interpolated this value into innerHTML, which made
+  // <img src=x onerror=...> run, and renderChatHistory replayed it on every chat open.
+  // Escaping here instead would double-render against textContent: <3 would show as &lt;3.
+  // If a chat message ever reaches innerHTML again, escape it AT THAT SINK, not here.
+  const payload = '<img src=x onerror="alert(1)">';
+  assert.strictEqual(C.sanitizeChat(payload), payload, 'markup passes through unchanged');
+  assert.strictEqual(C.sanitizeChat('<3 gg'), '<3 gg', 'and that is what lets <3 survive');
+});
+test('control characters are stripped', () => {
   const out = C.sanitizeChat('ok\u0000\u001f\u007fdone');
   assert.ok(!/[\u0000-\u001f\u007f]/.test(out), out);
 });

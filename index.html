@@ -3320,7 +3320,16 @@ function say(who, text, cls){
 function addBubble(who,msg,cls){
   const box=$('chatLog'); if(!box) return;
   const d=document.createElement('div'); if(cls) d.className=cls;
-  d.innerHTML = who ? `<b>${who}</b> ${msg}` : msg;
+  // Meme forme que feed() : le texte du joueur entre par un noeud de texte, jamais par
+  // innerHTML. Les deux champs sont sous controle du joueur — le pseudo autant que le message,
+  // et sanitizeChat ne retire que les caracteres de controle. Avec innerHTML, un message
+  // contenant <img src=x onerror=...> s'executait, et renderChatHistory le rejouait a chaque
+  // ouverture de la fenetre. textContent le rend litteralement, chevrons compris : un joueur
+  // peut ecrire <3 et le voir tel quel.
+  if(who){
+    const b=document.createElement('b'); b.textContent=who; d.appendChild(b);
+    d.appendChild(document.createTextNode(' '+msg));
+  } else d.textContent=msg;
   box.appendChild(d);
   if(chatPinned){ box.scrollTop=box.scrollHeight; return; }         // window open: keep every line
   while(box.children.length>C.CHAT.maxLines) box.removeChild(box.firstElementChild);
