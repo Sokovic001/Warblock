@@ -990,7 +990,15 @@
   </div>
 </div></section>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- integrity : le navigateur refuse d'executer ce fichier si un seul octet a change. L'URL est
+     versionnee et immuable chez cdnjs, donc le hash ne bouge qu'en changeant de version de
+     Three.js — auquel cas il faut le recalculer :
+       curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+     crossorigin est obligatoire : sans lui le navigateur ne peut pas lire la reponse pour la
+     verifier, et bloque le script. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+        integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
 <!-- CORE: pure rules, no DOM / THREE. Extracted and tested by test.js -->
 <script>
@@ -6185,7 +6193,16 @@ function say(who, text, cls){
 function addBubble(who,msg,cls){
   const box=$('chatLog'); if(!box) return;
   const d=document.createElement('div'); if(cls) d.className=cls;
-  d.innerHTML = who ? `<b>${who}</b> ${msg}` : msg;
+  // Meme forme que feed() : le texte du joueur entre par un noeud de texte, jamais par innerHTML.
+  // Les DEUX champs sont sous controle du joueur — le pseudo autant que le message — et
+  // `sanitizeChat` ne retire que les caracteres de controle. Avec innerHTML, un message portant
+  // <img src=x onerror=...> s'executait, et `renderChatHistory` le rejouait a chaque ouverture de
+  // la fenetre. Un noeud de texte le rend litteralement, chevrons compris : un joueur peut ecrire
+  // <3 et le voir tel quel.
+  if(who){
+    const b=document.createElement('b'); b.textContent=who; d.appendChild(b);
+    d.appendChild(document.createTextNode(' '+msg));
+  } else d.textContent=msg;
   box.appendChild(d);
   if(chatPinned){ box.scrollTop=box.scrollHeight; return; }         // window open: keep every line
   while(box.children.length>C.CHAT.maxLines) box.removeChild(box.firstElementChild);

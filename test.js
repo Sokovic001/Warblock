@@ -51,6 +51,51 @@ test('chaque bloc <script> du fichier est du JavaScript valide', () => {
     assert.ok(/^https?:\/\//.test(m2[1]), `un script local est chargé à côté du fichier : ${m2[1]}`);
 });
 
+test('tout script distant est vérifié avant d\'être exécuté', () => {
+  // VENU DE LA PR #2 DE BEN, ET LE CONSTAT ÉTAIT JUSTE : la balise chargeait tout le moteur de
+  // rendu depuis un CDN sans contrôle d'intégrité, sur une page destinée à manipuler des mises. Le
+  // navigateur exécutait ce qu'on lui servait, quel qu'il soit.
+  //
+  // La garde porte sur TOUT script distant, pas sur celui de Three.js : c'est la règle qu'on veut
+  // tenir, et un second CDN ajouté un jour sans empreinte doit faire tomber ce test. `crossorigin`
+  // est exigé avec, faute de quoi le navigateur ne peut pas lire la réponse pour la vérifier et
+  // bloque le script — une balise avec `integrity` seul est pire que rien, elle casse la page.
+  const balises = [...html.matchAll(/<script\b[^>]*\bsrc="(https?:[^"]*)"[^>]*>/g)];
+  assert.ok(balises.length >= 1, 'plus aucun script distant : la garde ne vérifie plus rien');
+  for (const [balise, url] of balises) {
+    assert.match(balise, /\bintegrity="sha(256|384|512)-[A-Za-z0-9+/=]+"/,
+      `script distant sans empreinte d'intégrité : ${url}`);
+    assert.match(balise, /\bcrossorigin=/,
+      `integrity sans crossorigin sur ${url} : le navigateur bloquerait le script`);
+    // L'empreinte n'a de sens que sur une URL FIGÉE. `.../three.js/latest/` ou une branche
+    // changeraient de contenu sous une empreinte qui ne bougerait pas, et la page cesserait de
+    // charger un jour sans que personne n'ait rien touché.
+    assert.ok(!/\b(latest|master|main)\b/.test(url), `URL non figée sous une empreinte : ${url}`);
+  }
+});
+
+test('le chat n\'exécute pas ce que le joueur écrit', () => {
+  // VENU DE LA PR #2 DE BEN. `addBubble` interpolait DEUX champs sous contrôle du joueur — le
+  // pseudo autant que le message — dans `innerHTML`, alors que `sanitizeChat` ne retire que les
+  // caractères de contrôle. `<img src=x onerror=...>` s'exécutait, et `renderChatHistory` le
+  // rejouait à chaque ouverture de la fenêtre. Le défaut a traversé quatre phases de relecture :
+  // il vit dans le bloc `Game`, que ni `WBCore` ni `WBSim` ne couvrent.
+  const brut = html.slice(html.indexOf('function addBubble('), html.indexOf('function renderChatHistory('));
+  assert.ok(brut.length > 100 && brut.length < 2500, 'addBubble n\'a pas été retrouvée');
+  // Les commentaires sont retirés AVANT de chercher `innerHTML` : celui qui explique la correction
+  // porte le mot, et une garde qui se déclenche sur sa propre explication serait intenable.
+  const bulle = brut.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n');
+  assert.ok(!/innerHTML/.test(bulle),
+    'addBubble est repassée par innerHTML : le chat exécute ce que le joueur écrit');
+  assert.ok(/createTextNode|textContent/.test(bulle),
+    'addBubble n\'écrit plus le texte du joueur par un nœud de texte');
+  // ET `sanitizeChat` N'ÉCHAPPE DÉLIBÉRÉMENT PAS LE HTML : contre un nœud de texte cela
+  // double-rendrait, et « <3 » s'afficherait « &lt;3 ». Le contrat est épinglé ici pour que la
+  // prochaine lecture sache où échapper si un message repassait un jour par `innerHTML`.
+  assert.strictEqual(C.sanitizeChat('<3 gg'), '<3 gg');
+  assert.strictEqual(C.sanitizeChat('<img src=x onerror=alert(1)>'), '<img src=x onerror=alert(1)>');
+});
+
 console.log('Economy');
 test('four tables: $0.50 / $1 / $5 / $10', () => assert.deepStrictEqual(C.TIERS.map(t=>t.stake), [0.5,1,5,10]));
 test('the house keeps 20% of every payout', () => { assert.strictEqual(C.RAKE, 0.20); for (const t of C.TIERS){ const p = C.payout(t.stake, C.PLAYERS, C.RAKE); assert.strictEqual(p.pot, t.stake*20); assert.strictEqual(p.rake, C.cents(p.pot*0.2)); assert.strictEqual(p.winner, p.pot - p.rake); } });
